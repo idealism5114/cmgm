@@ -30,20 +30,26 @@ from ..training.train import make_loss
 # =============================================================================
 
 class GCNOnlySpatial(nn.Module):
-    """Two-layer GCN with configurable input dim."""
+    """Two-layer GCN with configurable input dim + LayerNorm for stability."""
 
     def __init__(self, in_dim: int = 1):
         super().__init__()
-        self.conv1 = GCNConv(in_dim, GCN_HIDDEN_DIM)
+        self.input_proj = nn.Linear(in_dim, GCN_HIDDEN_DIM)
+        self.input_norm = nn.LayerNorm(GCN_HIDDEN_DIM)
+        self.conv1 = GCNConv(GCN_HIDDEN_DIM, GCN_HIDDEN_DIM)
+        self.norm1 = nn.LayerNorm(GCN_HIDDEN_DIM)
         self.conv2 = GCNConv(GCN_HIDDEN_DIM, GCN_OUTPUT_DIM)
+        self.norm2 = nn.LayerNorm(GCN_OUTPUT_DIM)
         self.dropout = nn.Dropout(GCN_DROPOUT)
 
     def forward(self, x, edge_index, edge_weight):
+        x = F.relu(self.input_norm(self.input_proj(x)))
+        x = self.dropout(x)
         x = self.conv1(x, edge_index, edge_weight)
-        x = F.relu(x)
+        x = F.relu(self.norm1(x))
         x = self.dropout(x)
         x = self.conv2(x, edge_index, edge_weight)
-        x = F.relu(x)
+        x = F.relu(self.norm2(x))
         x = self.dropout(x)
         return x
 
@@ -103,23 +109,28 @@ class GCNOnlyModel(nn.Module):
 # =============================================================================
 
 class GCNGATSpatial(nn.Module):
-    """Hybrid spatial module: GCNConv → GATConv. Configurable input dim."""
+    """Hybrid spatial module: InputProj → GCNConv → GATConv, with LayerNorm."""
 
     def __init__(self, in_dim: int = 1):
         super().__init__()
-        self.gcn = GCNConv(in_dim, GCN_HIDDEN_DIM)
+        self.input_proj = nn.Linear(in_dim, GCN_HIDDEN_DIM)
+        self.input_norm = nn.LayerNorm(GCN_HIDDEN_DIM)
+        self.gcn = GCNConv(GCN_HIDDEN_DIM, GCN_HIDDEN_DIM)
+        self.norm1 = nn.LayerNorm(GCN_HIDDEN_DIM)
         self.gat = GATConv(GCN_HIDDEN_DIM, GCN_OUTPUT_DIM, heads=1)
+        self.norm2 = nn.LayerNorm(GCN_OUTPUT_DIM)
         self.dropout = nn.Dropout(GCN_DROPOUT)
 
     def forward(self, x, edge_index, edge_weight):
+        x = F.relu(self.input_norm(self.input_proj(x)))
+        x = self.dropout(x)
         # GCN layer
         x = self.gcn(x, edge_index, edge_weight)
-        x = F.relu(x)
+        x = F.relu(self.norm1(x))
         x = self.dropout(x)
-
         # GAT layer (edge_weight not used by GAT in the same way)
         x = self.gat(x, edge_index)
-        x = F.relu(x)
+        x = F.relu(self.norm2(x))
         x = self.dropout(x)
         return x
 

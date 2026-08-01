@@ -76,12 +76,13 @@ class MeanConcatGCNLayer(nn.Module):
     For each node v:
       1. h_neighbors = mean(h_u for u in N(v))        # Mean aggregation
       2. h_combined = [h_v || h_neighbors]             # Concat combination
-      3. h_v' = ReLU(W * h_combined)                   # Linear transform
+      3. h_v' = ReLU(LayerNorm(W * h_combined))        # Linear + LayerNorm + ReLU
     """
 
     def __init__(self, in_dim: int, out_dim: int, dropout: float = GCN_DROPOUT):
         super().__init__()
         self.lin = nn.Linear(in_dim * 2, out_dim)
+        self.norm = nn.LayerNorm(out_dim)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
@@ -94,8 +95,9 @@ class MeanConcatGCNLayer(nn.Module):
         # Concat combination: [node_features || mean_neighbor_features]
         combined = torch.cat([x, aggr], dim=-1)
 
-        # Linear + ReLU + Dropout
+        # Linear + LayerNorm + ReLU + Dropout
         out = self.lin(combined)
+        out = self.norm(out)
         out = F.relu(out)
         out = self.dropout(out)
         return out

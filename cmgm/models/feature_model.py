@@ -35,12 +35,14 @@ class _MeanConcatGCNLayer(nn.Module):
     def __init__(self, in_dim: int, out_dim: int, dropout: float = GCN_DROPOUT):
         super().__init__()
         self.lin = nn.Linear(in_dim * 2, out_dim)
+        self.norm = nn.LayerNorm(out_dim)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
         src_idx, dst_idx = edge_index[0], edge_index[1]
         neigh = scatter(x[src_idx], dst_idx, dim=0, dim_size=x.size(0), reduce='mean')
         out = self.lin(torch.cat([x, neigh], dim=-1))
+        out = self.norm(out)
         return self.dropout(F.relu(out))
 
 

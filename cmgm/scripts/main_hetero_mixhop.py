@@ -241,8 +241,20 @@ def run_comparison(args):
         )
         return mn, compute_metrics(po, to)
 
-    # 1/8: PCA+Ridge (7-dim, sklearn handles any dim)
-    print("\n1/8: PCA+Ridge"); fresh_seed(); t0 = time.time()
+    # 0/9: Zero baseline — always predict 0 (unconditional mean of returns ≈ 0)
+    print("\n0/9: Zero (predict 0)"); fresh_seed(); t0 = time.time()
+    X_te, y_te = prepare_sklearn_data(fl['test'])
+    zero_preds = np.zeros_like(y_te)
+    mn = compute_metrics(zero_preds, y_te)
+    po, to = inverse_transform_predictions(
+        zero_preds, y_te, data['norm_stats'], data['raw_prices_test'],
+        data['market_indices'], target_type=TARGET_TYPE,
+    )
+    mo = compute_metrics(po, to)
+    results.append(('Zero (always 0)', time.time() - t0, mn, mo))
+
+    # 1/9: PCA+Ridge (7-dim, sklearn handles any dim)
+    print("\n1/9: PCA+Ridge"); fresh_seed(); t0 = time.time()
     m = train_linear_regression(fl['train'], fl['val'], data['n_commodities'])['model']
     X_te, y_te = prepare_sklearn_data(fl['test'])
     mn = compute_metrics(m.predict(X_te), y_te)
@@ -253,8 +265,8 @@ def run_comparison(args):
     mo = compute_metrics(po, to)
     results.append(('PCA+Ridge', time.time() - t0, mn, mo))
 
-    # 2/8: PCA+SVR (7-dim)
-    print("2/8: PCA+SVR"); fresh_seed(); t0 = time.time()
+    # 2/9: PCA+SVR (7-dim)
+    print("\n2/9: PCA+SVR"); fresh_seed(); t0 = time.time()
     m = train_svr(fl['train'], fl['val'], data['n_commodities'])['model']
     X_te, y_te = prepare_sklearn_data(fl['test'])
     mn = compute_metrics(m.predict(X_te), y_te)
@@ -265,48 +277,48 @@ def run_comparison(args):
     mo = compute_metrics(po, to)
     results.append(('PCA+SVR', time.time() - t0, mn, mo))
 
-    # 3/8: LSTM (7-dim)
-    print("3/8: LSTM"); fresh_seed(); t0 = time.time()
+    # 3/9: LSTM (7-dim)
+    print("\n3/9: LSTM"); fresh_seed(); t0 = time.time()
     m = train_lstm(fl['train'], fl['val'], data['n_nodes'],
                     data['n_commodities'], device, feat_dim=FEATURE_DIM,
                     num_epochs=args.epochs)['model']
     mn, mo = eval_torch_7d(m, fl['test'], has_graph=False)
     results.append(('LSTM', time.time() - t0, mn, mo))
 
-    # 4/8: BiLSTM (7-dim)
-    print("4/8: BiLSTM"); fresh_seed(); t0 = time.time()
+    # 4/9: BiLSTM (7-dim)
+    print("\n4/9: BiLSTM"); fresh_seed(); t0 = time.time()
     m = train_bilstm(fl['train'], fl['val'], data['n_nodes'],
                       data['n_commodities'], device, feat_dim=FEATURE_DIM,
                       num_epochs=args.epochs)['model']
     mn, mo = eval_torch_7d(m, fl['test'], has_graph=False)
     results.append(('BiLSTM', time.time() - t0, mn, mo))
 
-    # 5/8: GCN-Only (7-dim)
-    print("5/8: GCN-Only"); fresh_seed(); t0 = time.time()
+    # 5/9: GCN-Only (7-dim)
+    print("\n5/9: GCN-Only"); fresh_seed(); t0 = time.time()
     m = train_gcn_only(fl['train'], fl['val'], ei, ew,
                         data['n_nodes'], data['n_commodities'], device,
                         in_dim=FEATURE_DIM, num_epochs=args.epochs)['model']
     mn, mo = eval_torch_7d(m, fl['test'])
     results.append(('GCN-Only', time.time() - t0, mn, mo))
 
-    # 6/8: GCN+GAT (7-dim)
-    print("6/8: GCN+GAT"); fresh_seed(); t0 = time.time()
+    # 6/9: GCN+GAT (7-dim)
+    print("\n6/9: GCN+GAT"); fresh_seed(); t0 = time.time()
     m = train_gcn_gat(fl['train'], fl['val'], ei, ew,
                        data['n_nodes'], data['n_commodities'], device,
                        in_dim=FEATURE_DIM, num_epochs=args.epochs)['model']
     mn, mo = eval_torch_7d(m, fl['test'])
     results.append(('GCN+GAT', time.time() - t0, mn, mo))
 
-    # 7/8: CMGM_Feature (7-dim, GCN+LSTM both use all features)
-    print("7/8: CMGM-Feat"); fresh_seed(); t0 = time.time()
+    # 7/9: CMGM_Feature (7-dim, GCN+LSTM both use all features)
+    print("\n7/9: CMGM-Feat"); fresh_seed(); t0 = time.time()
     m = CMGM_Feature(data['n_nodes'], data['n_commodities'], feat_dim=FEATURE_DIM).to(device)
     train(m, fl['train'], fl['val'], ei, ew, device,
           num_epochs=args.epochs, patience=args.patience)
     mn, mo = eval_torch_7d(m, fl['test'])
     results.append(('CMGM-Feat', time.time() - t0, mn, mo))
 
-    # 8/8: HeteroMixHop (7-dim, learnable graph)
-    print("8/8: HeteroMixHop"); fresh_seed(); t0 = time.time()
+    # 8/9: HeteroMixHop (7-dim, learnable graph)
+    print("\n8/9: HeteroMixHop"); fresh_seed(); t0 = time.time()
     d = torch.empty(2, 0, dtype=torch.long), torch.zeros(0)
     m = HeteroMixHopCMGM(data['n_nodes'], data['n_commodities'],
                           n_stock=n_stock, n_bond=n_bond).to(device)
