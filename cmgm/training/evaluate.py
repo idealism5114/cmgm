@@ -175,6 +175,18 @@ def compute_metrics(
     ])
     skewness = np.mean(skewness_per_asset)
 
+    # Directional Accuracy (Hit Ratio)
+    # Fraction of predictions where sign(pred) == sign(target).
+    # Zero targets are excluded (can't determine correct direction).
+    valid = np.abs(targets) > 1e-8  # (N, N_commodities)
+    n_valid = valid.sum()
+    if n_valid > 0:
+        hit_ratio = np.mean(
+            (np.sign(preds[valid]) == np.sign(targets[valid])).astype(np.float64)
+        )
+    else:
+        hit_ratio = float('nan')
+
     return {
         'MAE': mae,
         'MSE': mse,
@@ -182,6 +194,7 @@ def compute_metrics(
         'Residual_Mean': residual_mean,
         'Residual_Std': residual_std,
         'Skewness': skewness,
+        'Hit_Ratio': hit_ratio,
     }
 
 

@@ -328,17 +328,19 @@ def run_comparison(args):
     results.append(('HeteroMix', time.time() - t0, mn, mo))
 
     # ── Table ──
-    print("\n" + "=" * 100)
+    print("\n" + "=" * 115)
     print("COMPARISON — Return Space")
-    print("=" * 100)
-    print(f"{'Model':<16s} {'Time':>8s} {'MAE':>10s} {'MSE':>10s} {'RMSE':>10s} "
-          f"{'ResMean':>10s} {'ResStd':>10s} {'Skew':>10s}")
-    print("-" * 100)
+    print("=" * 115)
+    print(f"{'Model':<16s} {'Time':>7s} {'MAE':>9s} {'RMSE':>9s} "
+          f"{'ResMean':>9s} {'ResStd':>9s} {'Hit%':>7s}")
+    print("-" * 115)
     for name, t, mn, mo in results:
-        print(f"{name:<16s} {t:>7.1f}s {mn['MAE']:>10.6f} {mn['MSE']:>10.6f} "
-              f"{mn['RMSE']:>10.6f} {mn['Residual_Mean']:>10.6f} "
-              f"{mn['Residual_Std']:>10.6f} {mn['Skewness']:>10.6f}")
-    print("=" * 100)
+        hit = mn.get('Hit_Ratio', float('nan'))
+        hit_str = f"{hit*100:>6.1f}" if not np.isnan(hit) else "    nan"
+        print(f"{name:<16s} {t:>6.1f}s {mn['MAE']:>9.6f} {mn['RMSE']:>9.6f} "
+              f"{mn['Residual_Mean']:>9.6f} {mn['Residual_Std']:>9.6f} "
+              f"{hit_str}")
+    print("=" * 115)
 
     print("\n" + "=" * 100)
     print("COMPARISON — Original Price Space")
