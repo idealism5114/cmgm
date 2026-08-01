@@ -17,7 +17,7 @@ import torch.nn.functional as F
 from cmgm.config import (
     GCN_DROPOUT,
     LSTM_HIDDEN_DIM, LSTM_NUM_LAYERS, LSTM_DROPOUT,
-    FC_HIDDEN_DIM, FEATURE_DIM,
+    FC_HIDDEN_DIM, FEATURE_DIM, MULTI_HORIZONS,
 )
 from cmgm.models.model import MixHopPropagation
 from cmgm.graph.adaptive_graph import AdaptiveGraphLearner
@@ -99,6 +99,8 @@ class HeteroMixHopCMGM(nn.Module):
         )
 
         # ── Gated fusion ──
+        self.n_horizons = len(MULTI_HORIZONS)
+        out_dim = self.n_horizons * n_commodities
         self.gate_fc = nn.Linear(LSTM_HIDDEN_DIM * 2, LSTM_HIDDEN_DIM)
         self.gcn_proj = nn.Linear(LSTM_HIDDEN_DIM, LSTM_HIDDEN_DIM)
         self.lstm_proj = nn.Linear(LSTM_HIDDEN_DIM, LSTM_HIDDEN_DIM)
@@ -106,7 +108,7 @@ class HeteroMixHopCMGM(nn.Module):
             nn.Linear(LSTM_HIDDEN_DIM, FC_HIDDEN_DIM),
             nn.ReLU(),
             nn.Dropout(GCN_DROPOUT),
-            nn.Linear(FC_HIDDEN_DIM, n_commodities),
+            nn.Linear(FC_HIDDEN_DIM, out_dim),
         )
 
     def forward(self, x: torch.Tensor,
@@ -144,18 +146,20 @@ class HeteroMixHopCMGM(nn.Module):
         gcn_p  = self.gcn_proj(gcn_out)
         lstm_p = self.lstm_proj(lstm_out)
         fused = gate * lstm_p + (1 - gate) * gcn_p
-        pred = self.gate_output(fused)
+        pred = self.gate_output(fused)                                    # (B, n_horizons * n_comm)
+        pred = pred.view(B, self.n_horizons, self.n_commodities)          # (B, n_horizons, n_comm)
 
         if debug:
             nz = (A > 0).sum().item()
             gm = gate.mean().item()
-            print(f"  Feat(F=7) → TypeProj → MixHop→({list(gcn_out.shape)}) || "
-                  f"LSTM(N*7={N*FEATURE_DIM})→({list(lstm_out.shape)}) → "
+            print(f"  Feat(F={FEATURE_DIM}) → TypeProj → MixHop→({list(gcn_out.shape)}) || "
+                  f"LSTM(N*F={N*FEATURE_DIM})→({list(lstm_out.shape)}) → "
                   f"Gate(mean={gm:.3f}, A_nz={nz}) → FC → ({list(pred.shape)})")
 
         return pred
 
     def get_gate_stats(self, x, edge_index=None, edge_weight=None):
+        """Return gating statistics. Works with any FEATURE_DIM."""
         self.eval()
         with torch.no_grad():
             A = self.graph_learner()

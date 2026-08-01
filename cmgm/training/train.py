@@ -89,8 +89,12 @@ def train_epoch(
             pred = model(X_batch, cur_ei, cur_ew, debug=(debug and batch_idx == 0))
         # pred: (B, N_commodities)
 
-        # Compute MSE loss (Section 3.4)
-        loss = criterion(pred, y_batch)
+        # Compute loss — supports multi-horizon (B,H,Nc) or single (B,Nc)
+        if pred.dim() == 3:  # multi-horizon: (B, H, Nc)
+            loss = sum(criterion(pred[:, h, :], y_batch[:, h, :])
+                       for h in range(pred.size(1)))
+        else:
+            loss = criterion(pred, y_batch)
 
         # Backward pass
         loss.backward()
@@ -146,7 +150,11 @@ def validate_epoch(
             pred = model(X_batch, debug=False)
         else:
             pred = model(X_batch, cur_ei, cur_ew, debug=False)
-        loss = criterion(pred, y_batch)
+        if pred.dim() == 3:
+            loss = sum(criterion(pred[:, h, :], y_batch[:, h, :])
+                       for h in range(pred.size(1)))
+        else:
+            loss = criterion(pred, y_batch)
 
         total_loss += loss.item()
         num_batches += 1

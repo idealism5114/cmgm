@@ -49,8 +49,8 @@ GRAPH_TOP_K = 10       # Neighbors per node in learned graph
 SEQ_LEN = 20
 
 # GCN parameters (paper: 3 layers, mean aggregation, concat combination)
-GCN_INPUT_DIM = 7       # Input feature: 7-dim (price, return, MA, volatility, RSI, MACD)
-FEATURE_DIM = 7         # Feature dimension for node inputs
+GCN_INPUT_DIM = 7       # Legacy; overridden per model by FEATURE_DIM
+FEATURE_DIM = 21        # Feature dimension for node inputs (21 = full set)
 GCN_OUTPUT_DIM = 10     # Output dimension per node (paper: 10)
 GCN_NUM_LAYERS = 3      # Graph convolution layers (paper: 3)
 
@@ -99,8 +99,12 @@ RANDOM_SEED = 42
 # Target type: 'price' (original normalized-price) or 'return' (daily return)
 TARGET_TYPE = "return"
 
-# Target horizon: number of steps ahead to predict (1 = next-day return)
-TARGET_HORIZON = 1
+# Target horizon: number of steps ahead to predict (primary, for reporting)
+TARGET_HORIZON = 5
+
+# Multi-horizon prediction: all horizons the model predicts simultaneously
+# Loss = sum of HuberLoss per horizon.  Only TARGET_HORIZON is reported.
+MULTI_HORIZONS = [1, 5, 10, 20]
 
 # =============================================================================
 # Normalization Configuration

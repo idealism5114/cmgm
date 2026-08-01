@@ -22,7 +22,7 @@ from cmgm.config import (
     STOCK_FILE, BOND_FILE, COMMODITY_FILE,
     TRAIN_RATIO, VAL_RATIO, TEST_RATIO,
     SEQ_LEN, BATCH_SIZE, RANDOM_SEED, TARGET_MARKET,
-    TARGET_TYPE, TARGET_HORIZON, ZSCORE_EPS,
+    TARGET_TYPE, TARGET_HORIZON, ZSCORE_EPS, MULTI_HORIZONS,
 )
 
 
@@ -287,6 +287,7 @@ class MarketSequenceDataset(Dataset):
         feature_matrix: np.ndarray = None,
         raw_prices: np.ndarray = None,
         target_type: str = "price",
+        horizons: list = None,
     ):
         self.prices = prices
         self.market_indices = market_indices
@@ -294,10 +295,13 @@ class MarketSequenceDataset(Dataset):
         self.feature_matrix = feature_matrix
         self.raw_prices = raw_prices
         self.target_type = target_type
+        self.horizons = horizons if horizons is not None else MULTI_HORIZONS
 
         self.commodity_start, self.commodity_end = market_indices['commodity']
         self.n_commodities = self.commodity_end - self.commodity_start
-        self.n_samples = len(prices) - seq_len
+        # Need enough future prices for the longest horizon
+        max_h = max(self.horizons) if self.horizons else 0
+        self.n_samples = len(prices) - seq_len - max_h + 1
 
     def __len__(self) -> int:
         return self.n_samples
@@ -311,16 +315,20 @@ class MarketSequenceDataset(Dataset):
 
         cs, ce = self.commodity_start, self.commodity_end
 
-        # ── Target: return or z-scored price ──────────────────────────────
+        # ── Target: return(s) ────────────────────────────────────────────
         if self.target_type == "return" and self.raw_prices is not None:
-            # Next-day simple return:  ret = p_{t+1} / p_t - 1
-            p_prev = self.raw_prices[idx + self.seq_len - 1, cs:ce]
-            p_next = self.raw_prices[idx + self.seq_len, cs:ce]
-            y = (p_next / np.maximum(np.abs(p_prev), 1e-8)) - 1.0
-            y = np.clip(y, -0.2, 0.2).astype(np.float32)
+            # Multi-horizon returns: for each horizon h, ret = p_{t+h} / p_t - 1
+            # Base price is the last price in the sequence window (t + seq_len - 1)
+            p_base = self.raw_prices[idx + self.seq_len - 1, cs:ce]        # (N_comm,)
+            y_list = []
+            for h in self.horizons:
+                p_future = self.raw_prices[idx + self.seq_len - 1 + h, cs:ce]
+                ret_h = (p_future / np.maximum(np.abs(p_base), 1e-8)) - 1.0
+                ret_h = np.clip(ret_h, -1.0, 1.0).astype(np.float32)       # multi-day can be wider
+                y_list.append(ret_h)
+            y = np.stack(y_list, axis=0)                                    # (n_horizons, N_comm)
         else:
-            # Original behaviour: z-scored (or previously MinMax-normalized)
-            # price at time t+seq_len
+            # Original behaviour: z-scored price at time t+seq_len
             y = self.prices[idx + self.seq_len, cs:ce]
 
         return torch.FloatTensor(X), torch.FloatTensor(y)

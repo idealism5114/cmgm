@@ -12,9 +12,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from cmgm.config import (
     NUM_EPOCHS, BATCH_SIZE, SEQ_LEN, RANDOM_SEED, PATIENCE,
-    FEATURE_DIM, TARGET_TYPE, FEAT_ZSCORE_EPS,
+    FEATURE_DIM, TARGET_TYPE, TARGET_HORIZON, MULTI_HORIZONS, FEAT_ZSCORE_EPS,
 )
 from cmgm.data.data_loader import set_seed, create_data_loaders, compute_features, MarketSequenceDataset
+from cmgm.data.feature_builder import build_feature_matrix
 from cmgm.graph.graph_builder import build_graph
 from cmgm.models.hetero_mixhop_model import HeteroMixHopCMGM
 from cmgm.training.train import train
@@ -64,7 +65,7 @@ def run_single(args):
     set_seed(args.seed)
     device = torch.device('cuda' if torch.cuda.is_available() and not args.no_cuda else 'cpu')
     print(f"[Config] Device: {device}  |  Epochs: {args.epochs}  |  Batch: {args.batch_size}")
-    print(f"[Config] Feature dim: {FEATURE_DIM}  |  Target: {TARGET_TYPE}  |  Norm: per-asset z-score")
+    print(f"[Config] Feature dim: {FEATURE_DIM}  |  Target: {TARGET_TYPE}  |  Horizons: {MULTI_HORIZONS}  |  Norm: per-asset z-score")
 
     data = create_data_loaders(batch_size=args.batch_size, seq_len=args.seq_len)
     n_stock = data['market_indices']['stock'][1] - data['market_indices']['stock'][0]
@@ -74,7 +75,7 @@ def run_single(args):
     raw_full = np.concatenate([
         data['raw_prices_train'], data['raw_prices_val'], data['raw_prices_test'],
     ], axis=0)
-    feat_raw = compute_features(raw_full)                                 # (T, N, 7) — raw scale
+    feat_raw, _ = build_feature_matrix(raw_full)                          # (T, N, 21) — raw scale
 
     # Per-asset per-channel z-score on features (fit on train only)
     train_sz = data['raw_prices_train'].shape[0]
@@ -112,7 +113,7 @@ def run_single(args):
                               n_stock=n_stock, n_bond=n_bond).to(device)
     print(f"Params: {sum(p.numel() for p in model.parameters()):,}")
     print(f"Types: stock={n_stock}, bond={n_bond}, future={data['n_nodes']-n_stock-n_bond}")
-    print(f"Features: 7-dim (price, return, ma5/20, volatility, rsi_14, macd)")
+    print(f"Features: {FEATURE_DIM}-dim (21 technical indicators from feature_builder)")
 
     dummy = torch.empty(2, 0, dtype=torch.long), torch.zeros(0)
     history = train(model, loaders['train'], loaders['val'],
@@ -165,6 +166,9 @@ def run_comparison(args):
                 all_p.append(pred.cpu().numpy())
                 all_t.append(y_batch.numpy())
         p, t = np.concatenate(all_p), np.concatenate(all_t)
+        # Squeeze single-horizon dim: (B, H, Nc) → (B, Nc) if H==1
+        if p.ndim == 3 and p.shape[1] == 1:
+            p, t = p.squeeze(1), t.squeeze(1)
         mn = compute_metrics(p, t)
         po, to = inverse_transform_predictions(
             p, t, data['norm_stats'], data['raw_prices_test'],
@@ -183,7 +187,7 @@ def run_comparison(args):
     raw_full = np.concatenate([
         data['raw_prices_train'], data['raw_prices_val'], data['raw_prices_test'],
     ], axis=0)
-    feat_raw = compute_features(raw_full)                                 # (T, N, 7) — raw scale
+    feat_raw, _ = build_feature_matrix(raw_full)                          # (T, N, 21) — raw scale
 
     # Per-asset per-channel z-score on features (fit on train only)
     train_sz = data['raw_prices_train'].shape[0]
@@ -209,6 +213,7 @@ def run_comparison(args):
     dss = {k: MarketSequenceDataset(
                n, data['market_indices'], args.seq_len,
                feature_matrix=f, raw_prices=r, target_type=TARGET_TYPE,
+               horizons=[TARGET_HORIZON],
            )
            for k, n, f, r in zip(['train','val','test'],
                                   norm_splits, feat_splits, raw_splits)}
@@ -234,6 +239,9 @@ def run_comparison(args):
                 all_p.append(pred.cpu().numpy())
                 all_t.append(y_batch.numpy())
         p, t = np.concatenate(all_p), np.concatenate(all_t)
+        # Squeeze single-horizon dim: (B, H, Nc) → (B, Nc) if H==1
+        if p.ndim == 3 and p.shape[1] == 1:
+            p, t = p.squeeze(1), t.squeeze(1)
         mn = compute_metrics(p, t)
         po, to = inverse_transform_predictions(
             p, t, data['norm_stats'], data['raw_prices_test'],

@@ -21,7 +21,7 @@ warnings.filterwarnings('ignore', category=RuntimeWarning)
 
 from cmgm.config import (
     CONFIDENCE_LEVEL, NUM_BOOTSTRAP_SAMPLES,
-    TARGET_TYPE, SEQ_LEN,
+    TARGET_TYPE, TARGET_HORIZON, SEQ_LEN, MULTI_HORIZONS,
 )
 
 
@@ -44,9 +44,12 @@ def predict(
         device: torch device
 
     Returns:
-        preds: Predictions (normalized), shape (N_samples, N_commodities)
-        targets: Targets (normalized), shape (N_samples, N_commodities)
+        preds: Predictions, shape (N_samples, N_commodities)
+        targets: Targets, shape (N_samples, N_commodities)
     """
+    # Map primary horizon to index in multi-horizon output
+    h_idx = MULTI_HORIZONS.index(TARGET_HORIZON) if TARGET_TYPE == "return" else None
+
     model.eval()
     all_preds = []
     all_targets = []
@@ -67,8 +70,17 @@ def predict(
         else:
             pred = model(X_batch, cur_ei, cur_ew, debug=False)
 
-        all_preds.append(pred.cpu().numpy())
-        all_targets.append(y_batch.numpy())
+        pred_np = pred.cpu().numpy()
+        y_np    = y_batch.numpy()
+
+        # Extract primary horizon from multi-horizon output
+        if pred_np.ndim == 3:   # (B, H, Nc)
+            pred_np = pred_np[:, h_idx, :]
+        if y_np.ndim == 3:
+            y_np = y_np[:, h_idx, :]
+
+        all_preds.append(pred_np)
+        all_targets.append(y_np)
 
     preds = np.concatenate(all_preds, axis=0)
     targets = np.concatenate(all_targets, axis=0)
