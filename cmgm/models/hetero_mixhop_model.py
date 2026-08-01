@@ -99,7 +99,8 @@ class HeteroMixHopCMGM(nn.Module):
         )
 
         # ── Gated fusion ──
-        self.n_horizons = len(MULTI_HORIZONS)
+        use_multi = (TARGET_TYPE == "return")
+        self.n_horizons = len(MULTI_HORIZONS) if use_multi else 1
         out_dim = self.n_horizons * n_commodities
         self.gate_fc = nn.Linear(LSTM_HIDDEN_DIM * 2, LSTM_HIDDEN_DIM)
         self.gcn_proj = nn.Linear(LSTM_HIDDEN_DIM, LSTM_HIDDEN_DIM)
@@ -148,8 +149,8 @@ class HeteroMixHopCMGM(nn.Module):
         fused = gate * lstm_p + (1 - gate) * gcn_p
         pred = self.gate_output(fused)                                    # (B, n_horizons * n_comm)
         pred = pred.view(B, self.n_horizons, self.n_commodities)          # (B, n_horizons, n_comm)
-        if TARGET_TYPE == "volatility":
-            pred = F.softplus(pred) + 1e-6                                # ensure positive
+        if self.n_horizons == 1:
+            pred = pred.squeeze(1)                                         # (B, n_comm)
 
         if debug:
             nz = (A > 0).sum().item()

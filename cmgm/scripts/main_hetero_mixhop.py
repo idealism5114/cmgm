@@ -100,9 +100,11 @@ def run_single(args):
                    data['raw_prices_val'],
                    data['raw_prices_test']]
 
+    hrz = MULTI_HORIZONS if TARGET_TYPE == "return" else [TARGET_HORIZON]
     dss = {k: MarketSequenceDataset(
                n, data['market_indices'], args.seq_len,
                feature_matrix=f, raw_prices=r, target_type=TARGET_TYPE,
+               horizons=hrz,
            )
            for k, n, f, r in zip(['train','val','test'],
                                   norm_splits, feat_splits, raw_splits)}
@@ -329,43 +331,45 @@ def run_comparison(args):
     mn, mo = eval_torch_7d(m, fl['test'])
     results.append(('CMGM-Feat', time.time() - t0, mn, mo))
 
-    # 8/9: HeteroMixHop (21-dim, multi-horizon — separate loaders)
+    # 8/9: HeteroMixHop (21-dim, multi-horizon for returns, single for vol)
     print("\n8/9: HeteroMixHop"); fresh_seed(); t0 = time.time()
-    dss_multi = {k: MarketSequenceDataset(
-                     n, data['market_indices'], args.seq_len,
-                     feature_matrix=f, raw_prices=r, target_type=TARGET_TYPE,
-                     horizons=MULTI_HORIZONS,
-                 )
-                 for k, n, f, r in zip(['train','val','test'],
-                                        norm_splits, feat_splits, raw_splits)}
-    fl_multi = {k: DataLoader(dss_multi[k], batch_size=args.batch_size, shuffle=False,
-                              drop_last=(k=='train')) for k in ['train','val','test']}
+    use_multi = (TARGET_TYPE == "return")
+    hrz_hetero = MULTI_HORIZONS if use_multi else [TARGET_HORIZON]
+    dss_ht = {k: MarketSequenceDataset(
+                  n, data['market_indices'], args.seq_len,
+                  feature_matrix=f, raw_prices=r, target_type=TARGET_TYPE,
+                  horizons=hrz_hetero,
+              )
+              for k, n, f, r in zip(['train','val','test'],
+                                     norm_splits, feat_splits, raw_splits)}
+    fl_ht = {k: DataLoader(dss_ht[k], batch_size=args.batch_size, shuffle=False,
+                           drop_last=(k=='train')) for k in ['train','val','test']}
     d = torch.empty(2, 0, dtype=torch.long), torch.zeros(0)
     m = HeteroMixHopCMGM(data['n_nodes'], data['n_commodities'],
                           n_stock=n_stock, n_bond=n_bond).to(device)
-    train(m, fl_multi['train'], fl_multi['val'], d[0], d[1], device,
+    train(m, fl_ht['train'], fl_ht['val'], d[0], d[1], device,
           num_epochs=args.epochs, patience=args.patience)
-    # Evaluate — extract primary horizon (5d) from multi-horizon output
-    h_idx = MULTI_HORIZONS.index(TARGET_HORIZON)
-    def eval_hetero(model, loader):
-        model.eval()
-        all_p, all_t = [], []
-        with torch.no_grad():
-            for batch in loader:
-                X_batch, y_batch = batch[0], batch[1]
-                X_batch = X_batch.to(device)
-                pred = model(X_batch)
-                # pred: (B, H, Nc), y_batch: (B, H, Nc) → take primary horizon
-                all_p.append(pred[:, h_idx, :].cpu().numpy())
-                all_t.append(y_batch[:, h_idx, :].cpu().numpy())
-        p, t = np.concatenate(all_p), np.concatenate(all_t)
-        mn = compute_metrics(p, t)
-        po, to = inverse_transform_predictions(
-            p, t, data['norm_stats'], data['raw_prices_test'],
-            data['market_indices'], target_type=TARGET_TYPE,
-        )
-        return mn, compute_metrics(po, to)
-    mn, mo = eval_hetero(m, fl_multi['test'])
+    if use_multi:
+        h_idx = MULTI_HORIZONS.index(TARGET_HORIZON)
+        def eval_hetero(model, loader):
+            model.eval(); all_p, all_t = [], []
+            with torch.no_grad():
+                for batch in loader:
+                    X_batch, y_batch = batch[0], batch[1]
+                    X_batch = X_batch.to(device)
+                    pred = model(X_batch)
+                    all_p.append(pred[:, h_idx, :].cpu().numpy())
+                    all_t.append(y_batch[:, h_idx, :].cpu().numpy())
+            p, t = np.concatenate(all_p), np.concatenate(all_t)
+            mn = compute_metrics(p, t)
+            po, to = inverse_transform_predictions(
+                p, t, data['norm_stats'], data['raw_prices_test'],
+                data['market_indices'], target_type=TARGET_TYPE,
+            )
+            return mn, compute_metrics(po, to)
+        mn, mo = eval_hetero(m, fl_ht['test'])
+    else:
+        mn, mo = eval_torch_7d(m, fl_ht['test'])
     results.append(('HeteroMix', time.time() - t0, mn, mo))
 
     # ── Table ──
