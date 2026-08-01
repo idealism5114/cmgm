@@ -327,6 +327,8 @@ class MarketSequenceDataset(Dataset):
                 ret_h = np.clip(ret_h, -1.0, 1.0).astype(np.float32)       # multi-day can be wider
                 y_list.append(ret_h)
             y = np.stack(y_list, axis=0)                                    # (n_horizons, N_comm)
+            if len(self.horizons) == 1:
+                y = y[0]                                                    # (N_comm,) — single horizon
         else:
             # Original behaviour: z-scored price at time t+seq_len
             y = self.prices[idx + self.seq_len, cs:ce]

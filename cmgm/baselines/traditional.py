@@ -32,6 +32,9 @@ def prepare_sklearn_data(
     for X_batch, y_batch in loader:
         B = X_batch.shape[0]
         X_flat = X_batch.reshape(B, -1).numpy()
+        # Squeeze single-horizon dim: (B, 1, Nc) → (B, Nc)
+        if y_batch.dim() == 3 and y_batch.size(1) == 1:
+            y_batch = y_batch.squeeze(1)
         X_list.append(X_flat)
         y_list.append(y_batch.numpy())
     return np.concatenate(X_list, axis=0), np.concatenate(y_list, axis=0)
