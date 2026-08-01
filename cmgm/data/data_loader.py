@@ -5,7 +5,7 @@ Pipeline (Section 4.1):
   1. Load raw close prices for each market
   2. Align dates across markets (intersection)
   3. Temporal train/val/test split
-  4. MinMaxScaler normalization (fit on train only)
+  4. Per-asset z-score normalization (fit on train only)
   5. Create sliding windows of length SEQ_LEN
 
 Tensor shapes at each step are documented.
@@ -15,14 +15,14 @@ import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import Dataset, DataLoader
-from sklearn.preprocessing import MinMaxScaler
 from pathlib import Path
 from typing import Dict, Tuple, Optional
 
 from cmgm.config import (
     STOCK_FILE, BOND_FILE, COMMODITY_FILE,
     TRAIN_RATIO, VAL_RATIO, TEST_RATIO,
-    SEQ_LEN, BATCH_SIZE, RANDOM_SEED, TARGET_MARKET
+    SEQ_LEN, BATCH_SIZE, RANDOM_SEED, TARGET_MARKET,
+    TARGET_TYPE, TARGET_HORIZON, ZSCORE_EPS,
 )
 
 
@@ -143,19 +143,38 @@ def normalize_data(
     train: np.ndarray,
     val: np.ndarray,
     test: np.ndarray
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, MinMaxScaler]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, np.ndarray]]:
     """
-    MinMaxScaler normalization (Section 4.1).
-    Fit scaler on TRAINING data only, then transform all splits.
-    """
-    scaler = MinMaxScaler(feature_range=(0, 1))
-    train_norm = scaler.fit_transform(train)
-    val_norm = scaler.transform(val)
-    test_norm = scaler.transform(test)
+    Per-asset Z-score normalization.
 
-    print(f"[DataLoader] Normalization: MinMaxScaler fitted on training data only")
-    print(f"[DataLoader] Train range: [{train_norm.min():.4f}, {train_norm.max():.4f}]")
-    return train_norm, val_norm, test_norm, scaler
+    Each asset i is independently normalized:
+      z_i = (p_i - μ_i) / (σ_i + ε)
+
+    μ_i = mean(train[:, i]), σ_i = std(train[:, i])
+    Fit on training data only, then transform all splits.
+
+    This replaces the old global MinMaxScaler(0,1).  Per-asset z-score
+    keeps relative movements comparable across assets with different
+    absolute price levels (e.g., ¥5 stocks vs ¥50,000 futures).
+
+    Returns:
+        norm_stats: dict with 'mean' (N,) and 'std' (N,) arrays
+    """
+    mean = train.mean(axis=0).astype(np.float32)           # (N,)
+    std  = train.std(axis=0).astype(np.float32)            # (N,)
+    std  = np.maximum(std, ZSCORE_EPS)                     # avoid div-by-zero
+
+    train_norm = (train - mean) / std
+    val_norm   = (val   - mean) / std
+    test_norm  = (test  - mean) / std
+
+    norm_stats = {'mean': mean, 'std': std}
+
+    print(f"[DataLoader] Per-asset z-score normalization fitted on training data only")
+    print(f"[DataLoader] mean range: [{mean.min():.4f}, {mean.max():.4f}]")
+    print(f"[DataLoader] std  range: [{std.min():.6f}, {std.max():.4f}]")
+    print(f"[DataLoader] Z-scored train range: [{train_norm.min():.4f}, {train_norm.max():.4f}]")
+    return train_norm, val_norm, test_norm, norm_stats
 
 
 def compute_returns(prices: np.ndarray) -> np.ndarray:
@@ -266,11 +285,15 @@ class MarketSequenceDataset(Dataset):
         market_indices: Dict[str, Tuple[int, int]],
         seq_len: int = SEQ_LEN,
         feature_matrix: np.ndarray = None,
+        raw_prices: np.ndarray = None,
+        target_type: str = "price",
     ):
         self.prices = prices
         self.market_indices = market_indices
         self.seq_len = seq_len
         self.feature_matrix = feature_matrix
+        self.raw_prices = raw_prices
+        self.target_type = target_type
 
         self.commodity_start, self.commodity_end = market_indices['commodity']
         self.n_commodities = self.commodity_end - self.commodity_start
@@ -287,7 +310,19 @@ class MarketSequenceDataset(Dataset):
             X = X[..., np.newaxis]                                 # (SEQ_LEN, N, 1)
 
         cs, ce = self.commodity_start, self.commodity_end
-        y = self.prices[idx + self.seq_len, cs:ce]
+
+        # ── Target: return or z-scored price ──────────────────────────────
+        if self.target_type == "return" and self.raw_prices is not None:
+            # Next-day simple return:  ret = p_{t+1} / p_t - 1
+            p_prev = self.raw_prices[idx + self.seq_len - 1, cs:ce]
+            p_next = self.raw_prices[idx + self.seq_len, cs:ce]
+            y = (p_next / np.maximum(np.abs(p_prev), 1e-8)) - 1.0
+            y = np.clip(y, -0.2, 0.2).astype(np.float32)
+        else:
+            # Original behaviour: z-scored (or previously MinMax-normalized)
+            # price at time t+seq_len
+            y = self.prices[idx + self.seq_len, cs:ce]
+
         return torch.FloatTensor(X), torch.FloatTensor(y)
 
 
@@ -335,9 +370,9 @@ def create_data_loaders(
         raw_prices, train_window=train_window
     )
 
-    # Step 4: Normalization
-    print("\n[Step 4] MinMaxScaler normalization...")
-    train_norm_full, val_norm, test_norm, scaler = normalize_data(
+    # Step 4: Normalization (per-asset z-score)
+    print("\n[Step 4] Per-asset z-score normalization...")
+    train_norm_full, val_norm, test_norm, norm_stats = normalize_data(
         full_raw_train, raw_val, raw_test
     )
     if train_window > 0 and len(train_norm_full) > train_window:
@@ -353,9 +388,18 @@ def create_data_loaders(
 
     # Step 7: Create sliding window datasets
     print("\n[Step 7] Creating sliding window datasets...")
-    train_dataset = MarketSequenceDataset(train_norm, market_indices, seq_len)
-    val_dataset = MarketSequenceDataset(val_norm, market_indices, seq_len)
-    test_dataset = MarketSequenceDataset(test_norm, market_indices, seq_len)
+    train_dataset = MarketSequenceDataset(
+        train_norm, market_indices, seq_len,
+        raw_prices=raw_train_used, target_type=TARGET_TYPE,
+    )
+    val_dataset = MarketSequenceDataset(
+        val_norm, market_indices, seq_len,
+        raw_prices=raw_val, target_type=TARGET_TYPE,
+    )
+    test_dataset = MarketSequenceDataset(
+        test_norm, market_indices, seq_len,
+        raw_prices=raw_test, target_type=TARGET_TYPE,
+    )
 
     train_loader = DataLoader(
         train_dataset, batch_size=batch_size, shuffle=False, drop_last=True
@@ -375,7 +419,7 @@ def create_data_loaders(
         'train_loader': train_loader,
         'val_loader': val_loader,
         'test_loader': test_loader,
-        'scaler': scaler,
+        'norm_stats': norm_stats,
         'market_indices': market_indices,
         'n_nodes': all_prices.shape[1],
         'n_commodities': market_indices['commodity'][1] - market_indices['commodity'][0],

@@ -19,6 +19,7 @@ from ..config import (
     LSTM_DROPOUT, FC_HIDDEN_DIM, GCN_DROPOUT,
     LEARNING_RATE, WEIGHT_DECAY, NUM_EPOCHS, PATIENCE,
 )
+from ..training.train import make_loss
 
 
 class LSTMModel(nn.Module):
@@ -166,7 +167,7 @@ def train_dl_model(
     """
     model = model.to(device)
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
-    criterion = nn.MSELoss()
+    criterion = make_loss()
 
     best_val_loss = float('inf')
     best_state = None

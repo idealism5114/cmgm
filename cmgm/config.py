@@ -12,7 +12,7 @@ from pathlib import Path
 # =============================================================================
 # Section 4: Experimental Setup — Dataset Configuration
 # =============================================================================
-DATA_ROOT = Path("/home/yangxiaotong/projects/myresearch/Commedities/Data")
+DATA_ROOT = Path(__file__).resolve().parent.parent / "Data"
 
 # Market data files
 STOCK_FILE = DATA_ROOT / "hs300_data" / "hs300_close.csv"
@@ -84,10 +84,33 @@ WEIGHT_DECAY = 1e-5
 NUM_EPOCHS = 200
 PATIENCE = 10           # Early stopping patience
 
+# Loss function: 'mse' or 'huber'
+LOSS_TYPE = "huber"
+HUBER_DELTA = 0.02      # Delta for Huber loss (2% daily return → linear above)
+
 # =============================================================================
 # Reproducibility
 # =============================================================================
 RANDOM_SEED = 42
+
+# =============================================================================
+# Target Configuration
+# =============================================================================
+# Target type: 'price' (original normalized-price) or 'return' (daily return)
+TARGET_TYPE = "return"
+
+# Target horizon: number of steps ahead to predict (1 = next-day return)
+TARGET_HORIZON = 1
+
+# =============================================================================
+# Normalization Configuration
+# =============================================================================
+# Epsilon for per-asset z-score to prevent division by near-zero std
+ZSCORE_EPS = 1e-8
+
+# Minimum std for feature z-score (features like price can be very large,
+# so a higher floor prevents explosion when an asset has near-zero variance)
+FEAT_ZSCORE_EPS = 1e-3
 
 # =============================================================================
 # Evaluation: Confidence Interval (Section 4.4)

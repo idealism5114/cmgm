@@ -14,7 +14,6 @@ Paper reference: Ali et al. (2025), AEJ, Section 4.4.
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
-from sklearn.preprocessing import MinMaxScaler
 from scipy.stats import skew as scipy_skew
 from typing import Dict, Tuple, Optional
 import warnings
@@ -22,6 +21,7 @@ warnings.filterwarnings('ignore', category=RuntimeWarning)
 
 from cmgm.config import (
     CONFIDENCE_LEVEL, NUM_BOOTSTRAP_SAMPLES,
+    TARGET_TYPE, SEQ_LEN,
 )
 
 
@@ -77,39 +77,60 @@ def predict(
 
 
 def inverse_transform_predictions(
-    preds_norm: np.ndarray,
-    targets_norm: np.ndarray,
-    scaler: MinMaxScaler,
-    commodity_start: int,
-    commodity_end: int,
+    preds: np.ndarray,                     # (N_samples, N_commodities)
+    targets: np.ndarray,                   # (N_samples, N_commodities)
+    norm_stats: Dict[str, np.ndarray],     # {'mean': (N,), 'std': (N,)}
+    raw_prices_test: np.ndarray,           # (T_test, N_total) — raw prices
+    market_indices: Dict,
+    target_type: str = "price",
+    seq_len: int = SEQ_LEN,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Inverse transform normalized predictions back to original price space.
+    Convert predictions/targets to original price space.
+
+    Two modes:
+      - 'price'  target: z-score inverse → orig = z * σ + μ
+      - 'return' target: implied price = last_known_price × (1 + return)
+
+    For return mode, alignment with MarketSequenceDataset:
+      sample i uses raw_prices[i : i+seq_len] as its window and predicts the
+      return at time i+seq_len.  The last known price is at i+seq_len-1.
+      So for n_samples starting at i=0, the last-known-price slice is
+      raw_prices[seq_len-1 : seq_len-1+n_samples, cs:ce].
 
     Args:
-        preds_norm: Normalized predictions, shape (N, N_commodities)
-        targets_norm: Normalized targets, shape (N, N_commodities)
-        scaler: MinMaxScaler fitted on full training data (all markets)
-        commodity_start: Starting column index of commodity market
-        commodity_end: Ending column index of commodity market
+        preds:      Model predictions in target space (z-scored price or return)
+        targets:    Ground-truth targets in target space
+        norm_stats: Per-asset normalisation parameters
+        raw_prices_test: Raw (un-normalised) price array for test period
+        market_indices: Dict with 'commodity' key → (start, end)
+        target_type: 'price' or 'return'
+        seq_len:     Sequence length (needed for return→price alignment)
 
     Returns:
-        preds_orig: Predictions in original price scale
+        preds_orig:   Predictions in original price scale
         targets_orig: Targets in original price scale
     """
-    n_total_features = scaler.min_.shape[0]
+    cs, ce = market_indices['commodity']
+    commodity_mean = norm_stats['mean'][cs:ce].reshape(1, -1)   # (1, N_comm)
+    commodity_std  = norm_stats['std'][cs:ce].reshape(1, -1)    # (1, N_comm)
 
-    def to_original(norm_values):
-        """Inverse transform commodity columns."""
-        dummy = np.zeros((norm_values.shape[0], n_total_features))
-        dummy[:, commodity_start:commodity_end] = norm_values
-        dummy_orig = scaler.inverse_transform(dummy)
-        return dummy_orig[:, commodity_start:commodity_end]
+    if target_type == "price":
+        preds_orig   = preds   * commodity_std + commodity_mean
+        targets_orig = targets * commodity_std + commodity_mean
 
-    preds_orig = to_original(preds_norm)
-    targets_orig = to_original(targets_norm)
+    elif target_type == "return":
+        n_samples = preds.shape[0]
+        # Last known price for each sample
+        last_known = raw_prices_test[seq_len - 1 : seq_len - 1 + n_samples, cs:ce]
+        # Implied price:  p_{t+1} = p_t × (1 + r)
+        preds_orig   = last_known * (1.0 + preds)
+        targets_orig = last_known * (1.0 + targets)
 
-    return preds_orig, targets_orig
+    else:
+        raise ValueError(f"Unknown target_type: {target_type}")
+
+    return preds_orig.astype(np.float32), targets_orig.astype(np.float32)
 
 
 def compute_metrics(
@@ -235,28 +256,32 @@ def evaluate(
     test_loader: DataLoader,
     edge_index: torch.Tensor,
     edge_weight: torch.Tensor,
-    scaler: MinMaxScaler,
+    norm_stats: Dict,
+    raw_prices_test: np.ndarray,
     market_indices: Dict,
     device: torch.device,
     compute_ci: bool = True,
     model_name: str = "CMGM",
+    target_type: str = "price",
 ) -> Dict:
     """
     Full evaluation pipeline.
 
-    Reports metrics in BOTH normalized [0,1] space (matching the paper)
-    and original price space (for interpretability).
+    Reports metrics in BOTH target space (z-scored price or returns —
+    matching the loss function) and original price space (for interpretability).
 
     Args:
         model: Trained model
         test_loader: Test DataLoader
         edge_index: Graph edges
         edge_weight: Graph edge weights
-        scaler: MinMaxScaler fitted on training data
+        norm_stats: Per-asset normalisation params {'mean': (N,), 'std': (N,)}
+        raw_prices_test: Raw price array for test period (T_test, N)
         market_indices: Dict with market column ranges
         device: torch device
         compute_ci: Whether to compute bootstrap confidence intervals
         model_name: Name for display
+        target_type: 'price' or 'return'
 
     Returns:
         dict: Evaluation results
@@ -272,12 +297,13 @@ def evaluate(
     preds_norm, targets_norm = predict(model, test_loader, edge_index, edge_weight, device)
     print(f"       Predictions shape: {preds_norm.shape}")
 
-    # Step 2: Primary metrics — NORMALIZED space (matching paper)
-    print("\n[Step 2] Computing metrics in NORMALIZED space [0,1] (paper standard)...")
+    # Step 2: Primary metrics — TARGET space (z-scored price or returns)
+    space_label = "Return" if target_type == "return" else "Z-scored"
+    print(f"\n[Step 2] Computing metrics in TARGET space ({space_label})...")
     metrics_norm = compute_metrics(preds_norm, targets_norm)
 
     print(f"\n{'─' * 50}")
-    print(f"  Normalized [0,1] Metrics (matches paper scale)")
+    print(f"  Target Space Metrics ({space_label})")
     print(f"{'─' * 50}")
     for name, value in metrics_norm.items():
         print(f"  {name:<18s} {value:.6f}")
@@ -286,7 +312,8 @@ def evaluate(
     # Step 3: Secondary metrics — ORIGINAL price space
     print("\n[Step 3] Computing metrics in ORIGINAL price space...")
     preds_orig, targets_orig = inverse_transform_predictions(
-        preds_norm, targets_norm, scaler, commodity_start, commodity_end
+        preds_norm, targets_norm, norm_stats, raw_prices_test,
+        market_indices, target_type=target_type, seq_len=SEQ_LEN,
     )
     metrics_orig = compute_metrics(preds_orig, targets_orig)
 
@@ -331,18 +358,21 @@ def evaluate_per_commodity(
     test_loader: DataLoader,
     edge_index: torch.Tensor,
     edge_weight: torch.Tensor,
-    scaler: MinMaxScaler,
+    norm_stats: Dict,
+    raw_prices_test: np.ndarray,
     market_indices: Dict,
     device: torch.device,
     feature_names: list,
     normalized: bool = True,
+    target_type: str = "price",
 ) -> Dict:
     """
     Per-commodity evaluation.
 
     Args:
-        normalized: If True, compute in normalized space [0,1];
+        normalized: If True, compute in target space;
                     if False, compute in original price space.
+        target_type: 'price' or 'return'
 
     Returns:
         dict: Per-commodity MAE, MSE, RMSE
@@ -354,10 +384,11 @@ def evaluate_per_commodity(
 
     if normalized:
         residuals = targets_norm - preds_norm
-        space_label = "Normalized"
+        space_label = "Target" if target_type == "return" else "Z-scored"
     else:
         preds_orig, targets_orig = inverse_transform_predictions(
-            preds_norm, targets_norm, scaler, commodity_start, commodity_end
+            preds_norm, targets_norm, norm_stats, raw_prices_test,
+            market_indices, target_type=target_type, seq_len=SEQ_LEN,
         )
         residuals = targets_orig - preds_orig
         space_label = "Original"

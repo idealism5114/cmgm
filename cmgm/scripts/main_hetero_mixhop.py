@@ -10,7 +10,10 @@ import argparse, os, sys, time, torch, numpy as np
 from torch.utils.data import DataLoader
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from cmgm.config import NUM_EPOCHS, BATCH_SIZE, SEQ_LEN, RANDOM_SEED, PATIENCE, FEATURE_DIM
+from cmgm.config import (
+    NUM_EPOCHS, BATCH_SIZE, SEQ_LEN, RANDOM_SEED, PATIENCE,
+    FEATURE_DIM, TARGET_TYPE, FEAT_ZSCORE_EPS,
+)
 from cmgm.data.data_loader import set_seed, create_data_loaders, compute_features, MarketSequenceDataset
 from cmgm.graph.graph_builder import build_graph
 from cmgm.models.hetero_mixhop_model import HeteroMixHopCMGM
@@ -61,7 +64,7 @@ def run_single(args):
     set_seed(args.seed)
     device = torch.device('cuda' if torch.cuda.is_available() and not args.no_cuda else 'cpu')
     print(f"[Config] Device: {device}  |  Epochs: {args.epochs}  |  Batch: {args.batch_size}")
-    print(f"[Config] Feature dim: {FEATURE_DIM}")
+    print(f"[Config] Feature dim: {FEATURE_DIM}  |  Target: {TARGET_TYPE}  |  Norm: per-asset z-score")
 
     data = create_data_loaders(batch_size=args.batch_size, seq_len=args.seq_len)
     n_stock = data['market_indices']['stock'][1] - data['market_indices']['stock'][0]
@@ -73,25 +76,35 @@ def run_single(args):
     ], axis=0)
     feat_raw = compute_features(raw_full)                                 # (T, N, 7) — raw scale
 
-    # Unified MinMaxScaler on features (fit on train only)
-    from sklearn.preprocessing import MinMaxScaler
+    # Per-asset per-channel z-score on features (fit on train only)
     train_sz = data['raw_prices_train'].shape[0]
-    feat_scaler = MinMaxScaler()
-    feat_scaler.fit(feat_raw[:train_sz].reshape(-1, 7))
-    feat_tensor = feat_scaler.transform(feat_raw.reshape(-1, 7)).reshape(feat_raw.shape)
-    print(f"[Features] MinMaxScaler on {train_sz} train samples → "
+    feat_train = feat_raw[:train_sz]                                      # (T_train, N, 7)
+    feat_mean = feat_train.mean(axis=(0,), keepdims=True)                 # (1, N, 7)
+    feat_std  = feat_train.std(axis=(0,), keepdims=True)                  # (1, N, 7)
+    feat_std  = np.maximum(feat_std, FEAT_ZSCORE_EPS)
+    feat_tensor = (feat_raw - feat_mean) / feat_std
+    print(f"[Features] Per-asset per-channel z-score on {train_sz} train samples → "
           f"range: [{feat_tensor.min():.4f}, {feat_tensor.max():.4f}]")
 
-    # Normalize prices for target y (unchanged)
-    full_norm = data['scaler'].transform(raw_full)
+    # Z-score prices from norm_stats (fit on train only)
+    norm_mean = data['norm_stats']['mean']                                # (N,)
+    norm_std  = data['norm_stats']['std']                                 # (N,)
+    full_norm = (raw_full - norm_mean) / norm_std
 
     T = feat_raw.shape[0]
     tr, va = int(T*0.7), int(T*0.7) + int(T*0.15)
     feat_splits = [feat_tensor[:tr], feat_tensor[tr:va], feat_tensor[va:]]
     norm_splits = [full_norm[:tr], full_norm[tr:va], full_norm[va:]]
+    raw_splits  = [data['raw_prices_train'],
+                   data['raw_prices_val'],
+                   data['raw_prices_test']]
 
-    dss = {k: MarketSequenceDataset(n, data['market_indices'], args.seq_len, feature_matrix=f)
-           for k, n, f in zip(['train','val','test'], norm_splits, feat_splits)}
+    dss = {k: MarketSequenceDataset(
+               n, data['market_indices'], args.seq_len,
+               feature_matrix=f, raw_prices=r, target_type=TARGET_TYPE,
+           )
+           for k, n, f, r in zip(['train','val','test'],
+                                  norm_splits, feat_splits, raw_splits)}
     loaders = {k: DataLoader(dss[k], batch_size=args.batch_size, shuffle=False,
                              drop_last=(k=='train')) for k in ['train','val','test']}
 
@@ -105,7 +118,9 @@ def run_single(args):
     history = train(model, loaders['train'], loaders['val'],
                     dummy[0], dummy[1], device, num_epochs=args.epochs, patience=args.patience)
     results = evaluate(model, loaders['test'], dummy[0], dummy[1],
-                       data['scaler'], data['market_indices'], device,
+                       data['norm_stats'], data['raw_prices_test'],
+                       data['market_indices'], device,
+                       target_type=TARGET_TYPE,
                        compute_ci=True, model_name='HeteroMixHop')
 
     final = model.get_gate_stats(next(iter(loaders['train']))[0][:16].to(device))
@@ -113,7 +128,7 @@ def run_single(args):
     print(f"Test MSE: {results['metrics_norm']['MSE']:.6f}")
     print(f"Gate:     mean={final['gate_mean']:.3f}  mixhop_diff={final.get('mixhop_diff',0):.2f}")
 
-    ExperimentLogger().log_run({'version': 'hetero-mixhop-v2-feat7'}, [(
+    ExperimentLogger().log_run({'version': 'hetero-mixhop-return-v1'}, [(
         'HeteroMixHop', history.get('train_time', 0),
         results['metrics_norm'], results['metrics_orig'],
     )])
@@ -151,7 +166,10 @@ def run_comparison(args):
                 all_t.append(y_batch.numpy())
         p, t = np.concatenate(all_p), np.concatenate(all_t)
         mn = compute_metrics(p, t)
-        po, to = inverse_transform_predictions(p, t, data['scaler'], cs, ce)
+        po, to = inverse_transform_predictions(
+            p, t, data['norm_stats'], data['raw_prices_test'],
+            data['market_indices'], target_type=TARGET_TYPE,
+        )
         return mn, compute_metrics(po, to)
 
     from cmgm.models.model import MixHopPropagation
@@ -167,23 +185,33 @@ def run_comparison(args):
     ], axis=0)
     feat_raw = compute_features(raw_full)                                 # (T, N, 7) — raw scale
 
-    # Unified MinMaxScaler on features (fit on train only)
-    from sklearn.preprocessing import MinMaxScaler
+    # Per-asset per-channel z-score on features (fit on train only)
     train_sz = data['raw_prices_train'].shape[0]
-    feat_scaler = MinMaxScaler()
-    feat_scaler.fit(feat_raw[:train_sz].reshape(-1, 7))
-    feat_tensor = feat_scaler.transform(feat_raw.reshape(-1, 7)).reshape(feat_raw.shape)
-    print(f"[Features] MinMaxScaler on {train_sz} train samples → "
+    feat_train = feat_raw[:train_sz]                                      # (T_train, N, 7)
+    feat_mean = feat_train.mean(axis=(0,), keepdims=True)                 # (1, N, 7)
+    feat_std  = feat_train.std(axis=(0,), keepdims=True)                  # (1, N, 7)
+    feat_std  = np.maximum(feat_std, FEAT_ZSCORE_EPS)
+    feat_tensor = (feat_raw - feat_mean) / feat_std
+    print(f"[Features] Per-asset per-channel z-score on {train_sz} train samples → "
           f"range: [{feat_tensor.min():.4f}, {feat_tensor.max():.4f}]")
 
-    # Normalize prices for target y (unchanged)
-    full_norm = data['scaler'].transform(raw_full)
+    # Z-score prices from norm_stats
+    norm_mean = data['norm_stats']['mean']                                # (N,)
+    norm_std  = data['norm_stats']['std']                                 # (N,)
+    full_norm = (raw_full - norm_mean) / norm_std
     T = full_norm.shape[0]
     tr, va = int(T*0.7), int(T*0.7) + int(T*0.15)
     feat_splits = [feat_tensor[:tr], feat_tensor[tr:va], feat_tensor[va:]]
     norm_splits = [full_norm[:tr], full_norm[tr:va], full_norm[va:]]
-    dss = {k: MarketSequenceDataset(n, data['market_indices'], args.seq_len, feature_matrix=f)
-           for k, n, f in zip(['train','val','test'], norm_splits, feat_splits)}
+    raw_splits  = [data['raw_prices_train'],
+                   data['raw_prices_val'],
+                   data['raw_prices_test']]
+    dss = {k: MarketSequenceDataset(
+               n, data['market_indices'], args.seq_len,
+               feature_matrix=f, raw_prices=r, target_type=TARGET_TYPE,
+           )
+           for k, n, f, r in zip(['train','val','test'],
+                                  norm_splits, feat_splits, raw_splits)}
     fl = {k: DataLoader(dss[k], batch_size=args.batch_size, shuffle=False,
                         drop_last=(k=='train')) for k in ['train','val','test']}
 
@@ -207,7 +235,10 @@ def run_comparison(args):
                 all_t.append(y_batch.numpy())
         p, t = np.concatenate(all_p), np.concatenate(all_t)
         mn = compute_metrics(p, t)
-        po, to = inverse_transform_predictions(p, t, data['scaler'], cs, ce)
+        po, to = inverse_transform_predictions(
+            p, t, data['norm_stats'], data['raw_prices_test'],
+            data['market_indices'], target_type=TARGET_TYPE,
+        )
         return mn, compute_metrics(po, to)
 
     # 1/8: PCA+Ridge (7-dim, sklearn handles any dim)
@@ -215,7 +246,10 @@ def run_comparison(args):
     m = train_linear_regression(fl['train'], fl['val'], data['n_commodities'])['model']
     X_te, y_te = prepare_sklearn_data(fl['test'])
     mn = compute_metrics(m.predict(X_te), y_te)
-    po, to = inverse_transform_predictions(m.predict(X_te), y_te, data['scaler'], cs, ce)
+    po, to = inverse_transform_predictions(
+        m.predict(X_te), y_te, data['norm_stats'], data['raw_prices_test'],
+        data['market_indices'], target_type=TARGET_TYPE,
+    )
     mo = compute_metrics(po, to)
     results.append(('PCA+Ridge', time.time() - t0, mn, mo))
 
@@ -224,7 +258,10 @@ def run_comparison(args):
     m = train_svr(fl['train'], fl['val'], data['n_commodities'])['model']
     X_te, y_te = prepare_sklearn_data(fl['test'])
     mn = compute_metrics(m.predict(X_te), y_te)
-    po, to = inverse_transform_predictions(m.predict(X_te), y_te, data['scaler'], cs, ce)
+    po, to = inverse_transform_predictions(
+        m.predict(X_te), y_te, data['norm_stats'], data['raw_prices_test'],
+        data['market_indices'], target_type=TARGET_TYPE,
+    )
     mo = compute_metrics(po, to)
     results.append(('PCA+SVR', time.time() - t0, mn, mo))
 
@@ -280,7 +317,7 @@ def run_comparison(args):
 
     # ── Table ──
     print("\n" + "=" * 100)
-    print("COMPARISON — Normalized [0,1] Space")
+    print("COMPARISON — Return Space")
     print("=" * 100)
     print(f"{'Model':<16s} {'Time':>8s} {'MAE':>10s} {'MSE':>10s} {'RMSE':>10s} "
           f"{'ResMean':>10s} {'ResStd':>10s} {'Skew':>10s}")
@@ -300,7 +337,7 @@ def run_comparison(args):
         print(f"{name:<16s} {mo['MAE']:>14.2f} {mo['MSE']:>18.2f} {mo['RMSE']:>14.2f}")
     print("=" * 100)
 
-    ExperimentLogger().log_run({'version': 'hetero-mixhop-compare-v1'}, results)
+    ExperimentLogger().log_run({'version': 'hetero-mixhop-compare-return-v1'}, results)
     return results
 
 

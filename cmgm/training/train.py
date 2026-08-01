@@ -2,7 +2,7 @@
 Training pipeline for CMGM (Section 3.4).
 
 Implements:
-  - MSE loss optimization
+  - MSE / Huber loss optimization
   - Early stopping with patience
   - Learning rate scheduling
   - Training/validation loss tracking
@@ -19,7 +19,15 @@ from typing import Dict, Optional
 from cmgm.config import (
     LEARNING_RATE, WEIGHT_DECAY,
     NUM_EPOCHS, PATIENCE,
+    LOSS_TYPE, HUBER_DELTA,
 )
+
+
+def make_loss() -> nn.Module:
+    """Return the configured loss function (MSE or Huber)."""
+    if LOSS_TYPE == "huber":
+        return nn.HuberLoss(delta=HUBER_DELTA)
+    return nn.MSELoss()
 
 
 def train_epoch(
@@ -204,8 +212,8 @@ def train(
         weight_decay=weight_decay,
     )
 
-    # Section 3.4: MSE Loss
-    criterion = nn.MSELoss()
+    # Section 3.4: Loss (MSE or Huber)
+    criterion = make_loss()
 
     # Learning rate scheduler: reduce on plateau
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(

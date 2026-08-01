@@ -18,6 +18,7 @@ from cmgm.config import (
     NUM_EPOCHS, PATIENCE,
     GCN_DROPOUT, LSTM_DROPOUT,
 )
+from cmgm.training.train import make_loss
 from cmgm.training.train import validate_epoch
 
 
@@ -122,7 +123,7 @@ def train(
     )
 
     # MSE loss
-    criterion = nn.MSELoss()
+    criterion = make_loss()
 
     # Cosine Annealing scheduler (created AFTER warmup to keep T_0 aligned)
     scheduler = None
