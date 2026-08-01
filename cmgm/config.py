@@ -97,7 +97,7 @@ RANDOM_SEED = 42
 # Target Configuration
 # =============================================================================
 # Target type: 'price', 'return', or 'volatility'
-TARGET_TYPE = "volatility"
+TARGET_TYPE = "return"
 
 # Target horizon: number of steps ahead (primary, for reporting)
 TARGET_HORIZON = 5
