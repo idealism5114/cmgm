@@ -249,17 +249,21 @@ def run_comparison(args):
         )
         return mn, compute_metrics(po, to)
 
-    # 0/9: Zero baseline — always predict 0 (unconditional mean of returns ≈ 0)
-    print("\n0/9: Zero (predict 0)"); fresh_seed(); t0 = time.time()
+    # 0/9: Naive baseline — predict 0 for returns, mean volatility for vol
+    baseline_label = "Zero" if TARGET_TYPE == "return" else "MeanVol"
+    print(f"\n0/9: {baseline_label}"); fresh_seed(); t0 = time.time()
     X_te, y_te = prepare_sklearn_data(fl['test'])
-    zero_preds = np.zeros_like(y_te)
-    mn = compute_metrics(zero_preds, y_te)
+    if TARGET_TYPE == "volatility":
+        baseline_preds = np.tile(y_te.mean(axis=0, keepdims=True), (len(y_te), 1))
+    else:
+        baseline_preds = np.zeros_like(y_te)
+    mn = compute_metrics(baseline_preds, y_te)
     po, to = inverse_transform_predictions(
-        zero_preds, y_te, data['norm_stats'], data['raw_prices_test'],
+        baseline_preds, y_te, data['norm_stats'], data['raw_prices_test'],
         data['market_indices'], target_type=TARGET_TYPE,
     )
     mo = compute_metrics(po, to)
-    results.append(('Zero (always 0)', time.time() - t0, mn, mo))
+    results.append((baseline_label, time.time() - t0, mn, mo))
 
     # 1/9: PCA+Ridge (7-dim, sklearn handles any dim)
     print("\n1/9: PCA+Ridge"); fresh_seed(); t0 = time.time()
@@ -365,8 +369,9 @@ def run_comparison(args):
     results.append(('HeteroMix', time.time() - t0, mn, mo))
 
     # ── Table ──
+    space_name = "Volatility Space" if TARGET_TYPE == "volatility" else "Return Space"
     print("\n" + "=" * 115)
-    print("COMPARISON — Return Space")
+    print(f"COMPARISON — {space_name}")
     print("=" * 115)
     print(f"{'Model':<16s} {'Time':>7s} {'MAE':>9s} {'RMSE':>9s} "
           f"{'ResMean':>9s} {'ResStd':>9s} {'Hit%':>7s}")

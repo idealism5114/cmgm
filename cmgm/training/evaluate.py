@@ -127,7 +127,12 @@ def inverse_transform_predictions(
     commodity_mean = norm_stats['mean'][cs:ce].reshape(1, -1)   # (1, N_comm)
     commodity_std  = norm_stats['std'][cs:ce].reshape(1, -1)    # (1, N_comm)
 
-    if target_type == "price":
+    if target_type == "volatility":
+        # Volatility is already in interpretable units — pass through
+        preds_orig   = preds.copy()
+        targets_orig = targets.copy()
+
+    elif target_type == "price":
         preds_orig   = preds   * commodity_std + commodity_mean
         targets_orig = targets * commodity_std + commodity_mean
 
@@ -187,17 +192,16 @@ def compute_metrics(
     ])
     skewness = np.mean(skewness_per_asset)
 
-    # Directional Accuracy (Hit Ratio)
-    # Fraction of predictions where sign(pred) == sign(target).
-    # Zero targets are excluded (can't determine correct direction).
-    valid = np.abs(targets) > 1e-8  # (N, N_commodities)
-    n_valid = valid.sum()
-    if n_valid > 0:
-        hit_ratio = np.mean(
-            (np.sign(preds[valid]) == np.sign(targets[valid])).astype(np.float64)
-        )
-    else:
-        hit_ratio = float('nan')
+    # Directional Accuracy (Hit Ratio) — only meaningful for returns
+    # For volatility / price, skip.
+    hit_ratio = float('nan')
+    if TARGET_TYPE == "return":
+        valid = np.abs(targets) > 1e-8
+        n_valid = valid.sum()
+        if n_valid > 0:
+            hit_ratio = np.mean(
+                (np.sign(preds[valid]) == np.sign(targets[valid])).astype(np.float64)
+            )
 
     return {
         'MAE': mae,

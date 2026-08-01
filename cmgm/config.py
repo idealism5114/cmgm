@@ -96,15 +96,16 @@ RANDOM_SEED = 42
 # =============================================================================
 # Target Configuration
 # =============================================================================
-# Target type: 'price' (original normalized-price) or 'return' (daily return)
-TARGET_TYPE = "return"
+# Target type: 'price', 'return', or 'volatility'
+TARGET_TYPE = "volatility"
 
-# Target horizon: number of steps ahead to predict (primary, for reporting)
+# Target horizon: number of steps ahead (primary, for reporting)
 TARGET_HORIZON = 5
 
 # Multi-horizon prediction: all horizons the model predicts simultaneously
-# Loss = sum of HuberLoss per horizon.  Only TARGET_HORIZON is reported.
-MULTI_HORIZONS = [1, 5, 10, 20]
+VOLA_HORIZONS = [1, 5, 10, 20]    # horizons for volatility prediction
+# For returns: MULTI_HORIZONS = [1, 5, 10, 20]
+MULTI_HORIZONS = [1, 5, 10, 20]   # kept for reference
 
 # =============================================================================
 # Normalization Configuration

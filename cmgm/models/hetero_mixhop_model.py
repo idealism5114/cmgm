@@ -17,7 +17,7 @@ import torch.nn.functional as F
 from cmgm.config import (
     GCN_DROPOUT,
     LSTM_HIDDEN_DIM, LSTM_NUM_LAYERS, LSTM_DROPOUT,
-    FC_HIDDEN_DIM, FEATURE_DIM, MULTI_HORIZONS,
+    FC_HIDDEN_DIM, FEATURE_DIM, MULTI_HORIZONS, TARGET_TYPE,
 )
 from cmgm.models.model import MixHopPropagation
 from cmgm.graph.adaptive_graph import AdaptiveGraphLearner
@@ -148,6 +148,8 @@ class HeteroMixHopCMGM(nn.Module):
         fused = gate * lstm_p + (1 - gate) * gcn_p
         pred = self.gate_output(fused)                                    # (B, n_horizons * n_comm)
         pred = pred.view(B, self.n_horizons, self.n_commodities)          # (B, n_horizons, n_comm)
+        if TARGET_TYPE == "volatility":
+            pred = F.softplus(pred) + 1e-6                                # ensure positive
 
         if debug:
             nz = (A > 0).sum().item()

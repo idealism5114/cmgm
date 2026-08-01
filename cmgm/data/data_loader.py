@@ -315,17 +315,35 @@ class MarketSequenceDataset(Dataset):
 
         cs, ce = self.commodity_start, self.commodity_end
 
-        # ── Target: return(s) ────────────────────────────────────────────
-        if self.target_type == "return" and self.raw_prices is not None:
-            # Multi-horizon returns: for each horizon h, ret = p_{t+h} / p_t - 1
-            # Base price is the last price in the sequence window (t + seq_len - 1)
-            p_base = self.raw_prices[idx + self.seq_len - 1, cs:ce]        # (N_comm,)
+        # ── Target: return(s) or volatility ──────────────────────────────
+        if self.target_type in ("return", "volatility") and self.raw_prices is not None:
+            # Compute daily returns for the horizon window (needed for vol)
+            t_end = idx + self.seq_len - 1  # last known time step
+            p_base = self.raw_prices[t_end, cs:ce]  # (N_comm,)
+
+            # Pre-compute daily returns up to max horizon
+            max_h = max(self.horizons)
+            daily_rets = []
+            for d in range(1, max_h + 1):
+                p_d = self.raw_prices[t_end + d, cs:ce]
+                r_d = (p_d / np.maximum(np.abs(self.raw_prices[t_end + d - 1, cs:ce]), 1e-8)) - 1.0
+                r_d = np.clip(r_d, -0.5, 0.5).astype(np.float32)
+                daily_rets.append(r_d)  # list of (N_comm,) arrays
+
             y_list = []
             for h in self.horizons:
-                p_future = self.raw_prices[idx + self.seq_len - 1 + h, cs:ce]
-                ret_h = (p_future / np.maximum(np.abs(p_base), 1e-8)) - 1.0
-                ret_h = np.clip(ret_h, -1.0, 1.0).astype(np.float32)       # multi-day can be wider
-                y_list.append(ret_h)
+                if self.target_type == "return":
+                    # ret = p_{t+h} / p_t - 1
+                    ret_h = (self.raw_prices[t_end + h, cs:ce] / np.maximum(np.abs(p_base), 1e-8)) - 1.0
+                    ret_h = np.clip(ret_h, -1.0, 1.0).astype(np.float32)
+                    y_list.append(ret_h)
+                else:  # volatility
+                    # Realized volatility over h days: sqrt(sum(daily_ret^2))
+                    sum_sq = np.zeros(ce - cs, dtype=np.float32)
+                    for d in range(h):
+                        sum_sq += daily_rets[d] ** 2
+                    rv_h = np.sqrt(sum_sq).astype(np.float32)
+                    y_list.append(rv_h)
             y = np.stack(y_list, axis=0)                                    # (n_horizons, N_comm)
             if len(self.horizons) == 1:
                 y = y[0]                                                    # (N_comm,) — single horizon
