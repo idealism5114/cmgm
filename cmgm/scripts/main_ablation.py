@@ -221,6 +221,8 @@ def run_variant(name, variant, feat_dim, args, device, data21, data7):
         'MSE': mn['MSE'],
         'Hit_Ratio': hit,
         'vs_zero_pct': vs_zero,
+        'mn': mn,     # full metrics dict for logger
+        'mo': mo,     # full original-space metrics dict for logger
     }
     print(f"\n  ── Result ──")
     print(f"  MAE: {mn['MAE']:.6f}  RMSE: {mn['RMSE']:.6f}  "
@@ -260,7 +262,12 @@ def main():
             results.append({'variant': name, 'MAE': float('nan'),
                             'RMSE': float('nan'), 'MSE': float('nan'),
                             'Hit_Ratio': float('nan'), 'vs_zero_pct': float('nan'),
-                            'params': 0, 'time': 0})
+                            'params': 0, 'time': 0,
+                            'mn': {'MAE': float('nan'), 'MSE': float('nan'),
+                                   'RMSE': float('nan'), 'Residual_Mean': float('nan'),
+                                   'Residual_Std': float('nan'), 'Skewness': float('nan')},
+                            'mo': {'MAE': float('nan'), 'MSE': float('nan'),
+                                   'RMSE': float('nan')}})
 
     # ── Summary table ──
     print("\n" + "=" * 100)
@@ -282,9 +289,7 @@ def main():
     ExperimentLogger().log_run(
         {'version': 'ablation-v1', 'epochs': args.epochs, 'seed': args.seed,
          'target': TARGET_TYPE, 'horizon': TARGET_HORIZON},
-        [(r['variant'], r['time'], {'MAE': r['MAE'], 'MSE': r['MSE'], 'RMSE': r['RMSE'],
-                                     'Hit_Ratio': r['Hit_Ratio']}, {'vs_zero_pct': r['vs_zero_pct']})
-         for r in results],
+        [(r['variant'], r['time'], r['mn'], r['mo']) for r in results],
     )
     return results
 
