@@ -324,12 +324,12 @@ def run_comparison(args):
     results.append(('GCN+GAT', time.time() - t0, mn, mo))
 
     # 7/9: CMGM_Feature (7-dim, GCN+LSTM both use all features)
-    print("\n7/9: CMGM-Feat"); fresh_seed(); t0 = time.time()
+    print("\n7/9: GCN+LSTM"); fresh_seed(); t0 = time.time()
     m = CMGM_Feature(data['n_nodes'], data['n_commodities'], feat_dim=FEATURE_DIM).to(device)
     train(m, fl['train'], fl['val'], ei, ew, device,
           num_epochs=args.epochs, patience=args.patience)
     mn, mo = eval_torch_7d(m, fl['test'])
-    results.append(('CMGM-Feat', time.time() - t0, mn, mo))
+    results.append(('GCN+LSTM', time.time() - t0, mn, mo))
 
     # 8/9: HeteroMixHop (21-dim, multi-horizon for returns, single for vol)
     print("\n8/9: HeteroMixHop"); fresh_seed(); t0 = time.time()

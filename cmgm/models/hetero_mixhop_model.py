@@ -1,13 +1,25 @@
 """
-HeteroMixHop — 7-dim features + per-type projection + MixHop + gated fusion.
+HeteroMixHop — 21-dim features + per-type projection + MixHop + gated fusion.
 
-Architecture:
-    7-dim features (price, return, MA, volatility, RSI, MACD)
-    → Per-type Input Projection (7→64 per market)
+Supports ablation variants for the paper:
+  variant="full"            — complete model (all components)
+  variant="no_type_proj"    — shared input projection (no per-type)
+  variant="no_learn_graph"  — static Pearson graph (no adaptive learner)
+  variant="no_mixhop"       — single-hop GCN (no MixHop multi-hop)
+  variant="no_gate"         — concat fusion (no gated fusion)
+  variant="gcn_only"        — LSTM branch removed
+  variant="lstm_only"       — spatial branch removed
+  variant="single_horizon"  — predict only the primary horizon (no multi-task)
+  variant="feat7"           — 7-dim features instead of 21 (passed via feat_dim)
+
+Architecture (full):
+    21-dim features (price, returns, vol, zscore, MA ratios, RSI, BB, skew, ...)
+    → Per-type Input Projection (21→64 per market)
     → AdaptiveGraphLearner → A (N×N)
     → MixHopPropagation × 2 (64→64, 64→64)
     → Per-type mean pooling → type_agg(192→64)
-    → Gated fusion with LSTM(284×7→64)
+    → Gated fusion with LSTM(284×21→64)
+    → Multi-horizon head (1d/5d/10d/20d)
 """
 
 import torch
@@ -24,13 +36,14 @@ from cmgm.graph.adaptive_graph import AdaptiveGraphLearner
 
 
 class _TypeInputProjection(nn.Module):
-    """Per-type linear projection: FEATURE_DIM → hidden_dim."""
+    """Per-type linear projection: feat_dim → hidden_dim."""
 
-    def __init__(self, hidden_dim: int = LSTM_HIDDEN_DIM):
+    def __init__(self, feat_dim: int = FEATURE_DIM,
+                 hidden_dim: int = LSTM_HIDDEN_DIM):
         super().__init__()
-        self.stock_proj  = nn.Linear(FEATURE_DIM, hidden_dim)
-        self.bond_proj   = nn.Linear(FEATURE_DIM, hidden_dim)
-        self.future_proj = nn.Linear(FEATURE_DIM, hidden_dim)
+        self.stock_proj  = nn.Linear(feat_dim, hidden_dim)
+        self.bond_proj   = nn.Linear(feat_dim, hidden_dim)
+        self.future_proj = nn.Linear(feat_dim, hidden_dim)
 
     def forward(self, x_t: torch.Tensor,
                 n_stock: int, n_bond: int) -> torch.Tensor:
@@ -38,6 +51,21 @@ class _TypeInputProjection(nn.Module):
         b = self.bond_proj(x_t[:, n_stock:n_stock+n_bond, :])
         f = self.future_proj(x_t[:, n_stock+n_bond:, :])
         return torch.cat([s, b, f], dim=1)                 # (B, N, H)
+
+
+class _SingleHopGCN(nn.Module):
+    """One-hop graph convolution on dense adjacency (ablation for MixHop)."""
+
+    def __init__(self, hidden_dim: int = LSTM_HIDDEN_DIM):
+        super().__init__()
+        self.lin = nn.Linear(hidden_dim, hidden_dim)
+        self.norm = nn.LayerNorm(hidden_dim)
+
+    def forward(self, x: torch.Tensor, A: torch.Tensor) -> torch.Tensor:
+        A_hat = A + torch.eye(A.size(0), device=A.device)
+        deg = A_hat.sum(dim=1, keepdim=True).clamp(min=1e-8)
+        A_norm = A_hat / deg
+        return F.relu(self.norm(self.lin(A_norm @ x)))
 
 
 class _TypeMeanPool(nn.Module):
@@ -60,117 +88,184 @@ class _TypeMeanPool(nn.Module):
 
 class HeteroMixHopCMGM(nn.Module):
     """
-    Heterogeneous MixHop CMGM with 7-dim features.
+    Heterogeneous MixHop CMGM with ablation support.
 
-    Forward:  (B, T, N, 7) → (B, N_commodities)
+    Forward:  (B, T, N, F) → (B, n_horizons, N_commodities)  [multi]
+              (B, T, N, F) → (B, N_commodities)              [single]
     """
 
     def __init__(self, num_nodes: int, n_commodities: int,
-                 n_stock: int = 248, n_bond: int = 12):
+                 n_stock: int = 248, n_bond: int = 12,
+                 variant: str = "full", feat_dim: int = FEATURE_DIM):
         super().__init__()
         self.num_nodes = num_nodes
         self.n_commodities = n_commodities
         self.n_stock = n_stock
         self.n_bond = n_bond
+        self.variant = variant
+        self.feat_dim = feat_dim
 
-        # ── Learnable graph ──
-        self.graph_learner = AdaptiveGraphLearner(
-            num_nodes, embed_dim=10, alpha=0.5, top_k=10,
-        )
+        # ── Branch switches ──
+        self.use_gcn  = variant != "lstm_only"
+        self.use_lstm = variant != "gcn_only"
+        self.use_learn_graph = variant != "no_learn_graph"
+        self.use_type_proj   = variant != "no_type_proj"
+        self.use_mixhop      = variant != "no_mixhop"
+        self.use_gate        = variant not in ("no_gate", "gcn_only", "lstm_only")
 
-        # ── Per-type projection (7 → 64) ──
-        self.type_proj = _TypeInputProjection(LSTM_HIDDEN_DIM)
-
-        # ── MixHop propagation (both layers 64→64) ──
-        self.mixhop1 = MixHopPropagation(LSTM_HIDDEN_DIM, LSTM_HIDDEN_DIM, K=2, beta=0.05)
-        self.mixhop2 = MixHopPropagation(LSTM_HIDDEN_DIM, LSTM_HIDDEN_DIM, K=2, beta=0.05)
-        self.gcn_norm = nn.LayerNorm(LSTM_HIDDEN_DIM)
-
-        # ── Per-type mean pool ──
-        self.type_pool = _TypeMeanPool(LSTM_HIDDEN_DIM, n_stock, n_bond)
-
-        # ── LSTM (input = num_nodes * FEATURE_DIM) ──
-        self.temporal = nn.LSTM(
-            input_size=num_nodes * FEATURE_DIM,
-            hidden_size=LSTM_HIDDEN_DIM,
-            num_layers=LSTM_NUM_LAYERS,
-            dropout=LSTM_DROPOUT if LSTM_NUM_LAYERS > 1 else 0.0,
-            batch_first=True,
-        )
-
-        # ── Gated fusion ──
-        use_multi = (TARGET_TYPE == "return")
+        # ── Multi-horizon output ──
+        use_multi = (TARGET_TYPE == "return") and variant != "single_horizon"
         self.n_horizons = len(MULTI_HORIZONS) if use_multi else 1
         out_dim = self.n_horizons * n_commodities
-        self.gate_fc = nn.Linear(LSTM_HIDDEN_DIM * 2, LSTM_HIDDEN_DIM)
-        self.gcn_proj = nn.Linear(LSTM_HIDDEN_DIM, LSTM_HIDDEN_DIM)
-        self.lstm_proj = nn.Linear(LSTM_HIDDEN_DIM, LSTM_HIDDEN_DIM)
-        self.gate_output = nn.Sequential(
+
+        # ── Spatial branch ──
+        if self.use_gcn:
+            # Learnable graph (default) or static buffer (no_learn_graph)
+            if self.use_learn_graph:
+                self.graph_learner = AdaptiveGraphLearner(
+                    num_nodes, embed_dim=10, alpha=0.5, top_k=10,
+                )
+            else:
+                self.register_buffer('static_A', torch.zeros(num_nodes, num_nodes))
+
+            # Per-type (default) or shared input projection
+            if self.use_type_proj:
+                self.type_proj = _TypeInputProjection(feat_dim, LSTM_HIDDEN_DIM)
+            else:
+                self.shared_proj = nn.Linear(feat_dim, LSTM_HIDDEN_DIM)
+
+            # MixHop (default) or single-hop GCN
+            if self.use_mixhop:
+                self.mixhop1 = MixHopPropagation(LSTM_HIDDEN_DIM, LSTM_HIDDEN_DIM, K=2, beta=0.05)
+                self.mixhop2 = MixHopPropagation(LSTM_HIDDEN_DIM, LSTM_HIDDEN_DIM, K=2, beta=0.05)
+            else:
+                self.singlehop1 = _SingleHopGCN(LSTM_HIDDEN_DIM)
+                self.singlehop2 = _SingleHopGCN(LSTM_HIDDEN_DIM)
+
+            self.gcn_norm = nn.LayerNorm(LSTM_HIDDEN_DIM)
+            self.type_pool = _TypeMeanPool(LSTM_HIDDEN_DIM, n_stock, n_bond)
+
+        # ── Temporal branch ──
+        if self.use_lstm:
+            self.temporal = nn.LSTM(
+                input_size=num_nodes * feat_dim,
+                hidden_size=LSTM_HIDDEN_DIM,
+                num_layers=LSTM_NUM_LAYERS,
+                dropout=LSTM_DROPOUT if LSTM_NUM_LAYERS > 1 else 0.0,
+                batch_first=True,
+            )
+
+        # ── Fusion ──
+        if self.use_gate:
+            self.gate_fc = nn.Linear(LSTM_HIDDEN_DIM * 2, LSTM_HIDDEN_DIM)
+            self.gcn_proj = nn.Linear(LSTM_HIDDEN_DIM, LSTM_HIDDEN_DIM)
+            self.lstm_proj = nn.Linear(LSTM_HIDDEN_DIM, LSTM_HIDDEN_DIM)
+        elif variant == "no_gate":
+            self.concat_fc = nn.Linear(LSTM_HIDDEN_DIM * 2, LSTM_HIDDEN_DIM)
+
+        # ── Output head (shared across all variants) ──
+        self.head = nn.Sequential(
             nn.Linear(LSTM_HIDDEN_DIM, FC_HIDDEN_DIM),
             nn.ReLU(),
             nn.Dropout(GCN_DROPOUT),
             nn.Linear(FC_HIDDEN_DIM, out_dim),
         )
 
+    def _spatial_forward(self, x: torch.Tensor) -> torch.Tensor:
+        """MixHop / single-hop branch → (B, 64)."""
+        N, T = x.size(2), x.size(1)
+
+        if self.use_learn_graph:
+            A = self.graph_learner()                                   # (N, N)
+        else:
+            A = self.static_A
+
+        # Average over batch → per-node features → per-type projection
+        x_gcn = x.mean(dim=0)                                          # (T, N, F)
+        x_gcn = x_gcn.permute(1, 0, 2)                                 # (N, T, F)
+        if self.use_type_proj:
+            x_proj = self.type_proj(x_gcn, self.n_stock, self.n_bond)  # (N, T, 64)
+        else:
+            x_proj = self.shared_proj(x_gcn)                           # (N, T, 64)
+        x_proj = x_proj.mean(dim=1)                                    # (N, 64)
+
+        if self.use_mixhop:
+            h1 = F.relu(self.mixhop1(x_proj, A))                       # (N, 64)
+            h2 = self.mixhop2(h1, A)                                   # (N, 64)
+        else:
+            h1 = self.singlehop1(x_proj, A)                            # (N, 64)
+            h2 = self.singlehop2(h1, A)                                # (N, 64)
+        h = self.gcn_norm(h2)                                          # (N, 64)
+
+        # Per-type pooling → expand to batch
+        gcn_out = self.type_pool(h).unsqueeze(0).expand(x.size(0), -1) # (B, 64)
+        return gcn_out
+
     def forward(self, x: torch.Tensor,
                 edge_index=None, edge_weight=None,
                 debug: bool = False) -> torch.Tensor:
-        B, T, N, _ = x.shape
+        B, T, N, n_feat = x.shape
 
-        # ── 1. Learn adjacency ──
-        A = self.graph_learner()                                   # (N, N)
+        # ── 1. Spatial branch (MixHop / single-hop GCN) ──
+        gcn_out = self._spatial_forward(x) if self.use_gcn else None   # (B, 64)
 
-        # ── 2. MixHop branch ──
-        # Average over batch → get per-node 7-dim features
-        # x: (B, T, N, 7) → mean over B → (T, N, 7) → permute → (N, T, 7)
-        # type_proj projects last dim 7→64 → (N, T, 64) → mean over T → (N, 64)
-        x_gcn = x.mean(dim=0)                                      # (T, N, 7)
-        x_gcn = x_gcn.permute(1, 0, 2)                             # (N, T, 7)
-        x_proj = self.type_proj(x_gcn, self.n_stock, self.n_bond)  # (N, T, 64)
-        x_proj = x_proj.mean(dim=1)                                # (N, 64)
+        # ── 2. Temporal branch (LSTM) ──
+        if self.use_lstm:
+            x_seq = x.reshape(B, T, -1)                                # (B, T, N*F)
+            lstm_out, (h_n, _) = self.temporal(x_seq)
+            lstm_out = h_n[-1]                                         # (B, 64)
+        else:
+            lstm_out = None
 
-        h1 = F.relu(self.mixhop1(x_proj, A))                       # (N, 64)
-        h2 = self.mixhop2(h1, A)                                   # (N, 64)
-        h = self.gcn_norm(h2)                                      # (N, 64)
+        # ── 3. Fusion ──
+        if self.variant == "gcn_only":
+            fused = gcn_out
+        elif self.variant == "lstm_only":
+            fused = lstm_out
+        elif self.variant == "no_gate":
+            combined = torch.cat([gcn_out, lstm_out], dim=-1)          # (B, 128)
+            fused = F.relu(self.concat_fc(combined))                   # (B, 64)
+        else:
+            combined = torch.cat([gcn_out, lstm_out], dim=-1)          # (B, 128)
+            gate = torch.sigmoid(self.gate_fc(combined))
+            gcn_p  = self.gcn_proj(gcn_out)
+            lstm_p = self.lstm_proj(lstm_out)
+            fused = gate * lstm_p + (1 - gate) * gcn_p                 # (B, 64)
 
-        # Per-type pooling → expand to batch
-        gcn_out = self.type_pool(h).unsqueeze(0).expand(B, -1)     # (B, 64)
-
-        # ── 3. LSTM branch (flattened features) ──
-        x_seq = x.reshape(B, T, -1)                                # (B, T, N*7)
-        lstm_out, (h_n, _) = self.temporal(x_seq)
-        lstm_out = h_n[-1]                                         # (B, 64)
-
-        # ── 4. Gated fusion ──
-        combined = torch.cat([gcn_out, lstm_out], dim=-1)          # (B, 128)
-        gate = torch.sigmoid(self.gate_fc(combined))
-        gcn_p  = self.gcn_proj(gcn_out)
-        lstm_p = self.lstm_proj(lstm_out)
-        fused = gate * lstm_p + (1 - gate) * gcn_p
-        pred = self.gate_output(fused)                                    # (B, n_horizons * n_comm)
-        pred = pred.view(B, self.n_horizons, self.n_commodities)          # (B, n_horizons, n_comm)
-        if self.n_horizons == 1:
-            pred = pred.squeeze(1)                                         # (B, n_comm)
+        # ── 4. Output head ──
+        pred = self.head(fused)                                        # (B, out_dim)
+        if self.n_horizons > 1:
+            pred = pred.view(B, self.n_horizons, self.n_commodities)   # (B, H, Nc)
+        else:
+            pred = pred.view(B, self.n_commodities)                    # (B, Nc)
 
         if debug:
-            nz = (A > 0).sum().item()
-            gm = gate.mean().item()
-            print(f"  Feat(F={FEATURE_DIM}) → TypeProj → MixHop→({list(gcn_out.shape)}) || "
-                  f"LSTM(N*F={N*FEATURE_DIM})→({list(lstm_out.shape)}) → "
-                  f"Gate(mean={gm:.3f}, A_nz={nz}) → FC → ({list(pred.shape)})")
+            print(f"  [variant={self.variant}] "
+                  f"GCN→({list(gcn_out.shape) if gcn_out is not None else None}) || "
+                  f"LSTM→({list(lstm_out.shape) if lstm_out is not None else None}) "
+                  f"→ head → ({list(pred.shape)})")
 
         return pred
 
     def get_gate_stats(self, x, edge_index=None, edge_weight=None):
-        """Return gating statistics. Works with any FEATURE_DIM."""
+        """Return gating statistics (only meaningful for gate variants)."""
+        if not self.use_gate:
+            return {'mode': self.variant, 'note': 'not using gated fusion'}
         self.eval()
         with torch.no_grad():
-            A = self.graph_learner()
+            A = self.graph_learner() if self.use_learn_graph else self.static_A
             x_gcn = x.mean(dim=0).permute(1, 0, 2)
-            x_proj = self.type_proj(x_gcn, self.n_stock, self.n_bond)
+            if self.use_type_proj:
+                x_proj = self.type_proj(x_gcn, self.n_stock, self.n_bond)
+            else:
+                x_proj = self.shared_proj(x_gcn)
             x_proj = x_proj.mean(dim=1)
-            h1 = F.relu(self.mixhop1(x_proj, A))
-            h2 = self.mixhop2(h1, A)
+            if self.use_mixhop:
+                h1 = F.relu(self.mixhop1(x_proj, A))
+                h2 = self.mixhop2(h1, A)
+            else:
+                h1 = self.singlehop1(x_proj, A)
+                h2 = self.singlehop2(h1, A)
             h = self.gcn_norm(h2)
             B = x.size(0)
             gcn_out = self.type_pool(h).unsqueeze(0).expand(B, -1)
