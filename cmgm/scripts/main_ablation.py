@@ -32,6 +32,7 @@ from torch_geometric.utils import to_dense_adj
 # All variants: (display name, model variant, feat_dim)
 ALL_VARIANTS = [
     ("Full",                "full",           FEATURE_DIM),
+    ("+EdgeAttn",           "edge_attn",      FEATURE_DIM),
     ("-TypeProj",           "no_type_proj",   FEATURE_DIM),
     ("-LearnGraph",         "no_learn_graph", FEATURE_DIM),
     ("-MixHop",             "no_mixhop",      FEATURE_DIM),
@@ -202,8 +203,12 @@ def run_variant(name, variant, feat_dim, args, device, data21, data7):
     mn, mo = evaluate_primary_horizon(model, loaders['test'], data, device)
 
     # ── Zero baseline (always 0 for returns, mean vol otherwise) ──
+    # NOTE: must use PRIMARY horizon only — y from multi-horizon loaders is (N, H, Nc)
     from cmgm.baselines.traditional import prepare_sklearn_data
     X_te, y_te = prepare_sklearn_data(loaders['test'])
+    if y_te.ndim == 3:
+        h_idx = MULTI_HORIZONS.index(TARGET_HORIZON)
+        y_te = y_te[:, h_idx, :]
     if TARGET_TYPE == "volatility":
         zero_preds = np.tile(y_te.mean(axis=0, keepdims=True), (len(y_te), 1))
     else:

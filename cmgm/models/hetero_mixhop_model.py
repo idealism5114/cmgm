@@ -3,6 +3,8 @@ HeteroMixHop — 21-dim features + per-type projection + MixHop + gated fusion.
 
 Supports ablation variants for the paper:
   variant="full"            — complete model (all components)
+  variant="edge_attn"       — EdgeAttnMixHop: content-aware edge attention
+                              (structure prior A masks attention logits)
   variant="no_type_proj"    — shared input projection (no per-type)
   variant="no_learn_graph"  — static Pearson graph (no adaptive learner)
   variant="no_mixhop"       — single-hop GCN (no MixHop multi-hop)
@@ -20,8 +22,16 @@ Architecture (full):
     → Per-type mean pooling → type_agg(192→64)
     → Gated fusion with LSTM(284×21→64)
     → Multi-horizon head (1d/5d/10d/20d)
+
+Architecture (edge_attn):
+    ...same up to A...
+    → EdgeAttnMixHop × 2 (64→64): content-aware multi-head edge attention
+      e_ij = (Q_i·K_j)/√d + log(A_ij + ε)   ← A as structure prior
+      α_ij = softmax_j(e_ij),  V_agg = α @ V
+      H = β·H_in + (1−β)·V_agg (MixHop-style update)
 """
 
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -68,6 +78,72 @@ class _SingleHopGCN(nn.Module):
         return F.relu(self.norm(self.lin(A_norm @ x)))
 
 
+class EdgeAttnMixHop(nn.Module):
+    """
+    MixHop propagation with content-aware multi-head edge attention.
+
+    For each hop k:
+      1. Attention scores:  e_ij = (Q_i · K_j) / √d_k  +  log(A_ij + ε)
+         — A (from AdaptiveGraphLearner) acts as a structure prior in logit space
+      2. Normalize:         α_ij = softmax_j(e_ij)
+      3. Aggregate:         V_agg = α @ V
+      4. MixHop update:     H = β · H_in + (1 − β) · V_agg
+      5. Selection:         out += W_k(H)
+
+    The graph structure (who connects to whom) comes from A;
+    the edge weights (how much to aggregate) are learned content-aware.
+    """
+
+    def __init__(self, in_dim: int = LSTM_HIDDEN_DIM,
+                 out_dim: int = LSTM_HIDDEN_DIM,
+                 K: int = 2, beta: float = 0.05, n_heads: int = 4,
+                 dropout: float = 0.1):
+        super().__init__()
+        self.K = K
+        self.beta = beta
+        self.n_heads = n_heads
+        assert out_dim % n_heads == 0, "out_dim must be divisible by n_heads"
+        self.head_dim = out_dim // n_heads
+
+        # MixHop selection weights (same structure as MixHopPropagation)
+        self.Ws = nn.ModuleList([
+            nn.Linear(in_dim, out_dim) for _ in range(K + 1)
+        ])
+
+        # Multi-head attention projections
+        self.q = nn.Linear(in_dim, out_dim)
+        self.k = nn.Linear(in_dim, out_dim)
+        self.v = nn.Linear(in_dim, out_dim)
+        self.out_proj = nn.Linear(out_dim, out_dim)
+        self.attn_drop = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor, A: torch.Tensor) -> torch.Tensor:
+        N = A.size(0)
+        log_prior = torch.log(A + 1e-6)                       # (N, N) — structure prior
+        H = x
+        H_in = x
+        out = self.Ws[0](H)
+
+        for k in range(1, self.K + 1):
+            # Multi-head attention scores on current H
+            Q = self.q(H).view(N, self.n_heads, self.head_dim)     # (N, h, d)
+            Kt = self.k(H).view(N, self.n_heads, self.head_dim)
+            V  = self.v(H).view(N, self.n_heads, self.head_dim)
+            e = torch.einsum('nhd,mhd->nmh', Q, Kt) / math.sqrt(self.head_dim)  # (N, M, h)
+            e = e + log_prior.unsqueeze(-1)                    # structure prior (N, M, 1)
+            alpha = F.softmax(e, dim=1)                        # over source nodes
+            alpha = self.attn_drop(alpha)
+            agg = torch.einsum('nmh,mhd->nhd', alpha, V)       # (N, h, d)
+            agg = agg.reshape(N, -1)                           # (N, h*d)
+            agg = self.out_proj(agg)                           # (N, out)
+
+            # MixHop-style update with residual beta
+            H = self.beta * H_in + (1 - self.beta) * agg
+            out = out + self.Ws[k](H)
+
+        return out
+
+
 class _TypeMeanPool(nn.Module):
     """Per-type mean pooling → concat → project."""
 
@@ -110,7 +186,8 @@ class HeteroMixHopCMGM(nn.Module):
         self.use_lstm = variant != "gcn_only"
         self.use_learn_graph = variant != "no_learn_graph"
         self.use_type_proj   = variant != "no_type_proj"
-        self.use_mixhop      = variant != "no_mixhop"
+        self.use_mixhop      = variant not in ("no_mixhop", "edge_attn")
+        self.use_edge_attn   = variant == "edge_attn"
         self.use_gate        = variant not in ("no_gate", "gcn_only", "lstm_only")
 
         # ── Multi-horizon output ──
@@ -134,10 +211,13 @@ class HeteroMixHopCMGM(nn.Module):
             else:
                 self.shared_proj = nn.Linear(feat_dim, LSTM_HIDDEN_DIM)
 
-            # MixHop (default) or single-hop GCN
+            # MixHop (default) / EdgeAttnMixHop (edge_attn) / single-hop GCN
             if self.use_mixhop:
                 self.mixhop1 = MixHopPropagation(LSTM_HIDDEN_DIM, LSTM_HIDDEN_DIM, K=2, beta=0.05)
                 self.mixhop2 = MixHopPropagation(LSTM_HIDDEN_DIM, LSTM_HIDDEN_DIM, K=2, beta=0.05)
+            elif self.use_edge_attn:
+                self.attn_mixhop1 = EdgeAttnMixHop(LSTM_HIDDEN_DIM, LSTM_HIDDEN_DIM, K=2, beta=0.05)
+                self.attn_mixhop2 = EdgeAttnMixHop(LSTM_HIDDEN_DIM, LSTM_HIDDEN_DIM, K=2, beta=0.05)
             else:
                 self.singlehop1 = _SingleHopGCN(LSTM_HIDDEN_DIM)
                 self.singlehop2 = _SingleHopGCN(LSTM_HIDDEN_DIM)
@@ -192,6 +272,9 @@ class HeteroMixHopCMGM(nn.Module):
         if self.use_mixhop:
             h1 = F.relu(self.mixhop1(x_proj, A))                       # (N, 64)
             h2 = self.mixhop2(h1, A)                                   # (N, 64)
+        elif self.use_edge_attn:
+            h1 = F.relu(self.attn_mixhop1(x_proj, A))                  # (N, 64)
+            h2 = self.attn_mixhop2(h1, A)                              # (N, 64)
         else:
             h1 = self.singlehop1(x_proj, A)                            # (N, 64)
             h2 = self.singlehop2(h1, A)                                # (N, 64)
@@ -263,6 +346,9 @@ class HeteroMixHopCMGM(nn.Module):
             if self.use_mixhop:
                 h1 = F.relu(self.mixhop1(x_proj, A))
                 h2 = self.mixhop2(h1, A)
+            elif self.use_edge_attn:
+                h1 = F.relu(self.attn_mixhop1(x_proj, A))
+                h2 = self.attn_mixhop2(h1, A)
             else:
                 h1 = self.singlehop1(x_proj, A)
                 h2 = self.singlehop2(h1, A)
