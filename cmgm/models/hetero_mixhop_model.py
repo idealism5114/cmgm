@@ -99,11 +99,17 @@ class EdgeAttnMixHop(nn.Module):
     def __init__(self, in_dim: int = LSTM_HIDDEN_DIM,
                  out_dim: int = LSTM_HIDDEN_DIM,
                  K: int = 2, beta: float = 0.05, n_heads: int = 4,
-                 dropout: float = 0.1):
+                 dropout: float = 0.1, hard_mask: bool = False):
         super().__init__()
         self.K = K
         self.beta = beta
         self.n_heads = n_heads
+        # hard_mask=True: attention softmax over structure neighbors only
+        # (A > threshold).  Use for static sparse graphs whose tiny edge
+        # weights would drown as log-priors (e.g. normalized Pearson).
+        # hard_mask=False: A acts as a soft logit prior (works well when
+        # A is a learned [0,1] adjacency like AdaptiveGraphLearner's).
+        self.hard_mask = hard_mask
         assert out_dim % n_heads == 0, "out_dim must be divisible by n_heads"
         self.head_dim = out_dim // n_heads
 
@@ -121,10 +127,10 @@ class EdgeAttnMixHop(nn.Module):
 
     def forward(self, x: torch.Tensor, A: torch.Tensor) -> torch.Tensor:
         N = A.size(0)
-        # Structure prior in logit space.  Clamp negatives (e.g. Pearson
-        # negative-correlation edges in static graphs) to zero — they
-        # contribute logit ≈ log(1e-6) ≈ −14, i.e. effectively masked out.
-        log_prior = torch.log(A.clamp(min=0) + 1e-6)          # (N, N) — structure prior
+        # Clamp negatives (Pearson negative-correlation edges) to zero
+        A_pos = A.clamp(min=0)
+        # Soft logit prior (learned [0,1] adjacency) or hard structure mask
+        log_prior = torch.log(A_pos + 1e-6)                    # (N, N)
         H = x
         H_in = x
         out = self.Ws[0](H)
@@ -135,7 +141,13 @@ class EdgeAttnMixHop(nn.Module):
             Kt = self.k(H).view(N, self.n_heads, self.head_dim)
             V  = self.v(H).view(N, self.n_heads, self.head_dim)
             e = torch.einsum('nhd,mhd->nmh', Q, Kt) / math.sqrt(self.head_dim)  # (N, M, h)
-            e = e + log_prior.unsqueeze(-1)                    # structure prior (N, M, 1)
+            if self.hard_mask:
+                # Attention over structure neighbors ONLY — softmax never
+                # sees non-edges, so tiny static edge weights can't drown
+                # the prior.
+                e = e.masked_fill((A_pos <= 1e-4).unsqueeze(-1), -1e9)
+            else:
+                e = e + log_prior.unsqueeze(-1)                # structure prior (N, M, 1)
             alpha = F.softmax(e, dim=1)                        # over source nodes
             alpha = self.attn_drop(alpha)
             agg = torch.einsum('nmh,mhd->nhd', alpha, V)       # (N, h, d)
@@ -221,8 +233,11 @@ class HeteroMixHopCMGM(nn.Module):
                 self.mixhop1 = MixHopPropagation(LSTM_HIDDEN_DIM, LSTM_HIDDEN_DIM, K=2, beta=0.05)
                 self.mixhop2 = MixHopPropagation(LSTM_HIDDEN_DIM, LSTM_HIDDEN_DIM, K=2, beta=0.05)
             elif self.use_edge_attn:
-                self.attn_mixhop1 = EdgeAttnMixHop(LSTM_HIDDEN_DIM, LSTM_HIDDEN_DIM, K=2, beta=0.05)
-                self.attn_mixhop2 = EdgeAttnMixHop(LSTM_HIDDEN_DIM, LSTM_HIDDEN_DIM, K=2, beta=0.05)
+                hard = (variant == "edge_attn_static")
+                self.attn_mixhop1 = EdgeAttnMixHop(
+                    LSTM_HIDDEN_DIM, LSTM_HIDDEN_DIM, K=2, beta=0.05, hard_mask=hard)
+                self.attn_mixhop2 = EdgeAttnMixHop(
+                    LSTM_HIDDEN_DIM, LSTM_HIDDEN_DIM, K=2, beta=0.05, hard_mask=hard)
             else:
                 self.singlehop1 = _SingleHopGCN(LSTM_HIDDEN_DIM)
                 self.singlehop2 = _SingleHopGCN(LSTM_HIDDEN_DIM)
