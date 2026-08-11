@@ -194,7 +194,7 @@ class HeteroMixHopCMGM(nn.Module):
     def __init__(self, num_nodes: int, n_commodities: int,
                  n_stock: int = 248, n_bond: int = 12,
                  variant: str = "full", feat_dim: int = FEATURE_DIM,
-                 attn_heads: int = 4, attn_dropout: float = 0.1,
+                 attn_heads: int = 8, attn_dropout: float = 0.1,
                  attn_prior_scale: float = 1.0):
         super().__init__()
         self.num_nodes = num_nodes

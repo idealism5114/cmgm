@@ -40,6 +40,11 @@ ALL_VARIANTS = [
     ("+AttnDrop05",         "edge_attn",        FEATURE_DIM, {'attn_dropout': 0.05}),
     ("+AttnPrior2",         "edge_attn",        FEATURE_DIM, {'attn_prior_scale': 2.0}),
     ("+AttnPrior05",        "edge_attn",        FEATURE_DIM, {'attn_prior_scale': 0.5}),
+    # Cross-validation of the two best directions (heads=8 × prior=0.5)
+    ("+AttnH8P05",          "edge_attn",        FEATURE_DIM,
+     {'attn_heads': 8, 'attn_prior_scale': 0.5}),
+    ("+AttnH8Drop05",       "edge_attn",        FEATURE_DIM,
+     {'attn_heads': 8, 'attn_dropout': 0.05}),
     # ── Component ablations ──
     ("-TypeProj",           "no_type_proj",     FEATURE_DIM, {}),
     ("-LearnGraph",         "no_learn_graph",   FEATURE_DIM, {}),
