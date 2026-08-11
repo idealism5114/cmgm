@@ -33,6 +33,7 @@ from torch_geometric.utils import to_dense_adj
 ALL_VARIANTS = [
     ("Full",                "full",           FEATURE_DIM),
     ("+EdgeAttn",           "edge_attn",      FEATURE_DIM),
+    ("+EdgeAttnStatic",     "edge_attn_static", FEATURE_DIM),
     ("-TypeProj",           "no_type_proj",   FEATURE_DIM),
     ("-LearnGraph",         "no_learn_graph", FEATURE_DIM),
     ("-MixHop",             "no_mixhop",      FEATURE_DIM),
@@ -182,8 +183,8 @@ def run_variant(name, variant, feat_dim, args, device, data21, data7):
                              n_stock=n_stock, n_bond=n_bond,
                              variant=variant, feat_dim=feat_dim).to(device)
 
-    # ── Static graph for no_learn_graph variant ──
-    if variant == "no_learn_graph":
+    # ── Static graph for variants without adaptive learner ──
+    if variant in ("no_learn_graph", "edge_attn_static"):
         graph = build_graph(data['train_returns'], data['market_indices'], method='pearson')
         ei, ew = graph['edge_index'], graph['edge_weight']
         A = to_dense_adj(ei, edge_attr=ew)[0].to(device)   # (N, N)

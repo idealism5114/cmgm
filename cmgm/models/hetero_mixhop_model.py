@@ -5,6 +5,8 @@ Supports ablation variants for the paper:
   variant="full"            — complete model (all components)
   variant="edge_attn"       — EdgeAttnMixHop: content-aware edge attention
                               (structure prior A masks attention logits)
+  variant="edge_attn_static" — EdgeAttnMixHop + static Pearson structure
+                              (structure prior = static graph, weights dynamic)
   variant="no_type_proj"    — shared input projection (no per-type)
   variant="no_learn_graph"  — static Pearson graph (no adaptive learner)
   variant="no_mixhop"       — single-hop GCN (no MixHop multi-hop)
@@ -119,7 +121,10 @@ class EdgeAttnMixHop(nn.Module):
 
     def forward(self, x: torch.Tensor, A: torch.Tensor) -> torch.Tensor:
         N = A.size(0)
-        log_prior = torch.log(A + 1e-6)                       # (N, N) — structure prior
+        # Structure prior in logit space.  Clamp negatives (e.g. Pearson
+        # negative-correlation edges in static graphs) to zero — they
+        # contribute logit ≈ log(1e-6) ≈ −14, i.e. effectively masked out.
+        log_prior = torch.log(A.clamp(min=0) + 1e-6)          # (N, N) — structure prior
         H = x
         H_in = x
         out = self.Ws[0](H)
@@ -184,10 +189,10 @@ class HeteroMixHopCMGM(nn.Module):
         # ── Branch switches ──
         self.use_gcn  = variant != "lstm_only"
         self.use_lstm = variant != "gcn_only"
-        self.use_learn_graph = variant != "no_learn_graph"
+        self.use_learn_graph = variant not in ("no_learn_graph", "edge_attn_static")
         self.use_type_proj   = variant != "no_type_proj"
-        self.use_mixhop      = variant not in ("no_mixhop", "edge_attn")
-        self.use_edge_attn   = variant == "edge_attn"
+        self.use_mixhop      = variant not in ("no_mixhop", "edge_attn", "edge_attn_static")
+        self.use_edge_attn   = variant in ("edge_attn", "edge_attn_static")
         self.use_gate        = variant not in ("no_gate", "gcn_only", "lstm_only")
 
         # ── Multi-horizon output ──
