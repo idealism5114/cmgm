@@ -112,7 +112,8 @@ def run_single(args):
                              drop_last=(k=='train')) for k in ['train','val','test']}
 
     model = HeteroMixHopCMGM(data['n_nodes'], data['n_commodities'],
-                              n_stock=n_stock, n_bond=n_bond).to(device)
+                              n_stock=n_stock, n_bond=n_bond,
+                              variant="edge_attn").to(device)
     print(f"Params: {sum(p.numel() for p in model.parameters()):,}")
     print(f"Types: stock={n_stock}, bond={n_bond}, future={data['n_nodes']-n_stock-n_bond}")
     print(f"Features: {FEATURE_DIM}-dim (21 technical indicators from feature_builder)")
@@ -346,7 +347,8 @@ def run_comparison(args):
                            drop_last=(k=='train')) for k in ['train','val','test']}
     d = torch.empty(2, 0, dtype=torch.long), torch.zeros(0)
     m = HeteroMixHopCMGM(data['n_nodes'], data['n_commodities'],
-                          n_stock=n_stock, n_bond=n_bond).to(device)
+                          n_stock=n_stock, n_bond=n_bond,
+                          variant="edge_attn").to(device)
     train(m, fl_ht['train'], fl_ht['val'], d[0], d[1], device,
           num_epochs=args.epochs, patience=args.patience)
     if use_multi:

@@ -29,19 +29,26 @@ from cmgm.experiment_logger import ExperimentLogger
 
 from torch_geometric.utils import to_dense_adj
 
-# All variants: (display name, model variant, feat_dim)
+# All variants: (display name, model variant, feat_dim, model kwargs)
 ALL_VARIANTS = [
-    ("Full",                "full",           FEATURE_DIM),
-    ("+EdgeAttn",           "edge_attn",      FEATURE_DIM),
-    ("+EdgeAttnStatic",     "edge_attn_static", FEATURE_DIM),
-    ("-TypeProj",           "no_type_proj",   FEATURE_DIM),
-    ("-LearnGraph",         "no_learn_graph", FEATURE_DIM),
-    ("-MixHop",             "no_mixhop",      FEATURE_DIM),
-    ("-Gate",               "no_gate",        FEATURE_DIM),
-    ("-GCN",                "lstm_only",      FEATURE_DIM),
-    ("-LSTM",               "gcn_only",       FEATURE_DIM),
-    ("-MultiHorizon",       "single_horizon", FEATURE_DIM),
-    ("-Feat21",             "feat7",          7),
+    ("Full",                "full",             FEATURE_DIM, {}),
+    ("+EdgeAttn",           "edge_attn",        FEATURE_DIM, {}),
+    ("+EdgeAttnStatic",     "edge_attn_static", FEATURE_DIM, {}),
+    # ── Attention hyperparameter scan (heads / dropout / prior strength) ──
+    ("+AttnH8",             "edge_attn",        FEATURE_DIM, {'attn_heads': 8}),
+    ("+AttnH2",             "edge_attn",        FEATURE_DIM, {'attn_heads': 2}),
+    ("+AttnDrop05",         "edge_attn",        FEATURE_DIM, {'attn_dropout': 0.05}),
+    ("+AttnPrior2",         "edge_attn",        FEATURE_DIM, {'attn_prior_scale': 2.0}),
+    ("+AttnPrior05",        "edge_attn",        FEATURE_DIM, {'attn_prior_scale': 0.5}),
+    # ── Component ablations ──
+    ("-TypeProj",           "no_type_proj",     FEATURE_DIM, {}),
+    ("-LearnGraph",         "no_learn_graph",   FEATURE_DIM, {}),
+    ("-MixHop",             "no_mixhop",        FEATURE_DIM, {}),
+    ("-Gate",               "no_gate",          FEATURE_DIM, {}),
+    ("-GCN",                "lstm_only",        FEATURE_DIM, {}),
+    ("-LSTM",               "gcn_only",         FEATURE_DIM, {}),
+    ("-MultiHorizon",       "single_horizon",   FEATURE_DIM, {}),
+    ("-Feat21",             "feat7",            7,           {}),
 ]
 
 
@@ -152,10 +159,10 @@ def evaluate_primary_horizon(model, loader, data, device):
     return mn, compute_metrics(po, to)
 
 
-def run_variant(name, variant, feat_dim, args, device, data21, data7):
+def run_variant(name, variant, feat_dim, kwargs, args, device, data21, data7):
     set_seed(args.seed)
     print(f"\n{'=' * 90}")
-    print(f"  ABLATION: {name}  (variant={variant}, feat_dim={feat_dim})")
+    print(f"  ABLATION: {name}  (variant={variant}, feat_dim={feat_dim}, {kwargs})")
     print(f"{'=' * 90}")
     t0 = time.time()
 
@@ -181,7 +188,7 @@ def run_variant(name, variant, feat_dim, args, device, data21, data7):
     n_bond  = data['market_indices']['bond'][1] - data['market_indices']['bond'][0]
     model = HeteroMixHopCMGM(data['n_nodes'], data['n_commodities'],
                              n_stock=n_stock, n_bond=n_bond,
-                             variant=variant, feat_dim=feat_dim).to(device)
+                             variant=variant, feat_dim=feat_dim, **kwargs).to(device)
 
     # ── Static graph for variants without adaptive learner ──
     if variant in ("no_learn_graph", "edge_attn_static"):
@@ -258,9 +265,9 @@ def main():
 
     # ── Run all variants ──
     results = []
-    for name, variant, feat_dim in variants:
+    for name, variant, feat_dim, kwargs in variants:
         try:
-            r = run_variant(name, variant, feat_dim, args, device, data21, data7)
+            r = run_variant(name, variant, feat_dim, kwargs, args, device, data21, data7)
             results.append(r)
         except Exception as e:
             print(f"\n[FAILED] {name}: {e}")

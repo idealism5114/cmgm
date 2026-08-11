@@ -99,7 +99,8 @@ class EdgeAttnMixHop(nn.Module):
     def __init__(self, in_dim: int = LSTM_HIDDEN_DIM,
                  out_dim: int = LSTM_HIDDEN_DIM,
                  K: int = 2, beta: float = 0.05, n_heads: int = 4,
-                 dropout: float = 0.1, hard_mask: bool = False):
+                 dropout: float = 0.1, hard_mask: bool = False,
+                 prior_scale: float = 1.0):
         super().__init__()
         self.K = K
         self.beta = beta
@@ -110,6 +111,9 @@ class EdgeAttnMixHop(nn.Module):
         # hard_mask=False: A acts as a soft logit prior (works well when
         # A is a learned [0,1] adjacency like AdaptiveGraphLearner's).
         self.hard_mask = hard_mask
+        # prior_scale: strength of the structure prior in logit space
+        #   e_ij = content_score + prior_scale · log(A_ij + ε)
+        self.prior_scale = prior_scale
         assert out_dim % n_heads == 0, "out_dim must be divisible by n_heads"
         self.head_dim = out_dim // n_heads
 
@@ -147,7 +151,7 @@ class EdgeAttnMixHop(nn.Module):
                 # the prior.
                 e = e.masked_fill((A_pos <= 1e-4).unsqueeze(-1), -1e9)
             else:
-                e = e + log_prior.unsqueeze(-1)                # structure prior (N, M, 1)
+                e = e + self.prior_scale * log_prior.unsqueeze(-1)   # structure prior (N, M, 1)
             alpha = F.softmax(e, dim=1)                        # over source nodes
             alpha = self.attn_drop(alpha)
             agg = torch.einsum('nmh,mhd->nhd', alpha, V)       # (N, h, d)
@@ -189,7 +193,9 @@ class HeteroMixHopCMGM(nn.Module):
 
     def __init__(self, num_nodes: int, n_commodities: int,
                  n_stock: int = 248, n_bond: int = 12,
-                 variant: str = "full", feat_dim: int = FEATURE_DIM):
+                 variant: str = "full", feat_dim: int = FEATURE_DIM,
+                 attn_heads: int = 4, attn_dropout: float = 0.1,
+                 attn_prior_scale: float = 1.0):
         super().__init__()
         self.num_nodes = num_nodes
         self.n_commodities = n_commodities
@@ -197,6 +203,9 @@ class HeteroMixHopCMGM(nn.Module):
         self.n_bond = n_bond
         self.variant = variant
         self.feat_dim = feat_dim
+        self.attn_heads = attn_heads
+        self.attn_dropout = attn_dropout
+        self.attn_prior_scale = attn_prior_scale
 
         # ── Branch switches ──
         self.use_gcn  = variant != "lstm_only"
@@ -235,9 +244,13 @@ class HeteroMixHopCMGM(nn.Module):
             elif self.use_edge_attn:
                 hard = (variant == "edge_attn_static")
                 self.attn_mixhop1 = EdgeAttnMixHop(
-                    LSTM_HIDDEN_DIM, LSTM_HIDDEN_DIM, K=2, beta=0.05, hard_mask=hard)
+                    LSTM_HIDDEN_DIM, LSTM_HIDDEN_DIM, K=2, beta=0.05,
+                    n_heads=self.attn_heads, dropout=self.attn_dropout,
+                    hard_mask=hard, prior_scale=self.attn_prior_scale)
                 self.attn_mixhop2 = EdgeAttnMixHop(
-                    LSTM_HIDDEN_DIM, LSTM_HIDDEN_DIM, K=2, beta=0.05, hard_mask=hard)
+                    LSTM_HIDDEN_DIM, LSTM_HIDDEN_DIM, K=2, beta=0.05,
+                    n_heads=self.attn_heads, dropout=self.attn_dropout,
+                    hard_mask=hard, prior_scale=self.attn_prior_scale)
             else:
                 self.singlehop1 = _SingleHopGCN(LSTM_HIDDEN_DIM)
                 self.singlehop2 = _SingleHopGCN(LSTM_HIDDEN_DIM)
