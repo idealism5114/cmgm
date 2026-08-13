@@ -49,6 +49,8 @@ ALL_VARIANTS = [
     ("+TemporalAttn",       "temporal_attn",    FEATURE_DIM, {}),
     # Multi-scale temporal pooling: last + full + 10-step + 5-step means
     ("+MultiScaleT",        "multiscale_time",  FEATURE_DIM, {}),
+    # Diff input: concat first-order differences to LSTM input
+    ("+DiffInput",          "diff_input",       FEATURE_DIM, {}),
     # ── Component ablations ──
     ("-TypeProj",           "no_type_proj",     FEATURE_DIM, {}),
     ("-LearnGraph",         "no_learn_graph",   FEATURE_DIM, {}),

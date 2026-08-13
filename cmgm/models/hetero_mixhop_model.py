@@ -216,8 +216,9 @@ class HeteroMixHopCMGM(nn.Module):
         self.use_learn_graph = variant not in ("no_learn_graph", "edge_attn_static")
         self.use_type_proj   = variant != "no_type_proj"
         self.use_mixhop      = variant not in ("no_mixhop", "edge_attn", "edge_attn_static",
-                                               "temporal_attn")
-        self.use_edge_attn   = variant in ("edge_attn", "edge_attn_static", "temporal_attn")
+                                               "temporal_attn", "diff_input")
+        self.use_edge_attn   = variant in ("edge_attn", "edge_attn_static", "temporal_attn",
+                                           "diff_input")
         self.use_gate        = variant not in ("no_gate", "gcn_only", "lstm_only")
 
         # ── Multi-horizon output ──
@@ -282,8 +283,12 @@ class HeteroMixHopCMGM(nn.Module):
                 self.temporal_attn = nn.Linear(LSTM_HIDDEN_DIM, 1)
                 self.temporal_fuse = nn.Linear(LSTM_HIDDEN_DIM * 3, LSTM_HIDDEN_DIM)
             else:
+                # diff_input: concat first-order differences → 2× input size
+                lstm_in = num_nodes * feat_dim
+                if variant == "diff_input":
+                    lstm_in *= 2
                 self.temporal = nn.LSTM(
-                    input_size=num_nodes * feat_dim,
+                    input_size=lstm_in,
                     hidden_size=LSTM_HIDDEN_DIM,
                     num_layers=LSTM_NUM_LAYERS,
                     dropout=LSTM_DROPOUT if LSTM_NUM_LAYERS > 1 else 0.0,
@@ -391,6 +396,11 @@ class HeteroMixHopCMGM(nn.Module):
                 lstm_out = self._temporal_attn_forward(x)             # (B, 64)
             else:
                 x_seq = x.reshape(B, T, -1)                           # (B, T, N*F)
+                if self.variant == "diff_input":
+                    # First-order difference stream (Δx_t = x_t − x_{t−1})
+                    x_diff = torch.zeros_like(x_seq)
+                    x_diff[:, 1:] = x_seq[:, 1:] - x_seq[:, :-1]
+                    x_seq = torch.cat([x_seq, x_diff], dim=-1)        # (B, T, 2·N*F)
                 lstm_out_seq, (h_n, _) = self.temporal(x_seq)         # (B, T, 64)
                 if self.variant == "multiscale_time":
                     # Multi-scale temporal pooling:
@@ -466,6 +476,10 @@ class HeteroMixHopCMGM(nn.Module):
                 lstm_out = self._temporal_attn_forward(x)
             else:
                 x_seq = x.reshape(B, x.size(1), -1)
+                if self.variant == "diff_input":
+                    x_diff = torch.zeros_like(x_seq)
+                    x_diff[:, 1:] = x_seq[:, 1:] - x_seq[:, :-1]
+                    x_seq = torch.cat([x_seq, x_diff], dim=-1)
                 lstm_out_seq, (h_n, _) = self.temporal(x_seq)
                 if self.variant == "multiscale_time":
                     h_last = lstm_out_seq[:, -1, :]
