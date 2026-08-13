@@ -289,6 +289,10 @@ class HeteroMixHopCMGM(nn.Module):
                     dropout=LSTM_DROPOUT if LSTM_NUM_LAYERS > 1 else 0.0,
                     batch_first=True,
                 )
+                # Multi-scale temporal pooling: fuse last-state with
+                # mean-pool over full / 10-step / 5-step windows
+                if variant == "multiscale_time":
+                    self.ms_fuse = nn.Linear(LSTM_HIDDEN_DIM * 4, LSTM_HIDDEN_DIM)
 
         # ── Fusion ──
         if self.use_gate:
@@ -387,8 +391,18 @@ class HeteroMixHopCMGM(nn.Module):
                 lstm_out = self._temporal_attn_forward(x)             # (B, 64)
             else:
                 x_seq = x.reshape(B, T, -1)                           # (B, T, N*F)
-                lstm_out, (h_n, _) = self.temporal(x_seq)
-                lstm_out = h_n[-1]                                    # (B, 64)
+                lstm_out_seq, (h_n, _) = self.temporal(x_seq)         # (B, T, 64)
+                if self.variant == "multiscale_time":
+                    # Multi-scale temporal pooling:
+                    # last-state + full-window + 10-step + 5-step means
+                    h_last = lstm_out_seq[:, -1, :]                   # (B, 64)
+                    h_all  = lstm_out_seq.mean(dim=1)                 # (B, 64)
+                    h_10   = lstm_out_seq[:, -10:, :].mean(dim=1)     # (B, 64)
+                    h_5    = lstm_out_seq[:, -5:, :].mean(dim=1)      # (B, 64)
+                    lstm_out = F.relu(self.ms_fuse(
+                        torch.cat([h_last, h_all, h_10, h_5], dim=-1)))  # (B, 64)
+                else:
+                    lstm_out = h_n[-1]                                # (B, 64)
         else:
             lstm_out = None
 
@@ -452,8 +466,16 @@ class HeteroMixHopCMGM(nn.Module):
                 lstm_out = self._temporal_attn_forward(x)
             else:
                 x_seq = x.reshape(B, x.size(1), -1)
-                lstm_out, (h_n, _) = self.temporal(x_seq)
-                lstm_out = h_n[-1]
+                lstm_out_seq, (h_n, _) = self.temporal(x_seq)
+                if self.variant == "multiscale_time":
+                    h_last = lstm_out_seq[:, -1, :]
+                    h_all  = lstm_out_seq.mean(dim=1)
+                    h_10   = lstm_out_seq[:, -10:, :].mean(dim=1)
+                    h_5    = lstm_out_seq[:, -5:, :].mean(dim=1)
+                    lstm_out = F.relu(self.ms_fuse(
+                        torch.cat([h_last, h_all, h_10, h_5], dim=-1)))
+                else:
+                    lstm_out = h_n[-1]
 
             combined = torch.cat([gcn_out, lstm_out], dim=-1)
             gate = torch.sigmoid(self.gate_fc(combined))

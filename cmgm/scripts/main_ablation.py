@@ -47,6 +47,8 @@ ALL_VARIANTS = [
      {'attn_heads': 8, 'attn_dropout': 0.05}),
     # ── Temporal branch upgrade: per-type compression + temporal attention ──
     ("+TemporalAttn",       "temporal_attn",    FEATURE_DIM, {}),
+    # Multi-scale temporal pooling: last + full + 10-step + 5-step means
+    ("+MultiScaleT",        "multiscale_time",  FEATURE_DIM, {}),
     # ── Component ablations ──
     ("-TypeProj",           "no_type_proj",     FEATURE_DIM, {}),
     ("-LearnGraph",         "no_learn_graph",   FEATURE_DIM, {}),
