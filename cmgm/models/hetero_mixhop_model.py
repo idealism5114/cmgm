@@ -168,6 +168,63 @@ class EdgeAttnMixHop(nn.Module):
         return out
 
 
+class _CausalConv1d(nn.Module):
+    """Causal 1D convolution — no future leakage."""
+
+    def __init__(self, in_channels: int, out_channels: int,
+                 kernel_size: int, dilation: int = 1):
+        super().__init__()
+        self.pad = (kernel_size - 1) * dilation
+        self.conv = nn.Conv1d(in_channels, out_channels, kernel_size,
+                              dilation=dilation, padding=self.pad)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out = self.conv(x)                       # (B, C, T + pad)
+        if self.pad > 0:
+            out = out[:, :, :-self.pad]          # causal: drop future
+        return out
+
+
+class _MultiScaleTCN(nn.Module):
+    """
+    Multi-scale temporal convolution — replaces the LSTM branch.
+
+      x (B, T, in_dim) → shared projection (5964→256) per timestep
+      → 3 parallel causal-conv branches (kernels 3/5/7, dilations 1,2)
+      → fuse(3×64→64) → (B, T, 64)
+
+    Kernel sizes give the temporal branch an explicit multi-scale
+    inductive bias (short/medium/long local patterns), mirroring the
+    multi-scale pooling that proved effective in multiscale_time.
+    """
+
+    def __init__(self, in_dim: int, hidden: int = 256,
+                 out_dim: int = LSTM_HIDDEN_DIM,
+                 kernels: tuple = (3, 5, 7), dilations: tuple = (1, 2)):
+        super().__init__()
+        self.proj = nn.Linear(in_dim, hidden)         # per-timestep projection
+        self.branches = nn.ModuleList()
+        for k in kernels:
+            branch = nn.Sequential(
+                _CausalConv1d(hidden, out_dim, k, dilations[0]),
+                nn.ReLU(),
+                _CausalConv1d(out_dim, out_dim, k, dilations[1]),
+                nn.ReLU(),
+            )
+            self.branches.append(branch)
+        self.fuse = nn.Linear(len(kernels) * out_dim, out_dim)
+        self.norm = nn.LayerNorm(out_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, T, in_dim)
+        h = F.relu(self.proj(x))                      # (B, T, hidden)
+        h = h.permute(0, 2, 1)                        # (B, hidden, T)
+        outs = [b(h) for b in self.branches]          # each (B, out, T)
+        merged = torch.cat(outs, dim=1).permute(0, 2, 1)   # (B, T, 3·out)
+        out = self.norm(self.fuse(merged))            # (B, T, out)
+        return out
+
+
 class _TypeMeanPool(nn.Module):
     """Per-type mean pooling → concat → project."""
 
@@ -282,6 +339,11 @@ class HeteroMixHopCMGM(nn.Module):
                 # B: temporal attention — fuse last-state, mean-pool, attn-pool
                 self.temporal_attn = nn.Linear(LSTM_HIDDEN_DIM, 1)
                 self.temporal_fuse = nn.Linear(LSTM_HIDDEN_DIM * 3, LSTM_HIDDEN_DIM)
+            elif variant == "tcn_temporal":
+                # Multi-scale TCN replaces the LSTM entirely
+                self.tcn = _MultiScaleTCN(in_dim=num_nodes * feat_dim)
+                # Multi-scale temporal pooling (reuse verified mechanism)
+                self.ms_fuse = nn.Linear(LSTM_HIDDEN_DIM * 4, LSTM_HIDDEN_DIM)
             else:
                 # diff_input: concat first-order differences → 2× input size
                 lstm_in = num_nodes * feat_dim
@@ -426,10 +488,20 @@ class HeteroMixHopCMGM(nn.Module):
         # ── 1. Spatial branch (MixHop / single-hop GCN) ──
         gcn_out = self._spatial_forward(x) if self.use_gcn else None   # (B, 64)
 
-        # ── 2. Temporal branch (LSTM) ──
+        # ── 2. Temporal branch (LSTM or TCN) ──
         if self.use_lstm:
             if self.variant == "temporal_attn":
                 lstm_out = self._temporal_attn_forward(x)             # (B, 64)
+            elif self.variant == "tcn_temporal":
+                x_seq = x.reshape(B, T, -1)                           # (B, T, N*F)
+                tcn_out = self.tcn(x_seq)                             # (B, T, 64)
+                # Multi-scale temporal pooling (same as multiscale_time)
+                h_last = tcn_out[:, -1, :]                            # (B, 64)
+                h_all  = tcn_out.mean(dim=1)                          # (B, 64)
+                h_10   = tcn_out[:, -10:, :].mean(dim=1)              # (B, 64)
+                h_5    = tcn_out[:, -5:, :].mean(dim=1)               # (B, 64)
+                lstm_out = F.relu(self.ms_fuse(
+                    torch.cat([h_last, h_all, h_10, h_5], dim=-1)))   # (B, 64)
             else:
                 x_seq = x.reshape(B, T, -1)                           # (B, T, N*F)
                 if self.variant == "diff_input":
@@ -517,6 +589,15 @@ class HeteroMixHopCMGM(nn.Module):
 
             if self.variant == "temporal_attn":
                 lstm_out = self._temporal_attn_forward(x)
+            elif self.variant == "tcn_temporal":
+                x_seq = x.reshape(B, x.size(1), -1)
+                tcn_out = self.tcn(x_seq)
+                h_last = tcn_out[:, -1, :]
+                h_all  = tcn_out.mean(dim=1)
+                h_10   = tcn_out[:, -10:, :].mean(dim=1)
+                h_5    = tcn_out[:, -5:, :].mean(dim=1)
+                lstm_out = F.relu(self.ms_fuse(
+                    torch.cat([h_last, h_all, h_10, h_5], dim=-1)))
             else:
                 x_seq = x.reshape(B, x.size(1), -1)
                 if self.variant == "diff_input":
