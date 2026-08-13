@@ -215,8 +215,9 @@ class HeteroMixHopCMGM(nn.Module):
         self.use_lstm = variant != "gcn_only"
         self.use_learn_graph = variant not in ("no_learn_graph", "edge_attn_static")
         self.use_type_proj   = variant != "no_type_proj"
-        self.use_mixhop      = variant not in ("no_mixhop", "edge_attn", "edge_attn_static")
-        self.use_edge_attn   = variant in ("edge_attn", "edge_attn_static")
+        self.use_mixhop      = variant not in ("no_mixhop", "edge_attn", "edge_attn_static",
+                                               "temporal_attn")
+        self.use_edge_attn   = variant in ("edge_attn", "edge_attn_static", "temporal_attn")
         self.use_gate        = variant not in ("no_gate", "gcn_only", "lstm_only")
 
         # ── Multi-horizon output ──
