@@ -315,6 +315,20 @@ class HeteroMixHopCMGM(nn.Module):
             nn.Linear(FC_HIDDEN_DIM, out_dim),
         )
 
+        # Horizon-aligned heads: each horizon has its own output head,
+        # fed by its own temporal context window (only in multi-horizon mode)
+        if variant == "horizon_align" and self.n_horizons > 1:
+            self.ha_horizons = MULTI_HORIZONS
+            self.ha_heads = nn.ModuleList([
+                nn.Sequential(
+                    nn.Linear(LSTM_HIDDEN_DIM, FC_HIDDEN_DIM),
+                    nn.ReLU(),
+                    nn.Dropout(GCN_DROPOUT),
+                    nn.Linear(FC_HIDDEN_DIM, n_commodities),
+                )
+                for _ in range(self.n_horizons)
+            ])
+
     def _spatial_forward(self, x: torch.Tensor) -> torch.Tensor:
         """MixHop / single-hop branch → (B, 64)."""
         N, T = x.size(2), x.size(1)
@@ -382,6 +396,28 @@ class HeteroMixHopCMGM(nn.Module):
         return F.relu(self.temporal_fuse(
             torch.cat([h_last, h_mean, h_attn], dim=-1)))             # (B, 64)
 
+    def _horizon_align_predict(self, out_seq: torch.Tensor,
+                               gcn_out: torch.Tensor) -> torch.Tensor:
+        """
+        Horizon-aligned output: each horizon h pools a context window of
+        min(h, T) steps from the LSTM output (1d→1 step, 5d→5, 10d→10,
+        20d→20), fuses it with the spatial representation via the shared
+        gate, and predicts with its own head.
+
+        Returns: (B, n_horizons, n_commodities)
+        """
+        B = out_seq.size(0)
+        T_seq = out_seq.size(1)
+        preds = []
+        for i, h in enumerate(self.ha_horizons):
+            w = min(h, T_seq)
+            ctx = out_seq[:, -w:, :].mean(dim=1)                      # (B, 64)
+            combined = torch.cat([gcn_out, ctx], dim=-1)              # (B, 128)
+            gate = torch.sigmoid(self.gate_fc(combined))
+            fused = gate * self.lstm_proj(ctx) + (1 - gate) * self.gcn_proj(gcn_out)
+            preds.append(self.ha_heads[i](fused))                     # (B, Nc)
+        return torch.stack(preds, dim=1)                              # (B, H, Nc)
+
     def forward(self, x: torch.Tensor,
                 edge_index=None, edge_weight=None,
                 debug: bool = False) -> torch.Tensor:
@@ -411,13 +447,17 @@ class HeteroMixHopCMGM(nn.Module):
                     h_5    = lstm_out_seq[:, -5:, :].mean(dim=1)      # (B, 64)
                     lstm_out = F.relu(self.ms_fuse(
                         torch.cat([h_last, h_all, h_10, h_5], dim=-1)))  # (B, 64)
+                elif self.variant == "horizon_align" and self.n_horizons > 1:
+                    lstm_out = lstm_out_seq                           # keep full sequence
                 else:
                     lstm_out = h_n[-1]                                # (B, 64)
         else:
             lstm_out = None
 
         # ── 3. Fusion ──
-        if self.variant == "gcn_only":
+        if self.variant == "horizon_align" and self.n_horizons > 1:
+            fused = None  # handled per-horizon in _horizon_align_predict
+        elif self.variant == "gcn_only":
             fused = gcn_out
         elif self.variant == "lstm_only":
             fused = lstm_out
@@ -432,11 +472,14 @@ class HeteroMixHopCMGM(nn.Module):
             fused = gate * lstm_p + (1 - gate) * gcn_p                 # (B, 64)
 
         # ── 4. Output head ──
-        pred = self.head(fused)                                        # (B, out_dim)
-        if self.n_horizons > 1:
-            pred = pred.view(B, self.n_horizons, self.n_commodities)   # (B, H, Nc)
+        if self.variant == "horizon_align" and self.n_horizons > 1:
+            pred = self._horizon_align_predict(lstm_out, gcn_out)      # (B, H, Nc)
         else:
-            pred = pred.view(B, self.n_commodities)                    # (B, Nc)
+            pred = self.head(fused)                                    # (B, out_dim)
+            if self.n_horizons > 1:
+                pred = pred.view(B, self.n_horizons, self.n_commodities)   # (B, H, Nc)
+            else:
+                pred = pred.view(B, self.n_commodities)                # (B, Nc)
 
         if debug:
             print(f"  [variant={self.variant}] "
@@ -488,6 +531,10 @@ class HeteroMixHopCMGM(nn.Module):
                     h_5    = lstm_out_seq[:, -5:, :].mean(dim=1)
                     lstm_out = F.relu(self.ms_fuse(
                         torch.cat([h_last, h_all, h_10, h_5], dim=-1)))
+                elif self.variant == "horizon_align" and self.n_horizons > 1:
+                    # use primary-horizon window (5d → 5 steps) for gate stats
+                    w = min(5, lstm_out_seq.size(1))
+                    lstm_out = lstm_out_seq[:, -w:, :].mean(dim=1)
                 else:
                     lstm_out = h_n[-1]
 

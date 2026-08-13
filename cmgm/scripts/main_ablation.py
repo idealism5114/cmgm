@@ -51,6 +51,8 @@ ALL_VARIANTS = [
     ("+MultiScaleT",        "multiscale_time",  FEATURE_DIM, {}),
     # Diff input: concat first-order differences to LSTM input
     ("+DiffInput",          "diff_input",       FEATURE_DIM, {}),
+    # Horizon-aligned output: per-horizon context window + per-horizon head
+    ("+HorizonAlign",       "horizon_align",    FEATURE_DIM, {}),
     # ── Component ablations ──
     ("-TypeProj",           "no_type_proj",     FEATURE_DIM, {}),
     ("-LearnGraph",         "no_learn_graph",   FEATURE_DIM, {}),
