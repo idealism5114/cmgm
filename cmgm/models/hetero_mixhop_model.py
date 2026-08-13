@@ -7,6 +7,9 @@ Supports ablation variants for the paper:
                               (structure prior A masks attention logits)
   variant="edge_attn_static" — EdgeAttnMixHop + static Pearson structure
                               (structure prior = static graph, weights dynamic)
+  variant="temporal_attn"   — A+B temporal branch: per-type per-timestep
+                              compression (N*F → 3×64) → LSTM(192→64) →
+                              temporal attention (last + mean + attn pool)
   variant="no_type_proj"    — shared input projection (no per-type)
   variant="no_learn_graph"  — static Pearson graph (no adaptive learner)
   variant="no_mixhop"       — single-hop GCN (no MixHop multi-hop)
@@ -195,7 +198,7 @@ class HeteroMixHopCMGM(nn.Module):
                  n_stock: int = 248, n_bond: int = 12,
                  variant: str = "full", feat_dim: int = FEATURE_DIM,
                  attn_heads: int = 8, attn_dropout: float = 0.1,
-                 attn_prior_scale: float = 1.0):
+                 attn_prior_scale: float = 0.5):
         super().__init__()
         self.num_nodes = num_nodes
         self.n_commodities = n_commodities
@@ -260,13 +263,31 @@ class HeteroMixHopCMGM(nn.Module):
 
         # ── Temporal branch ──
         if self.use_lstm:
-            self.temporal = nn.LSTM(
-                input_size=num_nodes * feat_dim,
-                hidden_size=LSTM_HIDDEN_DIM,
-                num_layers=LSTM_NUM_LAYERS,
-                dropout=LSTM_DROPOUT if LSTM_NUM_LAYERS > 1 else 0.0,
-                batch_first=True,
-            )
+            if variant == "temporal_attn":
+                # A: per-type temporal compression (each market block → 64)
+                n_future = num_nodes - n_stock - n_bond
+                self.stock_compress   = nn.Linear(n_stock * feat_dim, LSTM_HIDDEN_DIM)
+                self.bond_compress    = nn.Linear(n_bond * feat_dim, LSTM_HIDDEN_DIM)
+                self.future_compress  = nn.Linear(n_future * feat_dim, LSTM_HIDDEN_DIM)
+                # LSTM over compact market-state sequence (192 → 64)
+                self.temporal = nn.LSTM(
+                    input_size=LSTM_HIDDEN_DIM * 3,
+                    hidden_size=LSTM_HIDDEN_DIM,
+                    num_layers=LSTM_NUM_LAYERS,
+                    dropout=LSTM_DROPOUT if LSTM_NUM_LAYERS > 1 else 0.0,
+                    batch_first=True,
+                )
+                # B: temporal attention — fuse last-state, mean-pool, attn-pool
+                self.temporal_attn = nn.Linear(LSTM_HIDDEN_DIM, 1)
+                self.temporal_fuse = nn.Linear(LSTM_HIDDEN_DIM * 3, LSTM_HIDDEN_DIM)
+            else:
+                self.temporal = nn.LSTM(
+                    input_size=num_nodes * feat_dim,
+                    hidden_size=LSTM_HIDDEN_DIM,
+                    num_layers=LSTM_NUM_LAYERS,
+                    dropout=LSTM_DROPOUT if LSTM_NUM_LAYERS > 1 else 0.0,
+                    batch_first=True,
+                )
 
         # ── Fusion ──
         if self.use_gate:
@@ -317,6 +338,40 @@ class HeteroMixHopCMGM(nn.Module):
         gcn_out = self.type_pool(h).unsqueeze(0).expand(x.size(0), -1) # (B, 64)
         return gcn_out
 
+    def _temporal_attn_forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        A+B temporal branch:
+          per-timestep per-type compression (N*F → 3×64)
+          → LSTM over (B, T, 192) → (B, T, 64)
+          → fuse last-state / mean-pool / attention-pool → (B, 64)
+        """
+        B, T, N, n_feat = x.shape
+        n_stock, n_bond = self.n_stock, self.n_bond
+
+        # A: per-type compression per timestep
+        seqs = []
+        for t in range(T):
+            xt = x[:, t, :, :]                                        # (B, N, F)
+            s = self.stock_compress(xt[:, :n_stock].reshape(B, -1))   # (B, 64)
+            b = self.bond_compress(
+                xt[:, n_stock:n_stock + n_bond].reshape(B, -1))       # (B, 64)
+            f = self.future_compress(
+                xt[:, n_stock + n_bond:].reshape(B, -1))              # (B, 64)
+            seqs.append(torch.cat([s, b, f], dim=-1))                 # (B, 192)
+        x_seq = torch.stack(seqs, dim=1)                              # (B, T, 192)
+
+        # LSTM over compact market-state sequence
+        out, _ = self.temporal(x_seq)                                 # (B, T, 64)
+
+        # B: temporal attention pooling
+        h_last = out[:, -1, :]                                        # (B, 64)
+        h_mean = out.mean(dim=1)                                      # (B, 64)
+        scores = self.temporal_attn(out).squeeze(-1)                  # (B, T)
+        alpha = F.softmax(scores, dim=1)                              # (B, T)
+        h_attn = (out * alpha.unsqueeze(-1)).sum(dim=1)               # (B, 64)
+        return F.relu(self.temporal_fuse(
+            torch.cat([h_last, h_mean, h_attn], dim=-1)))             # (B, 64)
+
     def forward(self, x: torch.Tensor,
                 edge_index=None, edge_weight=None,
                 debug: bool = False) -> torch.Tensor:
@@ -327,9 +382,12 @@ class HeteroMixHopCMGM(nn.Module):
 
         # ── 2. Temporal branch (LSTM) ──
         if self.use_lstm:
-            x_seq = x.reshape(B, T, -1)                                # (B, T, N*F)
-            lstm_out, (h_n, _) = self.temporal(x_seq)
-            lstm_out = h_n[-1]                                         # (B, 64)
+            if self.variant == "temporal_attn":
+                lstm_out = self._temporal_attn_forward(x)             # (B, 64)
+            else:
+                x_seq = x.reshape(B, T, -1)                           # (B, T, N*F)
+                lstm_out, (h_n, _) = self.temporal(x_seq)
+                lstm_out = h_n[-1]                                    # (B, 64)
         else:
             lstm_out = None
 
@@ -389,9 +447,12 @@ class HeteroMixHopCMGM(nn.Module):
             B = x.size(0)
             gcn_out = self.type_pool(h).unsqueeze(0).expand(B, -1)
 
-            x_seq = x.reshape(B, x.size(1), -1)
-            lstm_out, (h_n, _) = self.temporal(x_seq)
-            lstm_out = h_n[-1]
+            if self.variant == "temporal_attn":
+                lstm_out = self._temporal_attn_forward(x)
+            else:
+                x_seq = x.reshape(B, x.size(1), -1)
+                lstm_out, (h_n, _) = self.temporal(x_seq)
+                lstm_out = h_n[-1]
 
             combined = torch.cat([gcn_out, lstm_out], dim=-1)
             gate = torch.sigmoid(self.gate_fc(combined))
