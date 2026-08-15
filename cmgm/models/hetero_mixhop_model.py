@@ -387,6 +387,25 @@ class HeteroMixHopCMGM(nn.Module):
             self.gcn_norm = nn.LayerNorm(LSTM_HIDDEN_DIM)
             self.type_pool = _TypeMeanPool(LSTM_HIDDEN_DIM, n_stock, n_bond)
 
+            # ── Multi-scale graph: dual spatial branches (short/long) ──
+            if variant == "multiscale_graph":
+                self.register_buffer('static_A_short', torch.zeros(num_nodes, num_nodes))
+                self.register_buffer('static_A_long',  torch.zeros(num_nodes, num_nodes))
+                self.attn_short1 = EdgeAttnMixHop(
+                    LSTM_HIDDEN_DIM, LSTM_HIDDEN_DIM, K=2, beta=0.05, hard_mask=True)
+                self.attn_short2 = EdgeAttnMixHop(
+                    LSTM_HIDDEN_DIM, LSTM_HIDDEN_DIM, K=2, beta=0.05, hard_mask=True)
+                self.attn_long1 = EdgeAttnMixHop(
+                    LSTM_HIDDEN_DIM, LSTM_HIDDEN_DIM, K=2, beta=0.05, hard_mask=True)
+                self.attn_long2 = EdgeAttnMixHop(
+                    LSTM_HIDDEN_DIM, LSTM_HIDDEN_DIM, K=2, beta=0.05, hard_mask=True)
+                self.gcn_norm_s = nn.LayerNorm(LSTM_HIDDEN_DIM)
+                self.gcn_norm_l = nn.LayerNorm(LSTM_HIDDEN_DIM)
+                self.type_pool_s = _TypeMeanPool(LSTM_HIDDEN_DIM, n_stock, n_bond)
+                self.type_pool_l = _TypeMeanPool(LSTM_HIDDEN_DIM, n_stock, n_bond)
+                # 3-way softmax fusion over [short, long, lstm]
+                self.fuse3 = nn.Linear(LSTM_HIDDEN_DIM * 3, 3)
+
         # ── Temporal branch ──
         if self.use_lstm:
             if variant == "temporal_attn":
@@ -558,9 +577,63 @@ class HeteroMixHopCMGM(nn.Module):
             preds.append(self.ha_heads[i](fused))                     # (B, Nc)
         return torch.stack(preds, dim=1)                              # (B, H, Nc)
 
+    def _multiscale_graph_forward(self, x: torch.Tensor,
+                                  debug: bool = False) -> torch.Tensor:
+        """
+        Multi-scale graph branch: dual spatial branches on short-memory
+        (λ=0.9) and long-memory (λ=0.99) EWMA graphs, fused with the LSTM
+        via a 3-way softmax gate.
+
+        A_short/A_long are injected as static buffers (hard-mask mode of
+        EdgeAttnMixHop — structure from EWMA, weights from content attention).
+        """
+        B, T, N, _ = x.shape
+
+        # Shared per-type projection (same input prep as spatial branch)
+        x_gcn = x.mean(dim=0).permute(1, 0, 2)                        # (N, T, F)
+        x_proj = self.type_proj(x_gcn, self.n_stock, self.n_bond)     # (N, T, 64)
+        x_proj = x_proj.mean(dim=1)                                   # (N, 64)
+
+        # ── Short-memory spatial branch ──
+        h_s1 = F.relu(self.attn_short1(x_proj, self.static_A_short))  # (N, 64)
+        h_s2 = self.attn_short2(h_s1, self.static_A_short)
+        gcn_short = self.type_pool_s(self.gcn_norm_s(h_s2)).unsqueeze(0).expand(B, -1)  # (B, 64)
+
+        # ── Long-memory spatial branch ──
+        h_l1 = F.relu(self.attn_long1(x_proj, self.static_A_long))    # (N, 64)
+        h_l2 = self.attn_long2(h_l1, self.static_A_long)
+        gcn_long = self.type_pool_l(self.gcn_norm_l(h_l2)).unsqueeze(0).expand(B, -1)   # (B, 64)
+
+        # ── Temporal branch (LSTM, unchanged) ──
+        x_seq = x.reshape(B, T, -1)                                   # (B, T, N*F)
+        lstm_out, (h_n, _) = self.temporal(x_seq)
+        lstm_out = h_n[-1]                                            # (B, 64)
+
+        # ── 3-way softmax fusion ──
+        combined = torch.cat([gcn_short, gcn_long, lstm_out], dim=-1)  # (B, 192)
+        gate = F.softmax(self.fuse3(combined), dim=-1)                # (B, 3)
+        fused = (gate[:, 0:1] * gcn_short
+                 + gate[:, 1:2] * gcn_long
+                 + gate[:, 2:3] * lstm_out)                           # (B, 64)
+
+        pred = self.head(fused)
+        if self.n_horizons > 1:
+            pred = pred.view(B, self.n_horizons, self.n_commodities)
+        else:
+            pred = pred.view(B, self.n_commodities)
+
+        if debug:
+            print(f"  [multiscale_graph] short→{list(gcn_short.shape)} "
+                  f"long→{list(gcn_long.shape)} lstm→{list(lstm_out.shape)} "
+                  f"gate→{gate.mean(dim=0).tolist()} → head → {list(pred.shape)}")
+        return pred
+
     def forward(self, x: torch.Tensor,
                 edge_index=None, edge_weight=None,
                 debug: bool = False) -> torch.Tensor:
+        if self.variant == "multiscale_graph":
+            return self._multiscale_graph_forward(x, debug)
+
         B, T, N, n_feat = x.shape
 
         # ── 1. Spatial branch (MixHop / single-hop GCN) ──
@@ -654,6 +727,29 @@ class HeteroMixHopCMGM(nn.Module):
 
     def get_gate_stats(self, x, edge_index=None, edge_weight=None):
         """Return gating statistics (only meaningful for gate variants)."""
+        if self.variant == "multiscale_graph":
+            self.eval()
+            with torch.no_grad():
+                B, T, N, _ = x.shape
+                x_gcn = x.mean(dim=0).permute(1, 0, 2)
+                x_proj = self.type_proj(x_gcn, self.n_stock, self.n_bond)
+                x_proj = x_proj.mean(dim=1)
+                h_s1 = F.relu(self.attn_short1(x_proj, self.static_A_short))
+                h_s2 = self.attn_short2(h_s1, self.static_A_short)
+                gcn_short = self.type_pool_s(self.gcn_norm_s(h_s2)).unsqueeze(0).expand(B, -1)
+                h_l1 = F.relu(self.attn_long1(x_proj, self.static_A_long))
+                h_l2 = self.attn_long2(h_l1, self.static_A_long)
+                gcn_long = self.type_pool_l(self.gcn_norm_l(h_l2)).unsqueeze(0).expand(B, -1)
+                x_seq = x.reshape(B, T, -1)
+                lstm_out, (h_n, _) = self.temporal(x_seq)
+                lstm_out = h_n[-1]
+                combined = torch.cat([gcn_short, gcn_long, lstm_out], dim=-1)
+                gate = F.softmax(self.fuse3(combined), dim=-1)
+            return {
+                'gate_short': gate[:, 0].mean().item(),
+                'gate_long':  gate[:, 1].mean().item(),
+                'gate_lstm':  gate[:, 2].mean().item(),
+            }
         if not self.use_gate:
             return {'mode': self.variant, 'note': 'not using gated fusion'}
         self.eval()

@@ -29,6 +29,40 @@ from cmgm.experiment_logger import ExperimentLogger
 
 from torch_geometric.utils import to_dense_adj
 
+
+def build_ewma_graph(returns: np.ndarray, lam: float, top_k: int = 10) -> torch.Tensor:
+    """
+    Exponentially-weighted (EWMA) correlation graph.
+
+    Weight w_t = (1−λ)·λ^(T−1−t): recent days matter more.  λ controls
+    the time memory of the graph — small λ → short-memory (fast linkages),
+    large λ → long-memory (stable structure).
+
+    Returns: dense adjacency (N, N) — top-k, symmetrized, self-loops,
+    row-normalized (suitable for EdgeAttnMixHop hard-mask mode).
+    """
+    T, N = returns.shape
+    w = (1.0 - lam) * lam ** np.arange(T - 1, -1, -1)      # (T,)
+    w /= w.sum()
+    mu = (returns * w[:, None]).sum(axis=0)                 # (N,)
+    centered = returns - mu
+    cov = (centered * w[:, None]).T @ centered              # (N, N)
+    sigma = np.sqrt(np.diag(cov))
+    sigma[sigma < 1e-12] = 1e-12
+    corr = cov / np.outer(sigma, sigma)
+    corr = np.nan_to_num(corr, nan=0.0, posinf=0.0, neginf=0.0)
+
+    # Top-k per row (keep signed correlations)
+    A = np.zeros_like(corr)
+    idx = np.argsort(np.abs(corr), axis=1)[:, -top_k:]
+    for i in range(N):
+        A[i, idx[i]] = corr[i, idx[i]]
+    # Symmetrize + self-loops + row-normalize
+    A = np.maximum(A, A.T)
+    A = A + np.eye(N)
+    A = A / A.sum(axis=1, keepdims=True).clip(min=1e-8)
+    return torch.from_numpy(A.astype(np.float32))
+
 # All variants: (display name, model variant, feat_dim, model kwargs)
 ALL_VARIANTS = [
     ("Full",                "full",             FEATURE_DIM, {}),
@@ -59,6 +93,8 @@ ALL_VARIANTS = [
     ("+PatchTST",           "patch_temporal",   FEATURE_DIM, {}),
     # Multi-scale attention pooling (attention in window instead of mean)
     ("+AttnPool",           "attn_pool",        FEATURE_DIM, {}),
+    # Multi-scale graph: dual spatial branches (EWMA short λ=0.9 / long λ=0.99)
+    ("+MultiScaleGraph",    "multiscale_graph", FEATURE_DIM, {}),
     # ── Component ablations ──
     ("-TypeProj",           "no_type_proj",     FEATURE_DIM, {}),
     ("-LearnGraph",         "no_learn_graph",   FEATURE_DIM, {}),
@@ -216,6 +252,15 @@ def run_variant(name, variant, feat_dim, kwargs, args, device, data21, data7):
         A = to_dense_adj(ei, edge_attr=ew)[0].to(device)   # (N, N)
         model.static_A.copy_(A)
         print(f"  [Static graph] Pearson top-10 dense adjacency: {tuple(A.shape)}")
+
+    # ── Dual EWMA graphs for multi-scale graph variant ──
+    if variant == "multiscale_graph":
+        A_short = build_ewma_graph(data['train_returns'], lam=0.9).to(device)
+        A_long  = build_ewma_graph(data['train_returns'], lam=0.99).to(device)
+        model.static_A_short.copy_(A_short)
+        model.static_A_long.copy_(A_long)
+        print(f"  [EWMA graphs] short λ=0.9: {tuple(A_short.shape)}  "
+              f"long λ=0.99: {tuple(A_long.shape)}")
 
     n_params = sum(p.numel() for p in model.parameters())
     print(f"  Params: {n_params:,}")
