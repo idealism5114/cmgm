@@ -272,6 +272,26 @@ class _PatchTemporal(nn.Module):
         return self.fc(out)                                        # (B, 64)
 
 
+class _ScaleAttnPool(nn.Module):
+    """
+    Attention pooling over a fixed window of temporal states.
+
+    Upgrade over hard mean-pooling in multiscale_time: learns which days
+    inside a scale window matter (e.g. skips post-holiday gaps, earnings
+    spikes) instead of averaging all days equally.
+    """
+
+    def __init__(self, hidden_dim: int = LSTM_HIDDEN_DIM):
+        super().__init__()
+        self.scorer = nn.Linear(hidden_dim, 1)
+
+    def forward(self, seq: torch.Tensor) -> torch.Tensor:
+        # seq: (B, w, H)
+        scores = self.scorer(seq).squeeze(-1)          # (B, w)
+        alpha = F.softmax(scores, dim=1)               # (B, w)
+        return (seq * alpha.unsqueeze(-1)).sum(dim=1)  # (B, H)
+
+
 class _TypeMeanPool(nn.Module):
     """Per-type mean pooling → concat → project."""
 
@@ -410,6 +430,13 @@ class HeteroMixHopCMGM(nn.Module):
                 # Multi-scale temporal pooling: fuse last-state with
                 # mean-pool over full / 10-step / 5-step windows
                 if variant == "multiscale_time":
+                    self.ms_fuse = nn.Linear(LSTM_HIDDEN_DIM * 4, LSTM_HIDDEN_DIM)
+                # Multi-scale attention pooling: attention inside each scale
+                # window instead of hard mean (upgrade of multiscale_time)
+                if variant == "attn_pool":
+                    self.pool5  = _ScaleAttnPool()
+                    self.pool10 = _ScaleAttnPool()
+                    self.pool20 = _ScaleAttnPool()
                     self.ms_fuse = nn.Linear(LSTM_HIDDEN_DIM * 4, LSTM_HIDDEN_DIM)
 
         # ── Fusion ──
@@ -556,6 +583,16 @@ class HeteroMixHopCMGM(nn.Module):
             elif self.variant == "patch_temporal":
                 x_seq = x.reshape(B, T, -1)                           # (B, T, N*F)
                 lstm_out = self.patch(x_seq)                          # (B, 64)
+            elif self.variant == "attn_pool":
+                x_seq = x.reshape(B, T, -1)                           # (B, T, N*F)
+                lstm_out_seq, (h_n, _) = self.temporal(x_seq)         # (B, T, 64)
+                # Multi-scale attention pooling (windows 5/10/20 + last)
+                h_last = lstm_out_seq[:, -1, :]                       # (B, 64)
+                h_5  = self.pool5(lstm_out_seq[:, -5:, :])            # (B, 64)
+                h_10 = self.pool10(lstm_out_seq[:, -10:, :])          # (B, 64)
+                h_20 = self.pool20(lstm_out_seq[:, -20:, :])          # (B, 64)
+                lstm_out = F.relu(self.ms_fuse(
+                    torch.cat([h_last, h_5, h_10, h_20], dim=-1)))    # (B, 64)
             else:
                 x_seq = x.reshape(B, T, -1)                           # (B, T, N*F)
                 if self.variant == "diff_input":
@@ -655,6 +692,15 @@ class HeteroMixHopCMGM(nn.Module):
             elif self.variant == "patch_temporal":
                 x_seq = x.reshape(B, x.size(1), -1)
                 lstm_out = self.patch(x_seq)
+            elif self.variant == "attn_pool":
+                x_seq = x.reshape(B, x.size(1), -1)
+                lstm_out_seq, (h_n, _) = self.temporal(x_seq)
+                h_last = lstm_out_seq[:, -1, :]
+                h_5  = self.pool5(lstm_out_seq[:, -5:, :])
+                h_10 = self.pool10(lstm_out_seq[:, -10:, :])
+                h_20 = self.pool20(lstm_out_seq[:, -20:, :])
+                lstm_out = F.relu(self.ms_fuse(
+                    torch.cat([h_last, h_5, h_10, h_20], dim=-1)))
             else:
                 x_seq = x.reshape(B, x.size(1), -1)
                 if self.variant == "diff_input":

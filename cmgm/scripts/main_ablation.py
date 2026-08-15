@@ -57,6 +57,8 @@ ALL_VARIANTS = [
     ("+TCNTemporal",        "tcn_temporal",     FEATURE_DIM, {}),
     # PatchTST-style temporal branch (patch_len=5 aligned with 5d horizon)
     ("+PatchTST",           "patch_temporal",   FEATURE_DIM, {}),
+    # Multi-scale attention pooling (attention in window instead of mean)
+    ("+AttnPool",           "attn_pool",        FEATURE_DIM, {}),
     # ── Component ablations ──
     ("-TypeProj",           "no_type_proj",     FEATURE_DIM, {}),
     ("-LearnGraph",         "no_learn_graph",   FEATURE_DIM, {}),
