@@ -55,6 +55,8 @@ ALL_VARIANTS = [
     ("+HorizonAlign",       "horizon_align",    FEATURE_DIM, {}),
     # Multi-scale TCN replaces the LSTM temporal branch
     ("+TCNTemporal",        "tcn_temporal",     FEATURE_DIM, {}),
+    # PatchTST-style temporal branch (patch_len=5 aligned with 5d horizon)
+    ("+PatchTST",           "patch_temporal",   FEATURE_DIM, {}),
     # ── Component ablations ──
     ("-TypeProj",           "no_type_proj",     FEATURE_DIM, {}),
     ("-LearnGraph",         "no_learn_graph",   FEATURE_DIM, {}),

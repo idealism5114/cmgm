@@ -44,7 +44,7 @@ import torch.nn.functional as F
 from cmgm.config import (
     GCN_DROPOUT,
     LSTM_HIDDEN_DIM, LSTM_NUM_LAYERS, LSTM_DROPOUT,
-    FC_HIDDEN_DIM, FEATURE_DIM, MULTI_HORIZONS, TARGET_TYPE,
+    FC_HIDDEN_DIM, FEATURE_DIM, MULTI_HORIZONS, TARGET_TYPE, SEQ_LEN,
 )
 from cmgm.models.model import MixHopPropagation
 from cmgm.graph.adaptive_graph import AdaptiveGraphLearner
@@ -225,6 +225,53 @@ class _MultiScaleTCN(nn.Module):
         return out
 
 
+class _PatchTemporal(nn.Module):
+    """
+    PatchTST-style temporal branch (ICLR 2023).
+
+      x (B, T, in_dim) → shared per-timestep projection (5964→256)
+      → non-overlapping patches of patch_len steps (aligned with the
+        primary 5d horizon: T=20 → 4 patches)
+      → patch embedding (patch_len·256 → d_model)
+      → small Transformer encoder over the patch tokens
+      → mean-pool → (B, 64)
+
+    Patchification is a structural multi-scale inductive bias: each token
+    aggregates 5 consecutive days (≈ a week), and attention mixes the
+    4 weekly states — mirroring the multi-scale idea that proved
+    effective in multiscale_time, but learned.
+    """
+
+    def __init__(self, in_dim: int, t_len: int = 20, patch_len: int = 5,
+                 proj_dim: int = 256, d_model: int = 128,
+                 n_layers: int = 2, n_heads: int = 4):
+        super().__init__()
+        assert t_len % patch_len == 0, "T must be divisible by patch_len"
+        self.patch_len = patch_len
+        self.n_patches = t_len // patch_len
+
+        self.proj = nn.Linear(in_dim, proj_dim)                    # per-timestep
+        self.patch_embed = nn.Linear(patch_len * proj_dim, d_model)
+        self.pos_enc = nn.Parameter(torch.randn(1, self.n_patches, d_model) * 0.02)
+        enc_layer = nn.TransformerEncoderLayer(
+            d_model=d_model, nhead=n_heads, dim_feedforward=d_model * 2,
+            dropout=0.1, batch_first=True)
+        self.encoder = nn.TransformerEncoder(enc_layer, num_layers=n_layers)
+        self.norm = nn.LayerNorm(d_model)
+        self.fc = nn.Linear(d_model, LSTM_HIDDEN_DIM)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, T, in_dim)
+        B = x.size(0)
+        h = F.relu(self.proj(x))                                   # (B, T, proj_dim)
+        h = h.view(B, self.n_patches, self.patch_len * h.size(-1)) # (B, n_patch, pl·D)
+        tok = F.relu(self.patch_embed(h))                          # (B, n_patch, d_model)
+        tok = tok + self.pos_enc
+        out = self.encoder(tok)                                    # (B, n_patch, d_model)
+        out = self.norm(out.mean(dim=1))                           # (B, d_model)
+        return self.fc(out)                                        # (B, 64)
+
+
 class _TypeMeanPool(nn.Module):
     """Per-type mean pooling → concat → project."""
 
@@ -344,6 +391,10 @@ class HeteroMixHopCMGM(nn.Module):
                 self.tcn = _MultiScaleTCN(in_dim=num_nodes * feat_dim)
                 # Multi-scale temporal pooling (reuse verified mechanism)
                 self.ms_fuse = nn.Linear(LSTM_HIDDEN_DIM * 4, LSTM_HIDDEN_DIM)
+            elif variant == "patch_temporal":
+                # PatchTST-style branch (patch_len=5 aligned with 5d horizon)
+                self.patch = _PatchTemporal(in_dim=num_nodes * feat_dim,
+                                            t_len=SEQ_LEN, patch_len=5)
             else:
                 # diff_input: concat first-order differences → 2× input size
                 lstm_in = num_nodes * feat_dim
@@ -502,6 +553,9 @@ class HeteroMixHopCMGM(nn.Module):
                 h_5    = tcn_out[:, -5:, :].mean(dim=1)               # (B, 64)
                 lstm_out = F.relu(self.ms_fuse(
                     torch.cat([h_last, h_all, h_10, h_5], dim=-1)))   # (B, 64)
+            elif self.variant == "patch_temporal":
+                x_seq = x.reshape(B, T, -1)                           # (B, T, N*F)
+                lstm_out = self.patch(x_seq)                          # (B, 64)
             else:
                 x_seq = x.reshape(B, T, -1)                           # (B, T, N*F)
                 if self.variant == "diff_input":
@@ -598,6 +652,9 @@ class HeteroMixHopCMGM(nn.Module):
                 h_5    = tcn_out[:, -5:, :].mean(dim=1)
                 lstm_out = F.relu(self.ms_fuse(
                     torch.cat([h_last, h_all, h_10, h_5], dim=-1)))
+            elif self.variant == "patch_temporal":
+                x_seq = x.reshape(B, x.size(1), -1)
+                lstm_out = self.patch(x_seq)
             else:
                 x_seq = x.reshape(B, x.size(1), -1)
                 if self.variant == "diff_input":
