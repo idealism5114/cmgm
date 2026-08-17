@@ -95,6 +95,10 @@ ALL_VARIANTS = [
     ("+AttnPool",           "attn_pool",        FEATURE_DIM, {}),
     # Multi-scale graph: dual spatial branches (EWMA short λ=0.9 / long λ=0.99)
     ("+MultiScaleGraph",    "multiscale_graph", FEATURE_DIM, {}),
+    # Mamba (SSM) temporal branch — requires mamba-ssm (Linux CUDA)
+    ("+MambaTemporal",      "mamba_temporal",   FEATURE_DIM, {}),
+    # Informer-style temporal branch (ProbSparse attention encoder)
+    ("+InformerTemporal",   "informer_temporal", FEATURE_DIM, {}),
     # ── Component ablations ──
     ("-TypeProj",           "no_type_proj",     FEATURE_DIM, {}),
     ("-LearnGraph",         "no_learn_graph",   FEATURE_DIM, {}),

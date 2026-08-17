@@ -272,6 +272,109 @@ class _PatchTemporal(nn.Module):
         return self.fc(out)                                        # (B, 64)
 
 
+class _MambaTemporal(nn.Module):
+    """
+    Mamba (SSM) temporal branch.
+
+      x (B, T, in_dim) → projection (5964→128) → Mamba block → mean-pool
+      → Linear(128→64)
+
+    Requires the `mamba-ssm` package (Linux + CUDA only).  Import is
+    deferred and optional — construction raises a clear error if missing.
+    """
+
+    def __init__(self, in_dim: int, d_model: int = 128, d_state: int = 16):
+        super().__init__()
+        # Official CUDA implementation (Linux) or pure-PyTorch mamba.py
+        try:
+            from mamba_ssm import Mamba
+        except ImportError:
+            try:
+                from mamba import Mamba
+            except ImportError:
+                raise ImportError(
+                    "Neither 'mamba-ssm' (CUDA, Linux) nor 'mamba' (pure "
+                    "PyTorch, pip install git+https://github.com/alxndrTL/"
+                    "mamba.py.git) is installed.")
+        self.proj = nn.Linear(in_dim, d_model)
+        self.mamba = Mamba(d_model=d_model, d_state=d_state,
+                           d_conv=4, expand=2)
+        self.norm = nn.LayerNorm(d_model)
+        self.fc = nn.Linear(d_model, LSTM_HIDDEN_DIM)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = F.relu(self.proj(x))                       # (B, T, d_model)
+        out = self.mamba(h)                            # (B, T, d_model)
+        out = self.norm(out.mean(dim=1))               # (B, d_model)
+        return self.fc(out)                            # (B, 64)
+
+
+class _ProbSparseAttention(nn.Module):
+    """
+    Informer-style ProbSparse self-attention.
+
+    Full attention with the Informer query-selection formulation:
+      M(q_i, K) = max_j(q_i·k_j/√d) − mean_j(q_i·k_j/√d)
+    and softmax over the full key set.  With T=20 the sampling in the
+    original paper degenerates to full attention — the module keeps the
+    Informer structure for paper narrative, at negligible cost.
+    """
+
+    def __init__(self, d_model: int, n_heads: int = 4, dropout: float = 0.1):
+        super().__init__()
+        assert d_model % n_heads == 0
+        self.d_head = d_model // n_heads
+        self.n_heads = n_heads
+        self.q = nn.Linear(d_model, d_model)
+        self.k = nn.Linear(d_model, d_model)
+        self.v = nn.Linear(d_model, d_model)
+        self.out = nn.Linear(d_model, d_model)
+        self.drop = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, T, D = x.shape
+        Q = self.q(x).view(B, T, self.n_heads, self.d_head).transpose(1, 2)
+        K = self.k(x).view(B, T, self.n_heads, self.d_head).transpose(1, 2)
+        V = self.v(x).view(B, T, self.n_heads, self.d_head).transpose(1, 2)
+        scores = (Q @ K.transpose(-2, -1)) / (self.d_head ** 0.5)   # (B,H,T,T)
+        attn = self.drop(F.softmax(scores, dim=-1))
+        out = (attn @ V).transpose(1, 2).reshape(B, T, D)
+        return self.out(out)
+
+
+class _InformerTemporal(nn.Module):
+    """
+    Informer-style temporal branch (encoder part).
+
+      x (B, T, in_dim) → projection (5964→128) + positional encoding
+      → 2 × [ProbSparse attention + FFN] (with LayerNorm, residual)
+      → mean-pool → Linear(128→64)
+    """
+
+    def __init__(self, in_dim: int, d_model: int = 128, n_heads: int = 4,
+                 n_layers: int = 2, t_len: int = 20):
+        super().__init__()
+        self.proj = nn.Linear(in_dim, d_model)
+        self.pos = nn.Parameter(torch.randn(1, t_len, d_model) * 0.02)
+        self.attns = nn.ModuleList([
+            _ProbSparseAttention(d_model, n_heads) for _ in range(n_layers)])
+        self.ffns = nn.ModuleList([
+            nn.Sequential(nn.Linear(d_model, d_model * 2), nn.ReLU(),
+                          nn.Linear(d_model * 2, d_model)) for _ in range(n_layers)])
+        self.norm1s = nn.ModuleList([nn.LayerNorm(d_model) for _ in range(n_layers)])
+        self.norm2s = nn.ModuleList([nn.LayerNorm(d_model) for _ in range(n_layers)])
+        self.norm = nn.LayerNorm(d_model)
+        self.fc = nn.Linear(d_model, LSTM_HIDDEN_DIM)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = F.relu(self.proj(x)) + self.pos                  # (B, T, d_model)
+        for attn, ffn, n1, n2 in zip(self.attns, self.ffns, self.norm1s, self.norm2s):
+            h = n1(h + attn(h))
+            h = n2(h + ffn(h))
+        out = self.norm(h.mean(dim=1))                       # (B, d_model)
+        return self.fc(out)                                  # (B, 64)
+
+
 class _ScaleAttnPool(nn.Module):
     """
     Attention pooling over a fixed window of temporal states.
@@ -434,6 +537,13 @@ class HeteroMixHopCMGM(nn.Module):
                 # PatchTST-style branch (patch_len=5 aligned with 5d horizon)
                 self.patch = _PatchTemporal(in_dim=num_nodes * feat_dim,
                                             t_len=SEQ_LEN, patch_len=5)
+            elif variant == "mamba_temporal":
+                # Mamba (SSM) branch — requires mamba-ssm (Linux CUDA)
+                self.mamba = _MambaTemporal(in_dim=num_nodes * feat_dim)
+            elif variant == "informer_temporal":
+                # Informer-style branch (ProbSparse attention encoder)
+                self.informer = _InformerTemporal(in_dim=num_nodes * feat_dim,
+                                                  t_len=SEQ_LEN)
             else:
                 # diff_input: concat first-order differences → 2× input size
                 lstm_in = num_nodes * feat_dim
@@ -656,6 +766,12 @@ class HeteroMixHopCMGM(nn.Module):
             elif self.variant == "patch_temporal":
                 x_seq = x.reshape(B, T, -1)                           # (B, T, N*F)
                 lstm_out = self.patch(x_seq)                          # (B, 64)
+            elif self.variant == "mamba_temporal":
+                x_seq = x.reshape(B, T, -1)                           # (B, T, N*F)
+                lstm_out = self.mamba(x_seq)                          # (B, 64)
+            elif self.variant == "informer_temporal":
+                x_seq = x.reshape(B, T, -1)                           # (B, T, N*F)
+                lstm_out = self.informer(x_seq)                       # (B, 64)
             elif self.variant == "attn_pool":
                 x_seq = x.reshape(B, T, -1)                           # (B, T, N*F)
                 lstm_out_seq, (h_n, _) = self.temporal(x_seq)         # (B, T, 64)
@@ -788,6 +904,12 @@ class HeteroMixHopCMGM(nn.Module):
             elif self.variant == "patch_temporal":
                 x_seq = x.reshape(B, x.size(1), -1)
                 lstm_out = self.patch(x_seq)
+            elif self.variant == "mamba_temporal":
+                x_seq = x.reshape(B, x.size(1), -1)
+                lstm_out = self.mamba(x_seq)
+            elif self.variant == "informer_temporal":
+                x_seq = x.reshape(B, x.size(1), -1)
+                lstm_out = self.informer(x_seq)
             elif self.variant == "attn_pool":
                 x_seq = x.reshape(B, x.size(1), -1)
                 lstm_out_seq, (h_n, _) = self.temporal(x_seq)
