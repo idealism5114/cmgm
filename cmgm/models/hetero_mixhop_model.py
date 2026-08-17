@@ -285,17 +285,14 @@ class _MambaTemporal(nn.Module):
 
     def __init__(self, in_dim: int, d_model: int = 128, d_state: int = 16):
         super().__init__()
-        # Official CUDA implementation (Linux) or pure-PyTorch mamba.py
+        # Priority: official CUDA impl (Linux) → mamba.py → vendored impl
         try:
             from mamba_ssm import Mamba
         except ImportError:
             try:
                 from mamba import Mamba
             except ImportError:
-                raise ImportError(
-                    "Neither 'mamba-ssm' (CUDA, Linux) nor 'mamba' (pure "
-                    "PyTorch, pip install git+https://github.com/alxndrTL/"
-                    "mamba.py.git) is installed.")
+                from cmgm.models.mamba_impl import Mamba
         self.proj = nn.Linear(in_dim, d_model)
         self.mamba = Mamba(d_model=d_model, d_state=d_state,
                            d_conv=4, expand=2)
