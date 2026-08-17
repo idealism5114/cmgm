@@ -99,6 +99,10 @@ ALL_VARIANTS = [
     ("+MambaTemporal",      "mamba_temporal",   FEATURE_DIM, {}),
     # Informer-style temporal branch (ProbSparse attention encoder)
     ("+InformerTemporal",   "informer_temporal", FEATURE_DIM, {}),
+    # Hybrid attention: 4 self (full graph) + 4 directed cross-market heads
+    ("+HybridAttn",         "hybrid_attn",      FEATURE_DIM, {}),
+    # Cross-only: all 8 heads restricted to directed cross-market pairs
+    ("+CrossOnly",          "hybrid_attn",      FEATURE_DIM, {'attn_self_heads': 0}),
     # ── Component ablations ──
     ("-TypeProj",           "no_type_proj",     FEATURE_DIM, {}),
     ("-LearnGraph",         "no_learn_graph",   FEATURE_DIM, {}),
