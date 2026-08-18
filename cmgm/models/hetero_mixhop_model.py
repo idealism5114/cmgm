@@ -428,7 +428,10 @@ class _ScaleAttnPool(nn.Module):
 
 
 class _TypeMeanPool(nn.Module):
-    """Per-type mean pooling → concat → project."""
+    """Per-type mean pooling → concat → project.
+
+    Supports both single-graph (N, H) → (H,) and per-sample (B, N, H) → (B, H).
+    """
 
     def __init__(self, hidden_dim: int = LSTM_HIDDEN_DIM,
                  n_stock: int = 248, n_bond: int = 12):
@@ -438,11 +441,18 @@ class _TypeMeanPool(nn.Module):
         self.type_agg = nn.Linear(3 * hidden_dim, hidden_dim)
 
     def forward(self, h: torch.Tensor) -> torch.Tensor:
-        stock_pool  = h[:self.n_stock, :].mean(dim=0)
-        bond_pool   = h[self.n_stock:self.n_stock+self.n_bond, :].mean(dim=0)
-        future_pool = h[self.n_stock+self.n_bond:, :].mean(dim=0)
-        concat = torch.cat([stock_pool, bond_pool, future_pool])
-        return self.type_agg(concat)
+        if h.dim() == 2:
+            stock_pool  = h[:self.n_stock, :].mean(dim=0)
+            bond_pool   = h[self.n_stock:self.n_stock+self.n_bond, :].mean(dim=0)
+            future_pool = h[self.n_stock+self.n_bond:, :].mean(dim=0)
+            concat = torch.cat([stock_pool, bond_pool, future_pool])
+            return self.type_agg(concat)
+        else:
+            stock_pool  = h[:, :self.n_stock, :].mean(dim=1)               # (B, H)
+            bond_pool   = h[:, self.n_stock:self.n_stock+self.n_bond, :].mean(dim=1)
+            future_pool = h[:, self.n_stock+self.n_bond:, :].mean(dim=1)
+            concat = torch.cat([stock_pool, bond_pool, future_pool], dim=-1)  # (B, 3H)
+            return self.type_agg(concat)
 
 
 class HeteroMixHopCMGM(nn.Module):
@@ -477,10 +487,11 @@ class HeteroMixHopCMGM(nn.Module):
         self.use_type_proj   = variant != "no_type_proj"
         self.use_mixhop      = variant not in ("no_mixhop", "edge_attn", "edge_attn_static",
                                                "temporal_attn", "diff_input", "hybrid_attn",
-                                               "node_level", "comm_nodes", "batch_graph")
+                                               "node_level", "comm_nodes", "batch_graph",
+                                               "factor_res")
         self.use_edge_attn   = variant in ("edge_attn", "edge_attn_static", "temporal_attn",
                                            "diff_input", "hybrid_attn", "node_level",
-                                           "comm_nodes", "batch_graph")
+                                           "comm_nodes", "batch_graph", "factor_res")
         self.use_gate        = variant not in ("no_gate", "gcn_only", "lstm_only")
 
         # ── Multi-horizon output ──
@@ -537,9 +548,9 @@ class HeteroMixHopCMGM(nn.Module):
                 self.singlehop2 = _SingleHopGCN(LSTM_HIDDEN_DIM)
 
             self.gcn_norm = nn.LayerNorm(LSTM_HIDDEN_DIM)
-            # node_level / comm_nodes / batch_graph: keep per-node
-            # representations — no full type pooling
-            if variant not in ("node_level", "comm_nodes", "batch_graph"):
+            # node_level / comm_nodes / batch_graph / factor_res: keep
+            # per-node representations — no full type pooling
+            if variant not in ("node_level", "comm_nodes", "batch_graph", "factor_res"):
                 self.type_pool = _TypeMeanPool(LSTM_HIDDEN_DIM, n_stock, n_bond)
             if variant in ("comm_nodes", "batch_graph"):
                 # shared body + per-commodity independent heads
@@ -550,6 +561,20 @@ class HeteroMixHopCMGM(nn.Module):
                     self.ext_fc = nn.Linear(LSTM_HIDDEN_DIM * 2, LSTM_HIDDEN_DIM)
                 self.comm_body = nn.Sequential(
                     nn.Linear(body_in, FC_HIDDEN_DIM),
+                    nn.ReLU(),
+                    nn.Dropout(GCN_DROPOUT),
+                )
+                self.comm_heads = nn.ModuleList([
+                    nn.Linear(FC_HIDDEN_DIM, self.n_horizons)
+                    for _ in range(n_commodities)
+                ])
+            if variant == "factor_res":
+                # factor model + per-commodity direction residual
+                self.type_pool = _TypeMeanPool(LSTM_HIDDEN_DIM, n_stock, n_bond)
+                self.mean_head = nn.Linear(LSTM_HIDDEN_DIM, self.n_horizons)
+                self.lam = nn.Parameter(torch.tensor(0.1))
+                self.comm_body = nn.Sequential(
+                    nn.Linear(LSTM_HIDDEN_DIM * 2, FC_HIDDEN_DIM),
                     nn.ReLU(),
                     nn.Dropout(GCN_DROPOUT),
                 )
@@ -953,6 +978,61 @@ class HeteroMixHopCMGM(nn.Module):
                   f"lstm→{list(lstm_expand.shape)} → body → heads → {list(pred.shape)}")
         return pred
 
+    def _factor_res_forward(self, x: torch.Tensor,
+                            debug: bool = False) -> torch.Tensor:
+        """
+        Factor + residual decomposition:
+          r̂_i = r̂_mean + λ·δ̂_i
+
+          - pooling branch (factor model): type-pooled market state →
+            market-mean return r̂_mean (stable, shared supervision)
+          - node branch: per-commodity graph features → direction residual
+            δ̂_i (tanh-bounded); λ is a learnable scale
+          - self.last_r_mean stores r̂_mean so the training loop can add
+            the mean-supervision auxiliary loss
+        """
+        B, T, N, _ = x.shape
+        fut_start = self.n_stock + self.n_bond
+
+        # ── Shared batch-aware spatial propagation ──
+        seqs = []
+        for t in range(T):
+            seqs.append(self.type_proj(x[:, t, :, :], self.n_stock, self.n_bond))
+        x_proj = torch.stack(seqs, dim=1).mean(dim=1)                  # (B, N, 64)
+        A = self.graph_learner() if self.use_learn_graph else self.static_A
+        h1 = F.relu(self.attn_mixhop1(x_proj, A))                     # (B, N, 64)
+        h2 = self.attn_mixhop2(h1, A)
+        h = self.gcn_norm(h2)                                         # (B, N, 64)
+
+        # ── Pooling branch: market-mean factor ──
+        r_mean = self.mean_head(self.type_pool(h))                    # (B, H)
+        self.last_r_mean = r_mean
+
+        # ── Node branch: per-commodity direction residual ──
+        gcn_comm = h[:, fut_start:, :]                                # (B, 24, 64)
+        x_seq = x.reshape(B, T, -1)
+        lstm_out, (h_n, _) = self.temporal(x_seq)
+        lstm_out = h_n[-1]                                            # (B, 64)
+        lstm_expand = lstm_out.unsqueeze(1).expand(B, self.n_commodities, -1)
+        fused = torch.cat([gcn_comm, lstm_expand], dim=-1)            # (B, 24, 128)
+        body = self.comm_body(fused)                                  # (B, 24, 64)
+        delta = torch.stack([self.comm_heads[i](body[:, i])
+                             for i in range(self.n_commodities)], dim=1)  # (B, 24, H)
+        delta = torch.tanh(delta)                                     # direction, [-1, 1]
+
+        # ── Combine: r̂_i = r̂_mean + λ·δ̂_i ──
+        preds = r_mean.unsqueeze(1) + self.lam * delta                # (B, 24, H)
+        if self.n_horizons > 1:
+            pred = preds.permute(0, 2, 1)                             # (B, H, 24)
+        else:
+            pred = preds.squeeze(-1)                                  # (B, 24)
+
+        if debug:
+            print(f"  [factor_res] r_mean→{list(r_mean.shape)} "
+                  f"delta→{list(delta.shape)} λ={self.lam.item():.3f} "
+                  f"→ pred {list(pred.shape)}")
+        return pred
+
     def forward(self, x: torch.Tensor,
                 edge_index=None, edge_weight=None,
                 debug: bool = False) -> torch.Tensor:
@@ -964,6 +1044,8 @@ class HeteroMixHopCMGM(nn.Module):
             return self._comm_nodes_forward(x, debug)
         if self.variant == "batch_graph":
             return self._batch_graph_forward(x, debug)
+        if self.variant == "factor_res":
+            return self._factor_res_forward(x, debug)
 
         B, T, N, n_feat = x.shape
 
@@ -1064,7 +1146,7 @@ class HeteroMixHopCMGM(nn.Module):
 
     def get_gate_stats(self, x, edge_index=None, edge_weight=None):
         """Return gating statistics (only meaningful for gate variants)."""
-        if self.variant in ("node_level", "comm_nodes", "batch_graph"):
+        if self.variant in ("node_level", "comm_nodes", "batch_graph", "factor_res"):
             return {'mode': self.variant, 'note': 'no gate — per-node fusion'}
         if self.variant == "multiscale_graph":
             self.eval()

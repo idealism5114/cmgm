@@ -96,6 +96,14 @@ def train_epoch(
         else:
             loss = criterion(pred, y_batch)
 
+        # Auxiliary loss: factor_res — supervise the market-mean branch
+        # (r̂_mean stored in model.last_r_mean during forward)
+        aux = getattr(model, 'last_r_mean', None)
+        if aux is not None:
+            if y_batch.dim() == 3:
+                y_mean = y_batch.mean(dim=-1)                    # (B, H)
+                loss = loss + criterion(aux, y_mean)
+
         # Backward pass
         loss.backward()
         optimizer.step()
@@ -155,6 +163,10 @@ def validate_epoch(
                        for h in range(pred.size(1)))
         else:
             loss = criterion(pred, y_batch)
+        # Auxiliary loss: factor_res — supervise the market-mean branch
+        aux = getattr(model, 'last_r_mean', None)
+        if aux is not None and y_batch.dim() == 3:
+            loss = loss + criterion(aux, y_batch.mean(dim=-1))
 
         total_loss += loss.item()
         num_batches += 1

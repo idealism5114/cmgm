@@ -109,6 +109,8 @@ ALL_VARIANTS = [
     ("+CommNodes",          "comm_nodes",       FEATURE_DIM, {}),
     # Batch-aware graph propagation: per-sample node representations
     ("+BatchGraph",         "batch_graph",      FEATURE_DIM, {}),
+    # Factor + residual: pooled market-mean + per-commodity direction
+    ("+FactorRes",          "factor_res",       FEATURE_DIM, {}),
     # ── Component ablations ──
     ("-TypeProj",           "no_type_proj",     FEATURE_DIM, {}),
     ("-LearnGraph",         "no_learn_graph",   FEATURE_DIM, {}),
