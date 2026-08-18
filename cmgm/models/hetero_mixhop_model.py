@@ -456,9 +456,10 @@ class HeteroMixHopCMGM(nn.Module):
         self.use_type_proj   = variant != "no_type_proj"
         self.use_mixhop      = variant not in ("no_mixhop", "edge_attn", "edge_attn_static",
                                                "temporal_attn", "diff_input", "hybrid_attn",
-                                               "node_level")
+                                               "node_level", "comm_nodes")
         self.use_edge_attn   = variant in ("edge_attn", "edge_attn_static", "temporal_attn",
-                                           "diff_input", "hybrid_attn", "node_level")
+                                           "diff_input", "hybrid_attn", "node_level",
+                                           "comm_nodes")
         self.use_gate        = variant not in ("no_gate", "gcn_only", "lstm_only")
 
         # ── Multi-horizon output ──
@@ -515,10 +516,23 @@ class HeteroMixHopCMGM(nn.Module):
                 self.singlehop2 = _SingleHopGCN(LSTM_HIDDEN_DIM)
 
             self.gcn_norm = nn.LayerNorm(LSTM_HIDDEN_DIM)
-            # node_level: keep per-node representations — no type pooling
-            # (futures subset is used directly for per-commodity prediction)
-            if variant != "node_level":
+            # node_level / comm_nodes: keep per-node representations —
+            # no full type pooling (futures subset used per-commodity)
+            if variant not in ("node_level", "comm_nodes"):
                 self.type_pool = _TypeMeanPool(LSTM_HIDDEN_DIM, n_stock, n_bond)
+            if variant == "comm_nodes":
+                # external markets (stock+bond) pooled to a global state
+                self.ext_fc = nn.Linear(LSTM_HIDDEN_DIM * 2, LSTM_HIDDEN_DIM)
+                # shared body + per-commodity independent heads
+                self.comm_body = nn.Sequential(
+                    nn.Linear(LSTM_HIDDEN_DIM * 3, FC_HIDDEN_DIM),
+                    nn.ReLU(),
+                    nn.Dropout(GCN_DROPOUT),
+                )
+                self.comm_heads = nn.ModuleList([
+                    nn.Linear(FC_HIDDEN_DIM, self.n_horizons)
+                    for _ in range(n_commodities)
+                ])
 
             # ── Multi-scale graph: dual spatial branches (short/long) ──
             if variant == "multiscale_graph":
@@ -820,6 +834,55 @@ class HeteroMixHopCMGM(nn.Module):
                   f"lstm→{list(lstm_expand.shape)} → head → {list(pred.shape)}")
         return pred
 
+    def _comm_nodes_forward(self, x: torch.Tensor,
+                            debug: bool = False) -> torch.Tensor:
+        """
+        Commodity-node spatial branch:
+          - commodity nodes keep their own graph representations (24, 64)
+          - stock/bond markets are pooled to a global external state (64,)
+          - per-commodity fusion: [own graph feat, external state, LSTM state]
+          - shared body + per-commodity independent heads (no gradient clash)
+        """
+        B, T, N, _ = x.shape
+        n_stock, n_bond = self.n_stock, self.n_bond
+
+        # ── Spatial: node-level graph representation ──
+        x_gcn = x.mean(dim=0).permute(1, 0, 2)                        # (N, T, F)
+        x_proj = self.type_proj(x_gcn, n_stock, n_bond)               # (N, T, 64)
+        x_proj = x_proj.mean(dim=1)                                   # (N, 64)
+        A = self.graph_learner() if self.use_learn_graph else self.static_A
+        h1 = F.relu(self.attn_mixhop1(x_proj, A))                     # (N, 64)
+        h2 = self.attn_mixhop2(h1, A)
+        h = self.gcn_norm(h2)                                         # (N, 64)
+
+        # Commodity nodes kept; stock/bond pooled to external global state
+        gcn_comm = h[n_stock + n_bond:].unsqueeze(0).expand(B, -1, -1)  # (B, 24, 64)
+        ext = F.relu(self.ext_fc(torch.cat([
+            h[:n_stock].mean(dim=0), h[n_stock:n_stock + n_bond].mean(dim=0)])))  # (64,)
+        ext_expand = ext.unsqueeze(0).unsqueeze(0).expand(B, self.n_commodities, -1)
+
+        # ── Temporal: global LSTM state, expanded per commodity ──
+        x_seq = x.reshape(B, T, -1)                                   # (B, T, N*F)
+        lstm_out, (h_n, _) = self.temporal(x_seq)
+        lstm_out = h_n[-1]                                            # (B, 64)
+        lstm_expand = lstm_out.unsqueeze(1).expand(B, self.n_commodities, -1)
+
+        # ── Shared body + per-commodity heads ──
+        fused = torch.cat([gcn_comm, ext_expand, lstm_expand], dim=-1)  # (B, 24, 192)
+        body = self.comm_body(fused)                                  # (B, 24, 64)
+        preds = torch.stack([self.comm_heads[i](body[:, i])
+                             for i in range(self.n_commodities)], dim=1)  # (B, 24, H)
+        if self.n_horizons > 1:
+            pred = preds.permute(0, 2, 1)                             # (B, H, 24)
+        else:
+            pred = preds.squeeze(-1)                                  # (B, 24)
+
+        if debug:
+            print(f"  [comm_nodes] gcn_comm→{list(gcn_comm.shape)} "
+                  f"ext→{list(ext_expand.shape)} lstm→{list(lstm_expand.shape)} "
+                  f"→ body → heads → {list(pred.shape)}")
+        return pred
+
     def forward(self, x: torch.Tensor,
                 edge_index=None, edge_weight=None,
                 debug: bool = False) -> torch.Tensor:
@@ -827,6 +890,8 @@ class HeteroMixHopCMGM(nn.Module):
             return self._multiscale_graph_forward(x, debug)
         if self.variant == "node_level":
             return self._node_level_forward(x, debug)
+        if self.variant == "comm_nodes":
+            return self._comm_nodes_forward(x, debug)
 
         B, T, N, n_feat = x.shape
 
@@ -927,7 +992,7 @@ class HeteroMixHopCMGM(nn.Module):
 
     def get_gate_stats(self, x, edge_index=None, edge_weight=None):
         """Return gating statistics (only meaningful for gate variants)."""
-        if self.variant == "node_level":
+        if self.variant in ("node_level", "comm_nodes"):
             return {'mode': self.variant, 'note': 'no gate — per-node fusion'}
         if self.variant == "multiscale_graph":
             self.eval()

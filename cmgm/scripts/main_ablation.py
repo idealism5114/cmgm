@@ -105,6 +105,8 @@ ALL_VARIANTS = [
     ("+CrossOnly",          "hybrid_attn",      FEATURE_DIM, {'attn_self_heads': 0}),
     # Node-level spatial: no type pooling — per-commodity graph features
     ("+NodeLevel",          "node_level",       FEATURE_DIM, {}),
+    # Commodity nodes kept + external markets pooled + per-commodity heads
+    ("+CommNodes",          "comm_nodes",       FEATURE_DIM, {}),
     # ── Component ablations ──
     ("-TypeProj",           "no_type_proj",     FEATURE_DIM, {}),
     ("-LearnGraph",         "no_learn_graph",   FEATURE_DIM, {}),
