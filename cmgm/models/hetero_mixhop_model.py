@@ -455,9 +455,10 @@ class HeteroMixHopCMGM(nn.Module):
         self.use_learn_graph = variant not in ("no_learn_graph", "edge_attn_static")
         self.use_type_proj   = variant != "no_type_proj"
         self.use_mixhop      = variant not in ("no_mixhop", "edge_attn", "edge_attn_static",
-                                               "temporal_attn", "diff_input", "hybrid_attn")
+                                               "temporal_attn", "diff_input", "hybrid_attn",
+                                               "node_level")
         self.use_edge_attn   = variant in ("edge_attn", "edge_attn_static", "temporal_attn",
-                                           "diff_input", "hybrid_attn")
+                                           "diff_input", "hybrid_attn", "node_level")
         self.use_gate        = variant not in ("no_gate", "gcn_only", "lstm_only")
 
         # ── Multi-horizon output ──
@@ -514,7 +515,10 @@ class HeteroMixHopCMGM(nn.Module):
                 self.singlehop2 = _SingleHopGCN(LSTM_HIDDEN_DIM)
 
             self.gcn_norm = nn.LayerNorm(LSTM_HIDDEN_DIM)
-            self.type_pool = _TypeMeanPool(LSTM_HIDDEN_DIM, n_stock, n_bond)
+            # node_level: keep per-node representations — no type pooling
+            # (futures subset is used directly for per-commodity prediction)
+            if variant != "node_level":
+                self.type_pool = _TypeMeanPool(LSTM_HIDDEN_DIM, n_stock, n_bond)
 
             # ── Multi-scale graph: dual spatial branches (short/long) ──
             if variant == "multiscale_graph":
@@ -609,6 +613,16 @@ class HeteroMixHopCMGM(nn.Module):
             nn.Dropout(GCN_DROPOUT),
             nn.Linear(FC_HIDDEN_DIM, out_dim),
         )
+
+        # Node-level head: shared MLP applied per commodity node —
+        # input (B, n_commodities, 128) → (B, n_commodities, n_horizons)
+        if variant == "node_level":
+            self.node_head = nn.Sequential(
+                nn.Linear(LSTM_HIDDEN_DIM * 2, FC_HIDDEN_DIM),
+                nn.ReLU(),
+                nn.Dropout(GCN_DROPOUT),
+                nn.Linear(FC_HIDDEN_DIM, self.n_horizons),
+            )
 
         # Horizon-aligned heads: each horizon has its own output head,
         # fed by its own temporal context window (only in multi-horizon mode)
@@ -764,11 +778,55 @@ class HeteroMixHopCMGM(nn.Module):
                   f"gate→{gate.mean(dim=0).tolist()} → head → {list(pred.shape)}")
         return pred
 
+    def _node_level_forward(self, x: torch.Tensor,
+                            debug: bool = False) -> torch.Tensor:
+        """
+        Node-level spatial branch: no type pooling — each commodity keeps
+        its own graph representation (stocks/bonds flow in via message
+        passing), fused with the global LSTM state per commodity, and
+        predicted by a shared per-node head.
+
+        Returns: (B, n_horizons, n_commodities) or (B, n_commodities).
+        """
+        B, T, N, _ = x.shape
+        fut_start = self.n_stock + self.n_bond
+
+        # ── Spatial: node-level graph representation ──
+        x_gcn = x.mean(dim=0).permute(1, 0, 2)                        # (N, T, F)
+        x_proj = self.type_proj(x_gcn, self.n_stock, self.n_bond)     # (N, T, 64)
+        x_proj = x_proj.mean(dim=1)                                   # (N, 64)
+        A = self.graph_learner() if self.use_learn_graph else self.static_A
+        h1 = F.relu(self.attn_mixhop1(x_proj, A))                     # (N, 64)
+        h2 = self.attn_mixhop2(h1, A)
+        h = self.gcn_norm(h2)                                         # (N, 64)
+        gcn_comm = h[fut_start:].unsqueeze(0).expand(B, -1, -1)       # (B, 24, 64)
+
+        # ── Temporal: global LSTM state, expanded per commodity ──
+        x_seq = x.reshape(B, T, -1)                                   # (B, T, N*F)
+        lstm_out, (h_n, _) = self.temporal(x_seq)
+        lstm_out = h_n[-1]                                            # (B, 64)
+        lstm_expand = lstm_out.unsqueeze(1).expand(B, self.n_commodities, -1)  # (B, 24, 64)
+
+        # ── Fusion + per-node shared head ──
+        fused = torch.cat([gcn_comm, lstm_expand], dim=-1)            # (B, 24, 128)
+        pred = self.node_head(fused)                                  # (B, 24, H)
+        if self.n_horizons > 1:
+            pred = pred.permute(0, 2, 1)                              # (B, H, 24)
+        else:
+            pred = pred.squeeze(-1)                                   # (B, 24)
+
+        if debug:
+            print(f"  [node_level] gcn_comm→{list(gcn_comm.shape)} "
+                  f"lstm→{list(lstm_expand.shape)} → head → {list(pred.shape)}")
+        return pred
+
     def forward(self, x: torch.Tensor,
                 edge_index=None, edge_weight=None,
                 debug: bool = False) -> torch.Tensor:
         if self.variant == "multiscale_graph":
             return self._multiscale_graph_forward(x, debug)
+        if self.variant == "node_level":
+            return self._node_level_forward(x, debug)
 
         B, T, N, n_feat = x.shape
 
@@ -869,6 +927,8 @@ class HeteroMixHopCMGM(nn.Module):
 
     def get_gate_stats(self, x, edge_index=None, edge_weight=None):
         """Return gating statistics (only meaningful for gate variants)."""
+        if self.variant == "node_level":
+            return {'mode': self.variant, 'note': 'no gate — per-node fusion'}
         if self.variant == "multiscale_graph":
             self.eval()
             with torch.no_grad():

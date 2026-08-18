@@ -103,6 +103,8 @@ ALL_VARIANTS = [
     ("+HybridAttn",         "hybrid_attn",      FEATURE_DIM, {}),
     # Cross-only: all 8 heads restricted to directed cross-market pairs
     ("+CrossOnly",          "hybrid_attn",      FEATURE_DIM, {'attn_self_heads': 0}),
+    # Node-level spatial: no type pooling — per-commodity graph features
+    ("+NodeLevel",          "node_level",       FEATURE_DIM, {}),
     # ── Component ablations ──
     ("-TypeProj",           "no_type_proj",     FEATURE_DIM, {}),
     ("-LearnGraph",         "no_learn_graph",   FEATURE_DIM, {}),
