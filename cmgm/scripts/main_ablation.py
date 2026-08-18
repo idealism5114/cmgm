@@ -107,6 +107,8 @@ ALL_VARIANTS = [
     ("+NodeLevel",          "node_level",       FEATURE_DIM, {}),
     # Commodity nodes kept + external markets pooled + per-commodity heads
     ("+CommNodes",          "comm_nodes",       FEATURE_DIM, {}),
+    # Batch-aware graph propagation: per-sample node representations
+    ("+BatchGraph",         "batch_graph",      FEATURE_DIM, {}),
     # ── Component ablations ──
     ("-TypeProj",           "no_type_proj",     FEATURE_DIM, {}),
     ("-LearnGraph",         "no_learn_graph",   FEATURE_DIM, {}),

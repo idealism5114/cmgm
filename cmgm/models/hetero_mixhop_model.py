@@ -144,6 +144,9 @@ class EdgeAttnMixHop(nn.Module):
 
     def forward(self, x: torch.Tensor, A: torch.Tensor) -> torch.Tensor:
         N = A.size(0)
+        # Support both single-graph (N, d) and per-sample (B, N, d) inputs.
+        batched = x.dim() == 3
+        B = x.size(0) if batched else None
         # Clamp negatives (Pearson negative-correlation edges) to zero
         A_pos = A.clamp(min=0)
         # Soft logit prior (learned [0,1] adjacency) or hard structure mask
@@ -153,27 +156,45 @@ class EdgeAttnMixHop(nn.Module):
         out = self.Ws[0](H)
 
         for k in range(1, self.K + 1):
-            # Multi-head attention scores on current H
-            Q = self.q(H).view(N, self.n_heads, self.head_dim)     # (N, h, d)
-            Kt = self.k(H).view(N, self.n_heads, self.head_dim)
-            V  = self.v(H).view(N, self.n_heads, self.head_dim)
-            e = torch.einsum('nhd,mhd->nmh', Q, Kt) / math.sqrt(self.head_dim)  # (N, M, h)
-            if self.hard_mask:
-                # Attention over structure neighbors ONLY — softmax never
-                # sees non-edges, so tiny static edge weights can't drown
-                # the prior.
-                e = e.masked_fill((A_pos <= 1e-4).unsqueeze(-1), -1e9)
+            if batched:
+                # Per-sample multi-head attention scores
+                Q = self.q(H).view(B, N, self.n_heads, self.head_dim)   # (B, N, h, d)
+                Kt = self.k(H).view(B, N, self.n_heads, self.head_dim)
+                V  = self.v(H).view(B, N, self.n_heads, self.head_dim)
+                e = torch.einsum('bnhd,bmhd->bnmh', Q, Kt) / math.sqrt(self.head_dim)  # (B, N, M, h)
+                if self.hard_mask:
+                    e = e.masked_fill(
+                        (A_pos <= 1e-4).unsqueeze(0).unsqueeze(-1), -1e9)
+                else:
+                    e = e + (self.prior_scale * log_prior).unsqueeze(0).unsqueeze(-1)
+                if self.cross_mask is not None and self.self_heads < self.n_heads:
+                    e[:, :, :, self.self_heads:] = e[:, :, :, self.self_heads:].masked_fill(
+                        ~self.cross_mask.unsqueeze(0).unsqueeze(-1), -1e9)
+                alpha = F.softmax(e, dim=2)                    # over source nodes
+                alpha = self.attn_drop(alpha)
+                agg = torch.einsum('bnmh,bmhd->bnhd', alpha, V)   # (B, N, h, d)
+                agg = agg.reshape(B, N, -1)                    # (B, N, h*d)
             else:
-                e = e + self.prior_scale * log_prior.unsqueeze(-1)   # structure prior (N, M, 1)
-            if self.cross_mask is not None and self.self_heads < self.n_heads:
-                # Cross heads (after self_heads) restricted to allowed pairs
-                e[:, :, self.self_heads:] = e[:, :, self.self_heads:].masked_fill(
-                    ~self.cross_mask.unsqueeze(-1), -1e9)
-            alpha = F.softmax(e, dim=1)                        # over source nodes
-            alpha = self.attn_drop(alpha)
-            agg = torch.einsum('nmh,mhd->nhd', alpha, V)       # (N, h, d)
-            agg = agg.reshape(N, -1)                           # (N, h*d)
-            agg = self.out_proj(agg)                           # (N, out)
+                Q = self.q(H).view(N, self.n_heads, self.head_dim)     # (N, h, d)
+                Kt = self.k(H).view(N, self.n_heads, self.head_dim)
+                V  = self.v(H).view(N, self.n_heads, self.head_dim)
+                e = torch.einsum('nhd,mhd->nmh', Q, Kt) / math.sqrt(self.head_dim)  # (N, M, h)
+                if self.hard_mask:
+                    # Attention over structure neighbors ONLY — softmax never
+                    # sees non-edges, so tiny static edge weights can't drown
+                    # the prior.
+                    e = e.masked_fill((A_pos <= 1e-4).unsqueeze(-1), -1e9)
+                else:
+                    e = e + self.prior_scale * log_prior.unsqueeze(-1)   # structure prior (N, M, 1)
+                if self.cross_mask is not None and self.self_heads < self.n_heads:
+                    # Cross heads (after self_heads) restricted to allowed pairs
+                    e[:, :, self.self_heads:] = e[:, :, self.self_heads:].masked_fill(
+                        ~self.cross_mask.unsqueeze(-1), -1e9)
+                alpha = F.softmax(e, dim=1)                    # over source nodes
+                alpha = self.attn_drop(alpha)
+                agg = torch.einsum('nmh,mhd->nhd', alpha, V)   # (N, h, d)
+                agg = agg.reshape(N, -1)                       # (N, h*d)
+            agg = self.out_proj(agg)                           # (N or B, N, out)
 
             # MixHop-style update with residual beta
             H = self.beta * H_in + (1 - self.beta) * agg
@@ -456,10 +477,10 @@ class HeteroMixHopCMGM(nn.Module):
         self.use_type_proj   = variant != "no_type_proj"
         self.use_mixhop      = variant not in ("no_mixhop", "edge_attn", "edge_attn_static",
                                                "temporal_attn", "diff_input", "hybrid_attn",
-                                               "node_level", "comm_nodes")
+                                               "node_level", "comm_nodes", "batch_graph")
         self.use_edge_attn   = variant in ("edge_attn", "edge_attn_static", "temporal_attn",
                                            "diff_input", "hybrid_attn", "node_level",
-                                           "comm_nodes")
+                                           "comm_nodes", "batch_graph")
         self.use_gate        = variant not in ("no_gate", "gcn_only", "lstm_only")
 
         # ── Multi-horizon output ──
@@ -516,16 +537,19 @@ class HeteroMixHopCMGM(nn.Module):
                 self.singlehop2 = _SingleHopGCN(LSTM_HIDDEN_DIM)
 
             self.gcn_norm = nn.LayerNorm(LSTM_HIDDEN_DIM)
-            # node_level / comm_nodes: keep per-node representations —
-            # no full type pooling (futures subset used per-commodity)
-            if variant not in ("node_level", "comm_nodes"):
+            # node_level / comm_nodes / batch_graph: keep per-node
+            # representations — no full type pooling
+            if variant not in ("node_level", "comm_nodes", "batch_graph"):
                 self.type_pool = _TypeMeanPool(LSTM_HIDDEN_DIM, n_stock, n_bond)
-            if variant == "comm_nodes":
-                # external markets (stock+bond) pooled to a global state
-                self.ext_fc = nn.Linear(LSTM_HIDDEN_DIM * 2, LSTM_HIDDEN_DIM)
+            if variant in ("comm_nodes", "batch_graph"):
                 # shared body + per-commodity independent heads
+                body_in = (LSTM_HIDDEN_DIM * 3 if variant == "comm_nodes"
+                           else LSTM_HIDDEN_DIM * 2)   # batch_graph: gcn+lstm only
+                if variant == "comm_nodes":
+                    # external markets (stock+bond) pooled to a global state
+                    self.ext_fc = nn.Linear(LSTM_HIDDEN_DIM * 2, LSTM_HIDDEN_DIM)
                 self.comm_body = nn.Sequential(
-                    nn.Linear(LSTM_HIDDEN_DIM * 3, FC_HIDDEN_DIM),
+                    nn.Linear(body_in, FC_HIDDEN_DIM),
                     nn.ReLU(),
                     nn.Dropout(GCN_DROPOUT),
                 )
@@ -883,6 +907,52 @@ class HeteroMixHopCMGM(nn.Module):
                   f"→ body → heads → {list(pred.shape)}")
         return pred
 
+    def _batch_graph_forward(self, x: torch.Tensor,
+                             debug: bool = False) -> torch.Tensor:
+        """
+        Batch-aware spatial branch:
+          - graph message passing runs PER SAMPLE (no batch averaging) —
+            each sample has its own node representations and attention
+          - all markets keep node-level representations (no pooling);
+            commodity nodes are used for prediction
+          - shared body + per-commodity independent heads
+        """
+        B, T, N, _ = x.shape
+
+        # ── Spatial: per-sample node representations ──
+        seqs = []
+        for t in range(T):
+            xt = x[:, t, :, :]                                       # (B, N, F)
+            seqs.append(self.type_proj(xt, self.n_stock, self.n_bond))  # (B, N, 64)
+        x_proj = torch.stack(seqs, dim=1).mean(dim=1)                # (B, N, 64)
+
+        A = self.graph_learner() if self.use_learn_graph else self.static_A
+        h1 = F.relu(self.attn_mixhop1(x_proj, A))                    # (B, N, 64)
+        h2 = self.attn_mixhop2(h1, A)
+        h = self.gcn_norm(h2)                                        # (B, N, 64)
+        gcn_comm = h[:, self.n_stock + self.n_bond:, :]              # (B, 24, 64)
+
+        # ── Temporal: global LSTM state, expanded per commodity ──
+        x_seq = x.reshape(B, T, -1)                                  # (B, T, N*F)
+        lstm_out, (h_n, _) = self.temporal(x_seq)
+        lstm_out = h_n[-1]                                           # (B, 64)
+        lstm_expand = lstm_out.unsqueeze(1).expand(B, self.n_commodities, -1)
+
+        # ── Shared body + per-commodity heads ──
+        fused = torch.cat([gcn_comm, lstm_expand], dim=-1)           # (B, 24, 128)
+        body = self.comm_body(fused)                                 # (B, 24, 64)
+        preds = torch.stack([self.comm_heads[i](body[:, i])
+                             for i in range(self.n_commodities)], dim=1)  # (B, 24, H)
+        if self.n_horizons > 1:
+            pred = preds.permute(0, 2, 1)                            # (B, H, 24)
+        else:
+            pred = preds.squeeze(-1)                                 # (B, 24)
+
+        if debug:
+            print(f"  [batch_graph] gcn_comm→{list(gcn_comm.shape)} "
+                  f"lstm→{list(lstm_expand.shape)} → body → heads → {list(pred.shape)}")
+        return pred
+
     def forward(self, x: torch.Tensor,
                 edge_index=None, edge_weight=None,
                 debug: bool = False) -> torch.Tensor:
@@ -892,6 +962,8 @@ class HeteroMixHopCMGM(nn.Module):
             return self._node_level_forward(x, debug)
         if self.variant == "comm_nodes":
             return self._comm_nodes_forward(x, debug)
+        if self.variant == "batch_graph":
+            return self._batch_graph_forward(x, debug)
 
         B, T, N, n_feat = x.shape
 
@@ -992,7 +1064,7 @@ class HeteroMixHopCMGM(nn.Module):
 
     def get_gate_stats(self, x, edge_index=None, edge_weight=None):
         """Return gating statistics (only meaningful for gate variants)."""
-        if self.variant in ("node_level", "comm_nodes"):
+        if self.variant in ("node_level", "comm_nodes", "batch_graph"):
             return {'mode': self.variant, 'note': 'no gate — per-node fusion'}
         if self.variant == "multiscale_graph":
             self.eval()
