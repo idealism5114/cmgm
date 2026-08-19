@@ -496,12 +496,13 @@ class HeteroMixHopCMGM(nn.Module):
                                                "temporal_attn", "diff_input", "hybrid_attn",
                                                "node_level", "comm_nodes", "batch_graph",
                                                "factor_res", "node_wise", "market_node",
-                                               "market_node_no_graph", "mkt_node")
+                                               "market_node_no_graph", "mkt_node",
+                                               "comm_residual")
         self.use_edge_attn   = variant in ("edge_attn", "edge_attn_static", "temporal_attn",
                                            "diff_input", "hybrid_attn", "node_level",
                                            "comm_nodes", "batch_graph", "factor_res",
                                            "node_wise", "market_node", "market_node_no_graph",
-                                           "mkt_node")
+                                           "mkt_node", "comm_residual")
         self.use_gate        = variant not in ("no_gate", "gcn_only", "lstm_only")
 
         # ── Multi-horizon output ──
@@ -766,6 +767,20 @@ class HeteroMixHopCMGM(nn.Module):
             nn.Dropout(GCN_DROPOUT),
             nn.Linear(FC_HIDDEN_DIM, out_dim),
         )
+
+        # comm_residual: minimal commodity-residual enhancement on top of
+        # the original pooled model.  When comm_alpha → 0 the model
+        # degenerates exactly to the pooled baseline.
+        if variant == "comm_residual":
+            self.comm_proj = nn.Linear(LSTM_HIDDEN_DIM, LSTM_HIDDEN_DIM)
+            self.comm_alpha = nn.Parameter(torch.tensor(0.05))
+            # shared prediction head applied per commodity node
+            self.comm_head = nn.Sequential(
+                nn.Linear(LSTM_HIDDEN_DIM, FC_HIDDEN_DIM),
+                nn.ReLU(),
+                nn.Dropout(GCN_DROPOUT),
+                nn.Linear(FC_HIDDEN_DIM, self.n_horizons),
+            )
 
         # Node-level head: shared MLP applied per commodity node —
         # input (B, n_commodities, 128) → (B, n_commodities, n_horizons)
@@ -1419,6 +1434,52 @@ class HeteroMixHopCMGM(nn.Module):
                   f"→ pred {list(pred.shape)}")
         return pred
 
+    def _comm_residual_forward(self, x: torch.Tensor,
+                               debug: bool = False) -> torch.Tensor:
+        """
+        Minimal commodity-residual enhancement (original architecture kept):
+
+          H          = batch-aware graph propagation (B, 284, 64)
+          h_global   = original type pooling → (B, 64)
+          h_comm     = commodity slice (B, 24, 64), never pooled
+          h_base     = original gate fusion of [global graph, global LSTM] → (B, 64)
+          z          = h_base.unsqueeze(1) + α · Linear(h_comm) → (B, 24, 64)
+          pred       = shared head per commodity → (B, H, 24)
+
+        α (init 0.05) is learnable; α → 0 degenerates to the pooled model.
+        """
+        B, T, N, _ = x.shape
+        fut_start = self.n_stock + self.n_bond
+
+        # ── 1. Batch-aware graph propagation → node representations ──
+        H = self._batch_spatial_forward(x)                             # (B, N, 64)
+        # ── 2. Original global pooling (kept for baseline performance) ──
+        h_global_graph = self.type_pool(H)                             # (B, 64)
+        # ── 3. Commodity nodes — never pooled ──
+        h_comm = H[:, fut_start:, :]                                   # (B, 24, 64)
+        # ── 4. Original global LSTM ──
+        x_seq = x.reshape(B, T, -1)                                    # (B, T, N*F)
+        lstm_out, (h_n, _) = self.temporal(x_seq)
+        lstm_out = h_n[-1]                                             # (B, 64)
+        # ── 5. h_base = original gate fusion ──
+        combined = torch.cat([h_global_graph, lstm_out], dim=-1)       # (B, 128)
+        gate = torch.sigmoid(self.gate_fc(combined))
+        h_base = gate * self.lstm_proj(lstm_out) + (1 - gate) * self.gcn_proj(h_global_graph)  # (B, 64)
+        # ── 6. Commodity residual adapter ──
+        z = h_base.unsqueeze(1) + self.comm_alpha * self.comm_proj(h_comm)  # (B, 24, 64)
+        # ── 7. Shared head per commodity ──
+        preds = self.comm_head(z)                                      # (B, 24, H)
+        if self.n_horizons > 1:
+            pred = preds.permute(0, 2, 1)                              # (B, H, 24)
+        else:
+            pred = preds.squeeze(-1)                                   # (B, 24)
+
+        if debug:
+            print(f"  [comm_residual] H={list(H.shape)} "
+                  f"h_global={list(h_global_graph.shape)} h_comm={list(h_comm.shape)} "
+                  f"α={self.comm_alpha.item():.4f} z={list(z.shape)} pred={list(pred.shape)}")
+        return pred
+
     def forward(self, x: torch.Tensor,
                 edge_index=None, edge_weight=None,
                 debug: bool = False) -> torch.Tensor:
@@ -1438,6 +1499,8 @@ class HeteroMixHopCMGM(nn.Module):
             return self._market_node_forward(x, debug)
         if self.variant == "mkt_node":
             return self._mkt_node_forward(x, debug)
+        if self.variant == "comm_residual":
+            return self._comm_residual_forward(x, debug)
 
         B, T, N, n_feat = x.shape
 
@@ -1540,7 +1603,8 @@ class HeteroMixHopCMGM(nn.Module):
         """Return gating statistics (only meaningful for gate variants)."""
         if self.variant in ("node_level", "comm_nodes", "batch_graph",
                             "factor_res", "node_wise",
-                            "market_node", "market_node_no_graph", "mkt_node"):
+                            "market_node", "market_node_no_graph", "mkt_node",
+                            "comm_residual"):
             return {'mode': self.variant, 'note': 'no gate — per-node fusion'}
         if self.variant == "multiscale_graph":
             self.eval()

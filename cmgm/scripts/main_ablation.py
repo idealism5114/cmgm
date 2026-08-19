@@ -133,6 +133,8 @@ ALL_VARIANTS = [
      {'graph_cfg': 'rel', 'relations': 'cc_sc_bc'}),
     ("E5-Full",             "mkt_node", FEATURE_DIM,
      {'graph_cfg': 'rel', 'relations': 'full'}),
+    # Minimal commodity-residual enhancement (original architecture kept)
+    ("+CommResidual",       "comm_residual", FEATURE_DIM, {}),
     # ── Component ablations ──
     ("-TypeProj",           "no_type_proj",     FEATURE_DIM, {}),
     ("-LearnGraph",         "no_learn_graph",   FEATURE_DIM, {}),
@@ -349,6 +351,11 @@ def run_variant(name, variant, feat_dim, kwargs, args, device, data21, data7):
                   f"min={g.min().item():.4f} max={g.max().item():.4f}")
         except Exception as e:
             print(f"  [E3 gate] skipped: {e}")
+
+    # ── Learned residual scale (comm_residual) ──
+    if variant == "comm_residual":
+        print(f"  [comm_residual] learned α = {model.comm_alpha.item():.4f}  "
+              f"({'≈0 → degenerates to pooled' if abs(model.comm_alpha.item()) < 0.01 else 'residual active'})")
 
     # ── E7: graph contribution test (final model = mkt_node full) ──
     if variant == "mkt_node" and kwargs.get('graph_cfg', 'full') == 'full':
