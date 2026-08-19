@@ -139,6 +139,8 @@ ALL_VARIANTS = [
     ("+CommOutRes",         "comm_output_residual", FEATURE_DIM, {}),
     # Per-timestep GNN + temporal attention (replaces mean over T)
     ("+SpatTempAttn",       "spatial_temporal_attention", FEATURE_DIM, {}),
+    # Temporal-weighted graph: attention replaces mean(dim=1), GNN unchanged
+    ("+TempWeighted",       "temporal_weighted_graph", FEATURE_DIM, {}),
     # ── Component ablations ──
     ("-TypeProj",           "no_type_proj",     FEATURE_DIM, {}),
     ("-LearnGraph",         "no_learn_graph",   FEATURE_DIM, {}),
@@ -401,6 +403,21 @@ def run_variant(name, variant, feat_dim, kwargs, args, device, data21, data7):
                   f"corr(base_err, residual)={corr:+.4f}")
         except Exception as e:
             print(f"  [comm_output_residual diagnostics] skipped: {e}")
+
+    # ── temporal_weighted_graph: alpha diagnostics ──
+    if variant == "temporal_weighted_graph":
+        try:
+            x_diag = next(iter(loaders['test']))[0][:16].to(device)
+            model.eval()
+            with torch.no_grad():
+                model(x_diag)
+                a = model.last_alpha          # (B, T, N)
+            print(f"  [alpha] mean={a.mean().item():.4f} std={a.std().item():.4f} "
+                  f"min={a.min().item():.4f} max={a.max().item():.4f}")
+            per_t = a.mean(dim=(0, 2)).cpu().numpy()   # (T,)
+            print(f"  [alpha per t] " + " ".join(f"{i}:{v:.3f}" for i, v in enumerate(per_t)))
+        except Exception as e:
+            print(f"  [alpha diagnostics] skipped: {e}")
 
     # ── Learned residual scale (comm_residual) ──
     if variant == "comm_residual":

@@ -498,13 +498,15 @@ class HeteroMixHopCMGM(nn.Module):
                                                "factor_res", "node_wise", "market_node",
                                                "market_node_no_graph", "mkt_node",
                                                "comm_residual", "comm_output_residual",
-                                               "spatial_temporal_attention")
+                                               "spatial_temporal_attention",
+                                               "temporal_weighted_graph")
         self.use_edge_attn   = variant in ("edge_attn", "edge_attn_static", "temporal_attn",
                                            "diff_input", "hybrid_attn", "node_level",
                                            "comm_nodes", "batch_graph", "factor_res",
                                            "node_wise", "market_node", "market_node_no_graph",
                                            "mkt_node", "comm_residual", "comm_output_residual",
-                                           "spatial_temporal_attention")
+                                           "spatial_temporal_attention",
+                                           "temporal_weighted_graph")
         self.use_gate        = variant not in ("no_gate", "gcn_only", "lstm_only")
 
         # ── Multi-horizon output ──
@@ -803,6 +805,11 @@ class HeteroMixHopCMGM(nn.Module):
             # commodity output head — reuses the original head's shared body
             self.comm_out = nn.Linear(FC_HIDDEN_DIM, self.n_horizons)
 
+        # temporal_weighted_graph: ONLY replaces mean(dim=1) with node-wise
+        # temporal attention.  GNN structure, LSTM, fusion, head unchanged.
+        if variant == "temporal_weighted_graph":
+            self.temporal_score = nn.Linear(LSTM_HIDDEN_DIM, 1)
+
         # Node-level head: shared MLP applied per commodity node —
         # input (B, n_commodities, 128) → (B, n_commodities, n_horizons)
         if variant == "node_level":
@@ -862,21 +869,27 @@ class HeteroMixHopCMGM(nn.Module):
         return gcn_out
 
     def _original_forward(self, x: torch.Tensor, return_h: bool = False,
-                          debug: bool = False) -> torch.Tensor:
+                          debug: bool = False,
+                          gcn_out: torch.Tensor = None) -> torch.Tensor:
         """
         THE original edge_attn forward path — single source of truth.
-        Both `edge_attn` and `comm_output_residual` call this exact code:
+        `edge_attn`, `comm_output_residual` and `temporal_weighted_graph`
+        all call this exact code:
 
-          single-graph spatial (type_proj → EdgeAttnMixHop → type pooling)
+          spatial (type_proj → EdgeAttnMixHop → type pooling)
           → global LSTM → gate fusion → original head → reshape
 
+        gcn_out: optional pre-computed (B, 64) spatial representation —
+                 used by variants that only replace the temporal
+                 aggregation before the GNN (e.g. temporal_weighted_graph).
         return_h=True additionally returns the node representations H (N, 64)
         from the spatial branch (used by comm_output_residual).
         """
         B, T, N, n_feat = x.shape
 
         # ── 1. Spatial branch (single graph, unchanged) ──
-        gcn_out = self._spatial_forward(x)                             # (B, 64)
+        if gcn_out is None:
+            gcn_out = self._spatial_forward(x)                         # (B, 64)
 
         # ── 2. Temporal branch (global LSTM, unchanged) ──
         x_seq = x.reshape(B, T, -1)                                    # (B, T, N*F)
@@ -1543,6 +1556,46 @@ class HeteroMixHopCMGM(nn.Module):
                   f"α={self.comm_alpha.item():.4f} z={list(z.shape)} pred={list(pred.shape)}")
         return pred
 
+    def _temporal_weighted_graph_forward(self, x: torch.Tensor,
+                                         debug: bool = False) -> torch.Tensor:
+        """
+        ONLY replaces mean(dim=1) with node-wise temporal attention.
+        GNN (AdaptiveGraphLearner → MixHop/EdgeAttn ×2), global LSTM,
+        gate fusion, original head — all unchanged (GNN still runs once).
+
+          type_proj per t → H_seq (B, T, N, 64)
+          score = Linear(64→1)(H_seq);  α = softmax over T
+          H = Σ α·H_seq → (B, N, 64)           ← replaces mean(dim=1)
+          → GNN ×2 → type_pool → gcn_out
+          → _original_forward path (LSTM/gate/head)
+        """
+        B, T, N, _ = x.shape
+
+        # ── Temporal-weighted aggregation (the ONLY change) ──
+        seqs = [self.type_proj(x[:, t, :, :], self.n_stock, self.n_bond)
+                for t in range(T)]
+        H_seq = torch.stack(seqs, dim=1)                               # (B, T, N, 64)
+        score = self.temporal_score(H_seq)                             # (B, T, N, 1)
+        alpha = F.softmax(score, dim=1)                                # (B, T, N, 1)
+        H = (H_seq * alpha).sum(dim=1)                                 # (B, N, 64)
+        self.last_alpha = alpha.squeeze(-1).detach()                   # (B, T, N)
+
+        # ── Existing GNN (batch mode, runs ONCE) + type pooling ──
+        A = self.graph_learner() if self.use_learn_graph else self.static_A
+        h1 = F.relu(self.attn_mixhop1(H, A))                           # (B, N, 64)
+        h2 = self.attn_mixhop2(h1, A)
+        h = self.gcn_norm(h2)
+        gcn_out = self.type_pool(h)                                    # (B, 64)
+
+        # ── Original LSTM + gate + head (shared code) ──
+        pred = self._original_forward(x, debug=debug, gcn_out=gcn_out)
+
+        if debug:
+            print(f"  [temporal_weighted_graph] H_seq={list(H_seq.shape)} "
+                  f"α mean={alpha.mean().item():.4f} → {list(H.shape)} → "
+                  f"GNN → {list(gcn_out.shape)} → {list(pred.shape)}")
+        return pred
+
     def _comm_output_residual_forward(self, x: torch.Tensor,
                                       debug: bool = False) -> torch.Tensor:
         """
@@ -1678,6 +1731,8 @@ class HeteroMixHopCMGM(nn.Module):
             return self._comm_output_residual_forward(x, debug)
         if self.variant == "spatial_temporal_attention":
             return self._spatial_temporal_attention_forward(x, debug)
+        if self.variant == "temporal_weighted_graph":
+            return self._temporal_weighted_graph_forward(x, debug)
         if self.variant == "edge_attn":
             # single source of truth shared with comm_output_residual
             return self._original_forward(x, debug=debug)
@@ -1785,7 +1840,8 @@ class HeteroMixHopCMGM(nn.Module):
                             "factor_res", "node_wise",
                             "market_node", "market_node_no_graph", "mkt_node",
                             "comm_residual", "comm_output_residual",
-                            "spatial_temporal_attention"):
+                            "spatial_temporal_attention",
+                            "temporal_weighted_graph"):
             return {'mode': self.variant, 'note': 'no gate — per-node fusion'}
         if self.variant == "multiscale_graph":
             self.eval()
