@@ -488,10 +488,11 @@ class HeteroMixHopCMGM(nn.Module):
         self.use_mixhop      = variant not in ("no_mixhop", "edge_attn", "edge_attn_static",
                                                "temporal_attn", "diff_input", "hybrid_attn",
                                                "node_level", "comm_nodes", "batch_graph",
-                                               "factor_res")
+                                               "factor_res", "node_wise")
         self.use_edge_attn   = variant in ("edge_attn", "edge_attn_static", "temporal_attn",
                                            "diff_input", "hybrid_attn", "node_level",
-                                           "comm_nodes", "batch_graph", "factor_res")
+                                           "comm_nodes", "batch_graph", "factor_res",
+                                           "node_wise")
         self.use_gate        = variant not in ("no_gate", "gcn_only", "lstm_only")
 
         # ── Multi-horizon output ──
@@ -548,9 +549,9 @@ class HeteroMixHopCMGM(nn.Module):
                 self.singlehop2 = _SingleHopGCN(LSTM_HIDDEN_DIM)
 
             self.gcn_norm = nn.LayerNorm(LSTM_HIDDEN_DIM)
-            # node_level / comm_nodes / batch_graph / factor_res: keep
-            # per-node representations — no full type pooling
-            if variant not in ("node_level", "comm_nodes", "batch_graph", "factor_res"):
+            # node-level variants: keep per-node representations — no pooling
+            if variant not in ("node_level", "comm_nodes", "batch_graph",
+                               "factor_res", "node_wise"):
                 self.type_pool = _TypeMeanPool(LSTM_HIDDEN_DIM, n_stock, n_bond)
             if variant in ("comm_nodes", "batch_graph"):
                 # shared body + per-commodity independent heads
@@ -604,7 +605,24 @@ class HeteroMixHopCMGM(nn.Module):
 
         # ── Temporal branch ──
         if self.use_lstm:
-            if variant == "temporal_attn":
+            if variant == "node_wise":
+                # Node-wise temporal encoder: each node gets its OWN
+                # temporal representation via a shared LSTM over (B*N, T, F)
+                self.node_lstm = nn.LSTM(
+                    input_size=feat_dim,
+                    hidden_size=LSTM_HIDDEN_DIM,
+                    num_layers=LSTM_NUM_LAYERS,
+                    dropout=LSTM_DROPOUT if LSTM_NUM_LAYERS > 1 else 0.0,
+                    batch_first=True,
+                )
+                # shared MLP over [graph_feat, temporal_feat] per commodity
+                self.node_wise_head = nn.Sequential(
+                    nn.Linear(LSTM_HIDDEN_DIM * 2, FC_HIDDEN_DIM),
+                    nn.ReLU(),
+                    nn.Dropout(GCN_DROPOUT),
+                    nn.Linear(FC_HIDDEN_DIM, self.n_horizons),
+                )
+            elif variant == "temporal_attn":
                 # A: per-type temporal compression (each market block → 64)
                 n_future = num_nodes - n_stock - n_bond
                 self.stock_compress   = nn.Linear(n_stock * feat_dim, LSTM_HIDDEN_DIM)
@@ -978,6 +996,78 @@ class HeteroMixHopCMGM(nn.Module):
                   f"lstm→{list(lstm_expand.shape)} → body → heads → {list(pred.shape)}")
         return pred
 
+    def _batch_spatial_forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Batch-aware spatial propagation (generic, per-sample representations):
+          x (B, T, N, F) → per-timestep type projection → time mean
+          → EdgeAttnMixHop ×2 on the shared adjacency A → (B, N, 64)
+
+        Every batch sample keeps its OWN node representations — no
+        x.mean(dim=0) anywhere on the batch axis.
+        """
+        B, T, N, _ = x.shape
+        seqs = []
+        for t in range(T):
+            seqs.append(self.type_proj(x[:, t, :, :], self.n_stock, self.n_bond))
+        x_proj = torch.stack(seqs, dim=1).mean(dim=1)                  # (B, N, 64)
+        A = self.graph_learner() if self.use_learn_graph else self.static_A
+        h1 = F.relu(self.attn_mixhop1(x_proj, A))                     # (B, N, 64)
+        h2 = self.attn_mixhop2(h1, A)
+        return self.gcn_norm(h2)                                      # (B, N, 64)
+
+    def _node_temporal_forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Node-wise temporal encoder:
+          x (B, T, N, F) → permute → reshape (B*N, T, F)
+          → shared LSTM → last hidden (B*N, D) → view → (B, N, D)
+
+        Each node gets its OWN temporal representation (no global LSTM,
+        no expand to 24 commodities).
+        """
+        B, T, N, F = x.shape
+        x_flat = x.permute(0, 2, 1, 3).reshape(B * N, T, F)           # (B*N, T, F)
+        _, (h_n, _) = self.node_lstm(x_flat)
+        return h_n[-1].view(B, N, -1)                                 # (B, N, 64)
+
+    def _node_wise_forward(self, x: torch.Tensor,
+                           debug: bool = False) -> torch.Tensor:
+        """
+        Clean node-level baseline (Model B/C):
+          h_graph    = batch-aware spatial propagation  → (B, N, D)
+          h_temporal = node-wise LSTM                   → (B, N, D)
+          commodity subset → cat → shared MLP → predictions
+        """
+        B, T, N, _ = x.shape
+        fut_start = self.n_stock + self.n_bond
+
+        h_graph = self._batch_spatial_forward(x)                      # (B, N, 64)
+        h_temporal = self._node_temporal_forward(x)                   # (B, N, 64)
+
+        # ── Shape assertions ──
+        assert h_graph.shape[:2] == (B, N), f"graph: {h_graph.shape} != ({B},{N},_)"
+        assert h_temporal.shape[:2] == (B, N), f"temporal: {h_temporal.shape} != ({B},{N},_)"
+
+        h_graph_comm = h_graph[:, fut_start:, :]                      # (B, 24, 64)
+        h_temporal_comm = h_temporal[:, fut_start:, :]                # (B, 24, 64)
+        assert h_graph_comm.shape[1] == self.n_commodities, \
+            f"graph comm: {h_graph_comm.shape}"
+        assert h_temporal_comm.shape[1] == self.n_commodities, \
+            f"temporal comm: {h_temporal_comm.shape}"
+
+        # ── Shared MLP head ──
+        z = torch.cat([h_graph_comm, h_temporal_comm], dim=-1)        # (B, 24, 128)
+        preds = self.node_wise_head(z)                                # (B, 24, H)
+        if self.n_horizons > 1:
+            pred = preds.permute(0, 2, 1)                             # (B, H, 24)
+        else:
+            pred = preds.squeeze(-1)                                  # (B, 24)
+
+        if debug:
+            print(f"  [node_wise] h_graph→{list(h_graph.shape)} "
+                  f"h_temporal→{list(h_temporal.shape)} "
+                  f"comm→{list(z.shape)} → head → {list(pred.shape)}")
+        return pred
+
     def _factor_res_forward(self, x: torch.Tensor,
                             debug: bool = False) -> torch.Tensor:
         """
@@ -1046,6 +1136,8 @@ class HeteroMixHopCMGM(nn.Module):
             return self._batch_graph_forward(x, debug)
         if self.variant == "factor_res":
             return self._factor_res_forward(x, debug)
+        if self.variant == "node_wise":
+            return self._node_wise_forward(x, debug)
 
         B, T, N, n_feat = x.shape
 
@@ -1146,7 +1238,8 @@ class HeteroMixHopCMGM(nn.Module):
 
     def get_gate_stats(self, x, edge_index=None, edge_weight=None):
         """Return gating statistics (only meaningful for gate variants)."""
-        if self.variant in ("node_level", "comm_nodes", "batch_graph", "factor_res"):
+        if self.variant in ("node_level", "comm_nodes", "batch_graph",
+                            "factor_res", "node_wise"):
             return {'mode': self.variant, 'note': 'no gate — per-node fusion'}
         if self.variant == "multiscale_graph":
             self.eval()

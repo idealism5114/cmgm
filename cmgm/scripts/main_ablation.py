@@ -111,6 +111,8 @@ ALL_VARIANTS = [
     ("+BatchGraph",         "batch_graph",      FEATURE_DIM, {}),
     # Factor + residual: pooled market-mean + per-commodity direction
     ("+FactorRes",          "factor_res",       FEATURE_DIM, {}),
+    # Clean node-level baseline: batch-aware graph + node-wise LSTM + shared MLP
+    ("+NodeWise",           "node_wise",        FEATURE_DIM, {}),
     # ── Component ablations ──
     ("-TypeProj",           "no_type_proj",     FEATURE_DIM, {}),
     ("-LearnGraph",         "no_learn_graph",   FEATURE_DIM, {}),
