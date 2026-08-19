@@ -135,6 +135,8 @@ ALL_VARIANTS = [
      {'graph_cfg': 'rel', 'relations': 'full'}),
     # Minimal commodity-residual enhancement (original architecture kept)
     ("+CommResidual",       "comm_residual", FEATURE_DIM, {}),
+    # Output-side commodity residual: original path kept exactly
+    ("+CommOutRes",         "comm_output_residual", FEATURE_DIM, {}),
     # ── Component ablations ──
     ("-TypeProj",           "no_type_proj",     FEATURE_DIM, {}),
     ("-LearnGraph",         "no_learn_graph",   FEATURE_DIM, {}),
@@ -285,6 +287,22 @@ def run_variant(name, variant, feat_dim, kwargs, args, device, data21, data7):
                              n_stock=n_stock, n_bond=n_bond,
                              variant=variant, feat_dim=feat_dim, **kwargs).to(device)
 
+    # ── alpha=0 check: with α=0, pred must strictly equal base_pred
+    #    (the base path is line-for-line the original edge_attn forward) ──
+    if variant == "comm_output_residual":
+        try:
+            x_chk = next(iter(loaders['test']))[0][:8].to(device)
+            with torch.no_grad():
+                model.residual_alpha.fill_(0.0)
+                p_res = model(x_chk)
+                p_base = model.last_base_pred
+                diff = (p_res - p_base).abs().max().item()
+                model.residual_alpha.data.fill_(0.01)
+            print(f"  [alpha=0 check] max|pred − base_pred| = {diff:.2e}  "
+                  f"({'PASS' if diff < 1e-6 else 'FAIL'})")
+        except Exception as e:
+            print(f"  [alpha=0 check] skipped: {e}")
+
     # ── Static graph for variants without adaptive learner ──
     if variant in ("no_learn_graph", "edge_attn_static"):
         graph = build_graph(data['train_returns'], data['market_indices'], method='pearson')
@@ -351,6 +369,36 @@ def run_variant(name, variant, feat_dim, kwargs, args, device, data21, data7):
                   f"min={g.min().item():.4f} max={g.max().item():.4f}")
         except Exception as e:
             print(f"  [E3 gate] skipped: {e}")
+
+    # ── comm_output_residual diagnostics ──
+    if variant == "comm_output_residual":
+        try:
+            base_preds, res_preds, targs = [], [], []
+            model.eval()
+            with torch.no_grad():
+                for batch in loaders['test']:
+                    Xb, yb = batch[0], batch[1]
+                    pred = model(Xb.to(device))
+                    base_preds.append(model.last_base_pred.cpu().numpy())
+                    res_preds.append(model.last_residual.cpu().numpy())
+                    targs.append(yb.numpy())
+            bp = np.concatenate(base_preds)
+            rp = np.concatenate(res_preds)
+            tt = np.concatenate(targs)
+            if tt.ndim == 3:  # multi-horizon: extract primary horizon
+                h_idx = MULTI_HORIZONS.index(TARGET_HORIZON)
+                bp, rp, tt = bp[:, h_idx, :], rp[:, h_idx, :], tt[:, h_idx, :]
+            base_mae = float(np.mean(np.abs(tt - bp)))
+            res_mag = float(np.mean(np.abs(rp)))
+            base_err = (tt - bp).ravel()
+            corr = float(np.corrcoef(base_err, rp.ravel())[0, 1])
+            alpha = model.residual_alpha.item()
+            print(f"  [comm_output_residual] α={alpha:.4f}  "
+                  f"base MAE={base_mae:.6f}  final MAE={mn['MAE']:.6f}  "
+                  f"residual magnitude={res_mag:.6f}  "
+                  f"corr(base_err, residual)={corr:+.4f}")
+        except Exception as e:
+            print(f"  [comm_output_residual diagnostics] skipped: {e}")
 
     # ── Learned residual scale (comm_residual) ──
     if variant == "comm_residual":

@@ -497,12 +497,12 @@ class HeteroMixHopCMGM(nn.Module):
                                                "node_level", "comm_nodes", "batch_graph",
                                                "factor_res", "node_wise", "market_node",
                                                "market_node_no_graph", "mkt_node",
-                                               "comm_residual")
+                                               "comm_residual", "comm_output_residual")
         self.use_edge_attn   = variant in ("edge_attn", "edge_attn_static", "temporal_attn",
                                            "diff_input", "hybrid_attn", "node_level",
                                            "comm_nodes", "batch_graph", "factor_res",
                                            "node_wise", "market_node", "market_node_no_graph",
-                                           "mkt_node", "comm_residual")
+                                           "mkt_node", "comm_residual", "comm_output_residual")
         self.use_gate        = variant not in ("no_gate", "gcn_only", "lstm_only")
 
         # ── Multi-horizon output ──
@@ -781,6 +781,17 @@ class HeteroMixHopCMGM(nn.Module):
                 nn.Dropout(GCN_DROPOUT),
                 nn.Linear(FC_HIDDEN_DIM, self.n_horizons),
             )
+
+        # comm_output_residual: original prediction path kept EXACTLY;
+        # commodity graph representations add a small OUTPUT residual.
+        # alpha = 0 → output strictly equals the original edge_attn model.
+        if variant == "comm_output_residual":
+            self.residual_head = nn.Sequential(
+                nn.Linear(LSTM_HIDDEN_DIM, 32),
+                nn.ReLU(),
+                nn.Linear(32, self.n_horizons),
+            )
+            self.residual_alpha = nn.Parameter(torch.tensor(0.01))
 
         # Node-level head: shared MLP applied per commodity node —
         # input (B, n_commodities, 128) → (B, n_commodities, n_horizons)
@@ -1480,6 +1491,73 @@ class HeteroMixHopCMGM(nn.Module):
                   f"α={self.comm_alpha.item():.4f} z={list(z.shape)} pred={list(pred.shape)}")
         return pred
 
+    def _comm_output_residual_forward(self, x: torch.Tensor,
+                                      debug: bool = False) -> torch.Tensor:
+        """
+        Original prediction path (single-graph propagation → type pooling →
+        global LSTM → gate fusion → original head) kept EXACTLY as the
+        edge_attn baseline.  Commodity graph nodes additionally produce a
+        small output residual:
+
+          base_pred   = original edge_attn output          (B, H, 24)
+          h_comm      = commodity node reps from graph H   (B, 24, 64)
+          residual    = Linear(64→32)→ReLU→Linear(32→H)    (B, 24, H)
+          pred        = base_pred + α · residual           α init 0.01
+
+        α = 0 → pred strictly equals the original edge_attn output.
+        """
+        B, T, N, _ = x.shape
+        fut_start = self.n_stock + self.n_bond
+
+        # ── 1. Original spatial propagation (single graph, unchanged) ──
+        A = self.graph_learner() if self.use_learn_graph else self.static_A
+        x_gcn = x.mean(dim=0).permute(1, 0, 2)                       # (N, T, F)
+        x_proj = self.type_proj(x_gcn, self.n_stock, self.n_bond)    # (N, T, 64)
+        x_proj = x_proj.mean(dim=1)                                  # (N, 64)
+        h1 = F.relu(self.attn_mixhop1(x_proj, A))                    # (N, 64)
+        h2 = self.attn_mixhop2(h1, A)
+        h = self.gcn_norm(h2)                                        # (N, 64)
+        h_global_graph = self.type_pool(h)                           # (64,)
+        gcn_out = h_global_graph.unsqueeze(0).expand(B, -1)          # (B, 64)
+        h_comm = h[fut_start:].unsqueeze(0).expand(B, -1, -1)        # (B, 24, 64)
+
+        # ── 2. Original global LSTM ──
+        x_seq = x.reshape(B, T, -1)                                  # (B, T, N*F)
+        lstm_out, (h_n, _) = self.temporal(x_seq)
+        lstm_out = h_n[-1]                                           # (B, 64)
+
+        # ── 3. Original gate fusion ──
+        combined = torch.cat([gcn_out, lstm_out], dim=-1)            # (B, 128)
+        gate = torch.sigmoid(self.gate_fc(combined))
+        fused = gate * self.lstm_proj(lstm_out) + (1 - gate) * self.gcn_proj(gcn_out)  # (B, 64)
+
+        # ── 4. Original head → base_pred (identical to edge_attn) ──
+        base_pred = self.head(fused)                                 # (B, H*24)
+        if self.n_horizons > 1:
+            base_pred = base_pred.view(B, self.n_horizons, self.n_commodities)  # (B, H, 24)
+        else:
+            base_pred = base_pred.view(B, self.n_commodities)        # (B, 24)
+
+        # ── 5. Commodity output residual ──
+        residual = self.residual_head(h_comm)                        # (B, 24, H)
+        if self.n_horizons > 1:
+            residual = residual.permute(0, 2, 1)                     # (B, H, 24)
+        else:
+            residual = residual.squeeze(-1)                          # (B, 24)
+
+        # ── 6. Combine ──
+        pred = base_pred + self.residual_alpha * residual
+
+        # store for diagnostics
+        self.last_base_pred = base_pred.detach()
+        self.last_residual = residual.detach()
+
+        if debug:
+            print(f"  [comm_output_residual] α={self.residual_alpha.item():.4f} "
+                  f"base={list(base_pred.shape)} residual={list(residual.shape)} "
+                  f"pred={list(pred.shape)}")
+        return pred
+
     def forward(self, x: torch.Tensor,
                 edge_index=None, edge_weight=None,
                 debug: bool = False) -> torch.Tensor:
@@ -1501,6 +1579,8 @@ class HeteroMixHopCMGM(nn.Module):
             return self._mkt_node_forward(x, debug)
         if self.variant == "comm_residual":
             return self._comm_residual_forward(x, debug)
+        if self.variant == "comm_output_residual":
+            return self._comm_output_residual_forward(x, debug)
 
         B, T, N, n_feat = x.shape
 
@@ -1604,7 +1684,7 @@ class HeteroMixHopCMGM(nn.Module):
         if self.variant in ("node_level", "comm_nodes", "batch_graph",
                             "factor_res", "node_wise",
                             "market_node", "market_node_no_graph", "mkt_node",
-                            "comm_residual"):
+                            "comm_residual", "comm_output_residual"):
             return {'mode': self.variant, 'note': 'no gate — per-node fusion'}
         if self.variant == "multiscale_graph":
             self.eval()
