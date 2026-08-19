@@ -481,24 +481,33 @@ class HeteroMixHopCMGM(nn.Module):
         self.attn_self_heads = attn_self_heads
 
         # ── Branch switches ──
-        self.use_gcn  = variant != "lstm_only"
+        self.use_gcn  = variant not in ("lstm_only", "market_node_no_graph")
         self.use_lstm = variant != "gcn_only"
         self.use_learn_graph = variant not in ("no_learn_graph", "edge_attn_static")
         self.use_type_proj   = variant != "no_type_proj"
         self.use_mixhop      = variant not in ("no_mixhop", "edge_attn", "edge_attn_static",
                                                "temporal_attn", "diff_input", "hybrid_attn",
                                                "node_level", "comm_nodes", "batch_graph",
-                                               "factor_res", "node_wise")
+                                               "factor_res", "node_wise", "market_node",
+                                               "market_node_no_graph")
         self.use_edge_attn   = variant in ("edge_attn", "edge_attn_static", "temporal_attn",
                                            "diff_input", "hybrid_attn", "node_level",
                                            "comm_nodes", "batch_graph", "factor_res",
-                                           "node_wise")
+                                           "node_wise", "market_node", "market_node_no_graph")
         self.use_gate        = variant not in ("no_gate", "gcn_only", "lstm_only")
 
         # ── Multi-horizon output ──
         use_multi = (TARGET_TYPE == "return") and variant != "single_horizon"
         self.n_horizons = len(MULTI_HORIZONS) if use_multi else 1
         out_dim = self.n_horizons * n_commodities
+
+        # ── Per-type (default) or shared input projection ──
+        # Built outside the spatial block: needed by market_node_no_graph's
+        # global branch even when the GNN itself is disabled.
+        if self.use_type_proj:
+            self.type_proj = _TypeInputProjection(feat_dim, LSTM_HIDDEN_DIM)
+        elif self.use_gcn:
+            self.shared_proj = nn.Linear(feat_dim, LSTM_HIDDEN_DIM)
 
         # ── Spatial branch ──
         if self.use_gcn:
@@ -509,12 +518,6 @@ class HeteroMixHopCMGM(nn.Module):
                 )
             else:
                 self.register_buffer('static_A', torch.zeros(num_nodes, num_nodes))
-
-            # Per-type (default) or shared input projection
-            if self.use_type_proj:
-                self.type_proj = _TypeInputProjection(feat_dim, LSTM_HIDDEN_DIM)
-            else:
-                self.shared_proj = nn.Linear(feat_dim, LSTM_HIDDEN_DIM)
 
             # MixHop (default) / EdgeAttnMixHop (edge_attn) / single-hop GCN
             if self.use_mixhop:
@@ -605,7 +608,7 @@ class HeteroMixHopCMGM(nn.Module):
 
         # ── Temporal branch ──
         if self.use_lstm:
-            if variant == "node_wise":
+            if variant in ("node_wise", "market_node", "market_node_no_graph"):
                 # Node-wise temporal encoder: each node gets its OWN
                 # temporal representation via a shared LSTM over (B*N, T, F)
                 self.node_lstm = nn.LSTM(
@@ -615,13 +618,34 @@ class HeteroMixHopCMGM(nn.Module):
                     dropout=LSTM_DROPOUT if LSTM_NUM_LAYERS > 1 else 0.0,
                     batch_first=True,
                 )
-                # shared MLP over [graph_feat, temporal_feat] per commodity
-                self.node_wise_head = nn.Sequential(
-                    nn.Linear(LSTM_HIDDEN_DIM * 2, FC_HIDDEN_DIM),
-                    nn.ReLU(),
-                    nn.Dropout(GCN_DROPOUT),
-                    nn.Linear(FC_HIDDEN_DIM, self.n_horizons),
-                )
+                if variant == "node_wise":
+                    # shared MLP over [graph_feat, temporal_feat] per commodity
+                    self.node_wise_head = nn.Sequential(
+                        nn.Linear(LSTM_HIDDEN_DIM * 2, FC_HIDDEN_DIM),
+                        nn.ReLU(),
+                        nn.Dropout(GCN_DROPOUT),
+                        nn.Linear(FC_HIDDEN_DIM, self.n_horizons),
+                    )
+                elif variant in ("market_node", "market_node_no_graph"):
+                    # Global market-state branch: type-aware per-timestep
+                    # pooling (stock/bond/commodity → 192) → LSTM(192→64)
+                    self.global_lstm = nn.LSTM(
+                        input_size=LSTM_HIDDEN_DIM * 3,
+                        hidden_size=LSTM_HIDDEN_DIM,
+                        num_layers=LSTM_NUM_LAYERS,
+                        dropout=LSTM_DROPOUT if LSTM_NUM_LAYERS > 1 else 0.0,
+                        batch_first=True,
+                    )
+                    # Commodity identity embedding for the shared head
+                    self.commodity_embedding = nn.Embedding(n_commodities, 16)
+                    head_in = (LSTM_HIDDEN_DIM * 3 + 16 if variant == "market_node"
+                               else LSTM_HIDDEN_DIM * 2 + 16)   # no_graph: no graph feat
+                    self.market_node_head = nn.Sequential(
+                        nn.Linear(head_in, FC_HIDDEN_DIM),
+                        nn.ReLU(),
+                        nn.Dropout(GCN_DROPOUT),
+                        nn.Linear(FC_HIDDEN_DIM, self.n_horizons),
+                    )
             elif variant == "temporal_attn":
                 # A: per-type temporal compression (each market block → 64)
                 n_future = num_nodes - n_stock - n_bond
@@ -1068,6 +1092,115 @@ class HeteroMixHopCMGM(nn.Module):
                   f"comm→{list(z.shape)} → head → {list(pred.shape)}")
         return pred
 
+    def _global_market_forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Type-aware global market-state branch:
+          per timestep: type_proj → pool stock / bond / commodity → (B, 192)
+          → LSTM(192→64) → h_global (B, 64)
+
+        Pooling is ALLOWED here — the purpose is the market-level common
+        factor, not per-commodity prediction.
+        """
+        B, T, N, _ = x.shape
+        n_stock, n_bond = self.n_stock, self.n_bond
+        seqs = []
+        for t in range(T):
+            xt = self.type_proj(x[:, t, :, :], n_stock, n_bond)      # (B, N, 64)
+            s = xt[:, :n_stock].mean(dim=1)                          # (B, 64)
+            b = xt[:, n_stock:n_stock + n_bond].mean(dim=1)          # (B, 64)
+            f = xt[:, n_stock + n_bond:].mean(dim=1)                 # (B, 64)
+            seqs.append(torch.cat([s, b, f], dim=-1))                # (B, 192)
+        g_seq = torch.stack(seqs, dim=1)                             # (B, T, 192)
+        _, (h_n, _) = self.global_lstm(g_seq)
+        return h_n[-1]                                               # (B, 64)
+
+    def _market_node_forward(self, x: torch.Tensor,
+                             debug: bool = False) -> torch.Tensor:
+        """
+        Market + Node dual representation:
+          h_node    = node-wise LSTM (per-node temporal)      (B, N, 64)
+          h_graph   = GNN(h_node, A) — propagation of the
+                      *current window's* dynamic node states  (B, N, 64)
+                      (skipped for market_node_no_graph)
+          h_global  = type-aware global market factor        (B, 64)
+          emb       = commodity identity embedding           (B, 24, 16)
+          z = cat([h_node_comm, h_graph_comm, h_global_expand, emb]) → shared MLP
+        """
+        B, T, N, _ = x.shape
+        fut_start = self.n_stock + self.n_bond
+
+        # ── 1. Node temporal representation ──
+        h_node = self._node_temporal_forward(x)                      # (B, N, 64)
+        assert h_node.shape == (B, N, 64), f"h_node: {h_node.shape}"
+
+        # ── 2. Graph propagation on node temporal states ──
+        h_graph = None
+        if self.variant == "market_node":
+            A = self.graph_learner() if self.use_learn_graph else self.static_A
+            h1 = F.relu(self.attn_mixhop1(h_node, A))                # (B, N, 64)
+            h2 = self.attn_mixhop2(h1, A)
+            h_graph = self.gcn_norm(h2)                              # (B, N, 64)
+            assert h_graph.shape == (B, N, 64), f"h_graph: {h_graph.shape}"
+
+        # ── 3. Global market factor ──
+        h_global = self._global_market_forward(x)                    # (B, 64)
+        assert h_global.shape == (B, 64), f"h_global: {h_global.shape}"
+
+        # ── 4. Commodity-specific slices ──
+        h_node_comm = h_node[:, fut_start:, :]                       # (B, 24, 64)
+        assert h_node_comm.shape[1] == self.n_commodities
+        if h_graph is not None:
+            h_graph_comm = h_graph[:, fut_start:, :]                 # (B, 24, 64)
+            assert h_graph_comm.shape[1] == self.n_commodities
+
+        # ── 5. Commodity identity embedding ──
+        emb = self.commodity_embedding(
+            torch.arange(self.n_commodities, device=x.device))       # (24, 16)
+        emb = emb.unsqueeze(0).expand(B, -1, -1)                     # (B, 24, 16)
+
+        # ── 6. Fusion ──
+        parts = [h_node_comm]
+        if h_graph is not None:
+            parts.append(h_graph_comm)
+        parts.append(h_global.unsqueeze(1).expand(-1, self.n_commodities, -1))
+        parts.append(emb)
+        z = torch.cat(parts, dim=-1)                                 # (B, 24, 208)/(B, 24, 144)
+
+        preds = self.market_node_head(z)                             # (B, 24, H)
+        if self.n_horizons > 1:
+            pred = preds.permute(0, 2, 1)                            # (B, H, 24)
+        else:
+            pred = preds.squeeze(-1)                                 # (B, 24)
+
+        if debug:
+            print(f"  [market_node] h_node={list(h_node.shape)} "
+                  f"h_graph={list(h_graph.shape) if h_graph is not None else None} "
+                  f"h_global={list(h_global.shape)} "
+                  f"h_node_comm={list(h_node_comm.shape)} "
+                  f"h_graph_comm={list(h_graph_comm.shape) if h_graph is not None else None} "
+                  f"emb={list(emb.shape)} z={list(z.shape)} "
+                  f"pred={list(pred.shape)}")
+        return pred
+
+    def node_similarity(self, x: torch.Tensor) -> dict:
+        """
+        Oversmoothing diagnostic: mean/std of pairwise cosine similarity
+        across the 24 commodity node representations (node temporal states).
+        Values close to 1.0 → representations smoothed into one another.
+        """
+        with torch.no_grad():
+            h_node = self._node_temporal_forward(x)                  # (B, N, 64)
+            comm = h_node[:, self.n_stock + self.n_bond:, :]         # (B, 24, 64)
+            sims = []
+            for b in range(min(comm.size(0), 4)):
+                c = F.normalize(comm[b], dim=-1)                     # (24, 64)
+                sim = c @ c.T                                        # (24, 24)
+                mask = ~torch.eye(24, dtype=torch.bool, device=c.device)
+                sims.append(sim[mask])
+            all_sim = torch.cat(sims)
+            return {'sim_mean': all_sim.mean().item(),
+                    'sim_std': all_sim.std().item()}
+
     def _factor_res_forward(self, x: torch.Tensor,
                             debug: bool = False) -> torch.Tensor:
         """
@@ -1138,6 +1271,8 @@ class HeteroMixHopCMGM(nn.Module):
             return self._factor_res_forward(x, debug)
         if self.variant == "node_wise":
             return self._node_wise_forward(x, debug)
+        if self.variant in ("market_node", "market_node_no_graph"):
+            return self._market_node_forward(x, debug)
 
         B, T, N, n_feat = x.shape
 
@@ -1239,7 +1374,8 @@ class HeteroMixHopCMGM(nn.Module):
     def get_gate_stats(self, x, edge_index=None, edge_weight=None):
         """Return gating statistics (only meaningful for gate variants)."""
         if self.variant in ("node_level", "comm_nodes", "batch_graph",
-                            "factor_res", "node_wise"):
+                            "factor_res", "node_wise",
+                            "market_node", "market_node_no_graph"):
             return {'mode': self.variant, 'note': 'no gate — per-node fusion'}
         if self.variant == "multiscale_graph":
             self.eval()

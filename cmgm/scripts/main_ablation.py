@@ -113,6 +113,10 @@ ALL_VARIANTS = [
     ("+FactorRes",          "factor_res",       FEATURE_DIM, {}),
     # Clean node-level baseline: batch-aware graph + node-wise LSTM + shared MLP
     ("+NodeWise",           "node_wise",        FEATURE_DIM, {}),
+    # Market + Node dual representation (full: node temporal + GNN + global factor)
+    ("+MarketNode",         "market_node",      FEATURE_DIM, {}),
+    # Market + Node without GNN (node temporal + global factor + embedding)
+    ("+MktNodeNoG",         "market_node_no_graph", FEATURE_DIM, {}),
     # ── Component ablations ──
     ("-TypeProj",           "no_type_proj",     FEATURE_DIM, {}),
     ("-LearnGraph",         "no_learn_graph",   FEATURE_DIM, {}),
@@ -291,6 +295,17 @@ def run_variant(name, variant, feat_dim, kwargs, args, device, data21, data7):
 
     # ── Evaluate on primary horizon ──
     mn, mo = evaluate_primary_horizon(model, loaders['test'], data, device)
+
+    # ── Oversmoothing diagnostic (market_node variants) ──
+    if variant in ("market_node", "market_node_no_graph") and hasattr(model, 'node_similarity'):
+        try:
+            x_diag = next(iter(loaders['test']))[0][:16].to(device)
+            sim = model.node_similarity(x_diag)
+            print(f"  [Node similarity] commodity pairwise cosine: "
+                  f"mean={sim['sim_mean']:.4f}  std={sim['sim_std']:.4f}  "
+                  f"({'oversmoothed' if sim['sim_mean'] > 0.9 else 'distinct'})")
+        except Exception as e:
+            print(f"  [Node similarity] skipped: {e}")
 
     # ── Zero baseline (always 0 for returns, mean vol otherwise) ──
     # NOTE: must use PRIMARY horizon only — y from multi-horizon loaders is (N, H, Nc)
