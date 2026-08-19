@@ -467,7 +467,9 @@ class HeteroMixHopCMGM(nn.Module):
                  n_stock: int = 248, n_bond: int = 12,
                  variant: str = "full", feat_dim: int = FEATURE_DIM,
                  attn_heads: int = 8, attn_dropout: float = 0.1,
-                 attn_prior_scale: float = 0.5, attn_self_heads: int = 4):
+                 attn_prior_scale: float = 0.5, attn_self_heads: int = 4,
+                 graph_cfg: str = "full", use_embedding: bool = True,
+                 relations: str = "cc"):
         super().__init__()
         self.num_nodes = num_nodes
         self.n_commodities = n_commodities
@@ -479,9 +481,14 @@ class HeteroMixHopCMGM(nn.Module):
         self.attn_dropout = attn_dropout
         self.attn_prior_scale = attn_prior_scale
         self.attn_self_heads = attn_self_heads
+        self.graph_cfg = graph_cfg
+        self.use_embedding = use_embedding
+        self.relations = relations
+        self.graph_mode = 'normal'   # E7: 'normal' | 'zero' | 'identity'
 
         # ── Branch switches ──
-        self.use_gcn  = variant not in ("lstm_only", "market_node_no_graph")
+        self.use_gcn  = variant not in ("lstm_only", "market_node_no_graph") and not (
+            variant == "mkt_node" and graph_cfg == "none")
         self.use_lstm = variant != "gcn_only"
         self.use_learn_graph = variant not in ("no_learn_graph", "edge_attn_static")
         self.use_type_proj   = variant != "no_type_proj"
@@ -489,11 +496,12 @@ class HeteroMixHopCMGM(nn.Module):
                                                "temporal_attn", "diff_input", "hybrid_attn",
                                                "node_level", "comm_nodes", "batch_graph",
                                                "factor_res", "node_wise", "market_node",
-                                               "market_node_no_graph")
+                                               "market_node_no_graph", "mkt_node")
         self.use_edge_attn   = variant in ("edge_attn", "edge_attn_static", "temporal_attn",
                                            "diff_input", "hybrid_attn", "node_level",
                                            "comm_nodes", "batch_graph", "factor_res",
-                                           "node_wise", "market_node", "market_node_no_graph")
+                                           "node_wise", "market_node", "market_node_no_graph",
+                                           "mkt_node")
         self.use_gate        = variant not in ("no_gate", "gcn_only", "lstm_only")
 
         # ── Multi-horizon output ──
@@ -608,7 +616,7 @@ class HeteroMixHopCMGM(nn.Module):
 
         # ── Temporal branch ──
         if self.use_lstm:
-            if variant in ("node_wise", "market_node", "market_node_no_graph"):
+            if variant in ("node_wise", "market_node", "market_node_no_graph", "mkt_node"):
                 # Node-wise temporal encoder: each node gets its OWN
                 # temporal representation via a shared LSTM over (B*N, T, F)
                 self.node_lstm = nn.LSTM(
@@ -622,6 +630,46 @@ class HeteroMixHopCMGM(nn.Module):
                     # shared MLP over [graph_feat, temporal_feat] per commodity
                     self.node_wise_head = nn.Sequential(
                         nn.Linear(LSTM_HIDDEN_DIM * 2, FC_HIDDEN_DIM),
+                        nn.ReLU(),
+                        nn.Dropout(GCN_DROPOUT),
+                        nn.Linear(FC_HIDDEN_DIM, self.n_horizons),
+                    )
+                elif variant == "mkt_node":
+                    # E-series unified variant: graph_cfg / use_embedding /
+                    # relations configured via kwargs
+                    self.global_lstm = nn.LSTM(
+                        input_size=LSTM_HIDDEN_DIM * 3,
+                        hidden_size=LSTM_HIDDEN_DIM,
+                        num_layers=LSTM_NUM_LAYERS,
+                        dropout=LSTM_DROPOUT if LSTM_NUM_LAYERS > 1 else 0.0,
+                        batch_first=True,
+                    )
+                    if use_embedding:
+                        self.commodity_embedding = nn.Embedding(n_commodities, 16)
+                    # E2/E3: learnable residual scale / node-wise gate
+                    if graph_cfg in ("res", "gate"):
+                        self.graph_alpha = nn.Parameter(torch.tensor(0.1))
+                    if graph_cfg == "gate":
+                        self.gate_lin = nn.Linear(LSTM_HIDDEN_DIM * 2, 1)
+                    # E5: relation-specific adjacency mask
+                    if graph_cfg == "rel":
+                        fut = n_stock + n_bond
+                        M = torch.zeros(num_nodes, num_nodes)
+                        if relations in ("cc", "cc_sc", "cc_bc", "cc_sc_bc", "full"):
+                            M[fut:, fut:] = 1.0
+                        if "sc" in relations:
+                            M[fut:, :n_stock] = 1.0
+                        if "bc" in relations:
+                            M[fut:, n_stock:fut] = 1.0
+                        if relations == "full":
+                            M = torch.ones(num_nodes, num_nodes)
+                        self.register_buffer('rel_mask', M)
+                    # head: full (D) concats node+graph; others use graph
+                    head_in = LSTM_HIDDEN_DIM * 2 + (16 if use_embedding else 0)
+                    if graph_cfg == "full":
+                        head_in += LSTM_HIDDEN_DIM
+                    self.market_node_head = nn.Sequential(
+                        nn.Linear(head_in, FC_HIDDEN_DIM),
                         nn.ReLU(),
                         nn.Dropout(GCN_DROPOUT),
                         nn.Linear(FC_HIDDEN_DIM, self.n_horizons),
@@ -1182,6 +1230,121 @@ class HeteroMixHopCMGM(nn.Module):
                   f"pred={list(pred.shape)}")
         return pred
 
+    def _mkt_node_forward(self, x: torch.Tensor,
+                          debug: bool = False) -> torch.Tensor:
+        """
+        Unified E-series forward:
+          h_node (node-wise LSTM) + h_global (type-aware market factor)
+          + graph branch per graph_cfg:
+            none: h_eff = h_node
+            full: h_eff = cat(h_node, GNN(h_node))          (D, 208)
+            cc:   h_eff = GNN(h_node_comm, A_CC)            (E4, 144)
+            rel:  h_eff = GNN(h_node, A·mask) commodity slice (E5)
+            res:  h_eff = h_node + α·GNN(h_node)            (E2)
+            gate: h_eff = h_node + σ(·)·GNN(h_node)         (E3)
+          + commodity embedding (unless disabled) → shared MLP
+        """
+        B, T, N, _ = x.shape
+        fut_start = self.n_stock + self.n_bond
+        cfg = self.graph_cfg
+
+        h_node = self._node_temporal_forward(x)                      # (B, N, 64)
+        h_global = self._global_market_forward(x)                    # (B, 64)
+        h_node_comm = h_node[:, fut_start:, :]                       # (B, 24, 64)
+
+        if cfg == "none":
+            h_eff_comm = h_node_comm
+        else:
+            A = self.graph_learner() if self.use_learn_graph else self.static_A
+            if cfg == "cc":
+                A_eff = A[fut_start:, fut_start:]                    # (24, 24)
+                g1 = F.relu(self.attn_mixhop1(h_node_comm, A_eff))   # (B, 24, 64)
+                g2 = self.attn_mixhop2(g1, A_eff)
+                h_eff_comm = self.gcn_norm(g2)
+            elif cfg == "rel":
+                A_eff = A * self.rel_mask
+                g1 = F.relu(self.attn_mixhop1(h_node, A_eff))        # (B, N, 64)
+                g2 = self.attn_mixhop2(g1, A_eff)
+                h_eff_comm = self.gcn_norm(g2)[:, fut_start:, :]
+            elif cfg == "res":
+                g1 = F.relu(self.attn_mixhop1(h_node, A))
+                g2 = self.attn_mixhop2(g1, A)
+                g = self.gcn_norm(g2)
+                h_eff_comm = (h_node + self.graph_alpha * g)[:, fut_start:, :]
+            elif cfg == "gate":
+                g1 = F.relu(self.attn_mixhop1(h_node, A))
+                g2 = self.attn_mixhop2(g1, A)
+                g = self.gcn_norm(g2)
+                gate = torch.sigmoid(self.gate_lin(
+                    torch.cat([h_node, g], dim=-1)))                 # (B, N, 1)
+                self.last_gate = gate
+                h_eff_comm = (h_node + gate * g)[:, fut_start:, :]
+            else:  # full (D)
+                g1 = F.relu(self.attn_mixhop1(h_node, A))
+                g2 = self.attn_mixhop2(g1, A)
+                g = self.gcn_norm(g2)
+                if self.graph_mode == 'zero':                        # E7
+                    h_graph = torch.zeros_like(h_node)
+                elif self.graph_mode == 'identity':                  # E7
+                    h_graph = h_node
+                else:
+                    h_graph = g
+                h_eff_comm = torch.cat(
+                    [h_node_comm, h_graph[:, fut_start:, :]], dim=-1)  # (B, 24, 128)
+
+        # Commodity embedding + global expand
+        parts = [h_eff_comm]
+        parts.append(h_global.unsqueeze(1).expand(-1, self.n_commodities, -1))
+        if self.use_embedding:
+            emb = self.commodity_embedding(
+                torch.arange(self.n_commodities, device=x.device))
+            parts.append(emb.unsqueeze(0).expand(B, -1, -1))
+        z = torch.cat(parts, dim=-1)
+
+        preds = self.market_node_head(z)                             # (B, 24, H)
+        if self.n_horizons > 1:
+            pred = preds.permute(0, 2, 1)                            # (B, H, 24)
+        else:
+            pred = preds.squeeze(-1)                                 # (B, 24)
+
+        if debug:
+            print(f"  [mkt_node cfg={cfg}] h_node={list(h_node.shape)} "
+                  f"h_global={list(h_global.shape)} h_eff_comm={list(h_eff_comm.shape)} "
+                  f"z={list(z.shape)} pred={list(pred.shape)}")
+        return pred
+
+    @staticmethod
+    def _pairwise_cos(h: torch.Tensor):
+        """(mean, std) of pairwise cosine similarity across nodes (no self)."""
+        sims = []
+        for b in range(min(h.size(0), 4)):
+            c = F.normalize(h[b], dim=-1)
+            sim = c @ c.T
+            mask = ~torch.eye(sim.size(0), dtype=torch.bool, device=sim.device)
+            sims.append(sim[mask])
+        all_sim = torch.cat(sims)
+        return all_sim.mean().item(), all_sim.std().item()
+
+    def layer_similarity(self, x: torch.Tensor) -> dict:
+        """
+        E6 oversmoothing diagnostic per propagation layer:
+          input (node temporal) / after MixHop layer 1 / layer 2
+          reported for all-node and commodity-only pairwise cosine.
+        """
+        with torch.no_grad():
+            h_node = self._node_temporal_forward(x)                  # (B, N, 64)
+            A = self.graph_learner() if self.use_learn_graph else self.static_A
+            h1 = F.relu(self.attn_mixhop1(h_node, A))
+            h2 = self.attn_mixhop2(h1, A)
+            fut = self.n_stock + self.n_bond
+            res = {}
+            for name, h in [('input', h_node), ('layer1', h1), ('layer2', h2)]:
+                m_all, s_all = self._pairwise_cos(h)
+                m_comm, s_comm = self._pairwise_cos(h[:, fut:, :])
+                res[f'{name}_all_mean'], res[f'{name}_all_std'] = m_all, s_all
+                res[f'{name}_comm_mean'], res[f'{name}_comm_std'] = m_comm, s_comm
+            return res
+
     def node_similarity(self, x: torch.Tensor) -> dict:
         """
         Oversmoothing diagnostic: mean/std of pairwise cosine similarity
@@ -1273,6 +1436,8 @@ class HeteroMixHopCMGM(nn.Module):
             return self._node_wise_forward(x, debug)
         if self.variant in ("market_node", "market_node_no_graph"):
             return self._market_node_forward(x, debug)
+        if self.variant == "mkt_node":
+            return self._mkt_node_forward(x, debug)
 
         B, T, N, n_feat = x.shape
 
@@ -1375,7 +1540,7 @@ class HeteroMixHopCMGM(nn.Module):
         """Return gating statistics (only meaningful for gate variants)."""
         if self.variant in ("node_level", "comm_nodes", "batch_graph",
                             "factor_res", "node_wise",
-                            "market_node", "market_node_no_graph"):
+                            "market_node", "market_node_no_graph", "mkt_node"):
             return {'mode': self.variant, 'note': 'no gate — per-node fusion'}
         if self.variant == "multiscale_graph":
             self.eval()

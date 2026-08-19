@@ -117,6 +117,22 @@ ALL_VARIANTS = [
     ("+MarketNode",         "market_node",      FEATURE_DIM, {}),
     # Market + Node without GNN (node temporal + global factor + embedding)
     ("+MktNodeNoG",         "market_node_no_graph", FEATURE_DIM, {}),
+    # ── E-series diagnostics (unified mkt_node variant) ──
+    ("E1-CNoEmb",           "mkt_node", FEATURE_DIM,
+     {'graph_cfg': 'none', 'use_embedding': False}),
+    ("E2-Residual",         "mkt_node", FEATURE_DIM, {'graph_cfg': 'res'}),
+    ("E3-Gate",             "mkt_node", FEATURE_DIM, {'graph_cfg': 'gate'}),
+    ("E4-CCOnly",           "mkt_node", FEATURE_DIM, {'graph_cfg': 'cc'}),
+    ("E5-CC",               "mkt_node", FEATURE_DIM,
+     {'graph_cfg': 'rel', 'relations': 'cc'}),
+    ("E5-CCSC",             "mkt_node", FEATURE_DIM,
+     {'graph_cfg': 'rel', 'relations': 'cc_sc'}),
+    ("E5-CCBC",             "mkt_node", FEATURE_DIM,
+     {'graph_cfg': 'rel', 'relations': 'cc_bc'}),
+    ("E5-CCSCBC",           "mkt_node", FEATURE_DIM,
+     {'graph_cfg': 'rel', 'relations': 'cc_sc_bc'}),
+    ("E5-Full",             "mkt_node", FEATURE_DIM,
+     {'graph_cfg': 'rel', 'relations': 'full'}),
     # ── Component ablations ──
     ("-TypeProj",           "no_type_proj",     FEATURE_DIM, {}),
     ("-LearnGraph",         "no_learn_graph",   FEATURE_DIM, {}),
@@ -306,6 +322,47 @@ def run_variant(name, variant, feat_dim, kwargs, args, device, data21, data7):
                   f"({'oversmoothed' if sim['sim_mean'] > 0.9 else 'distinct'})")
         except Exception as e:
             print(f"  [Node similarity] skipped: {e}")
+
+    # ── E6: per-layer oversmoothing diagnostic (mkt_node variants) ──
+    if variant == "mkt_node" and kwargs.get('graph_cfg', 'full') != 'none':
+        try:
+            x_diag = next(iter(loaders['test']))[0][:16].to(device)
+            ls = model.layer_similarity(x_diag)
+            print("  [E6 layer similarity]  all-node        commodity")
+            for layer in ['input', 'layer1', 'layer2']:
+                print(f"    {layer:<8s}  mean={ls[f'{layer}_all_mean']:.4f} "
+                      f"(std {ls[f'{layer}_all_std']:.4f})   "
+                      f"mean={ls[f'{layer}_comm_mean']:.4f} "
+                      f"(std {ls[f'{layer}_comm_std']:.4f})")
+        except Exception as e:
+            print(f"  [E6 layer similarity] skipped: {e}")
+
+    # ── E3: gate statistics ──
+    if variant == "mkt_node" and kwargs.get('graph_cfg') == 'gate':
+        try:
+            x_diag = next(iter(loaders['test']))[0][:16].to(device)
+            model.eval()
+            with torch.no_grad():
+                model(x_diag)
+                g = model.last_gate
+            print(f"  [E3 gate] mean={g.mean().item():.4f} std={g.std().item():.4f} "
+                  f"min={g.min().item():.4f} max={g.max().item():.4f}")
+        except Exception as e:
+            print(f"  [E3 gate] skipped: {e}")
+
+    # ── E7: graph contribution test (final model = mkt_node full) ──
+    if variant == "mkt_node" and kwargs.get('graph_cfg', 'full') == 'full':
+        try:
+            x_diag = next(iter(loaders['test']))[0][:16].to(device)
+            print("  [E7 graph contribution]")
+            for mode in ['normal', 'zero', 'identity']:
+                model.graph_mode = mode
+                mn_m, _ = evaluate_primary_horizon(model, loaders['test'], data, device)
+                print(f"    graph_mode={mode:<8s} MAE={mn_m['MAE']:.6f} "
+                      f"Hit%={mn_m.get('Hit_Ratio', float('nan'))*100:.1f}")
+            model.graph_mode = 'normal'
+        except Exception as e:
+            print(f"  [E7 graph contribution] skipped: {e}")
 
     # ── Zero baseline (always 0 for returns, mean vol otherwise) ──
     # NOTE: must use PRIMARY horizon only — y from multi-horizon loaders is (N, H, Nc)
