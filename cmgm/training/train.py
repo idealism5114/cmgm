@@ -103,6 +103,12 @@ def train_epoch(
             if y_batch.dim() == 3:
                 y_mean = y_batch.mean(dim=-1)                    # (B, H)
                 loss = loss + criterion(aux, y_mean)
+        # Auxiliary loss: spatial_temporal_attention — keep the global
+        # branch trained (pred_global stored in model.last_aux_pred)
+        aux_pred = getattr(model, 'last_aux_pred', None)
+        if aux_pred is not None:
+            if y_batch.dim() == 3:
+                loss = loss + criterion(aux_pred, y_batch)
 
         # Backward pass
         loss.backward()
@@ -167,6 +173,11 @@ def validate_epoch(
         aux = getattr(model, 'last_r_mean', None)
         if aux is not None and y_batch.dim() == 3:
             loss = loss + criterion(aux, y_batch.mean(dim=-1))
+        # Auxiliary loss: spatial_temporal_attention — keep the global
+        # branch trained (pred_global stored in model.last_aux_pred)
+        aux_pred = getattr(model, 'last_aux_pred', None)
+        if aux_pred is not None and y_batch.dim() == 3:
+            loss = loss + criterion(aux_pred, y_batch)
 
         total_loss += loss.item()
         num_batches += 1

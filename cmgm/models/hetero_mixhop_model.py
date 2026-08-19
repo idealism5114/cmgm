@@ -497,12 +497,14 @@ class HeteroMixHopCMGM(nn.Module):
                                                "node_level", "comm_nodes", "batch_graph",
                                                "factor_res", "node_wise", "market_node",
                                                "market_node_no_graph", "mkt_node",
-                                               "comm_residual", "comm_output_residual")
+                                               "comm_residual", "comm_output_residual",
+                                               "spatial_temporal_attention")
         self.use_edge_attn   = variant in ("edge_attn", "edge_attn_static", "temporal_attn",
                                            "diff_input", "hybrid_attn", "node_level",
                                            "comm_nodes", "batch_graph", "factor_res",
                                            "node_wise", "market_node", "market_node_no_graph",
-                                           "mkt_node", "comm_residual", "comm_output_residual")
+                                           "mkt_node", "comm_residual", "comm_output_residual",
+                                           "spatial_temporal_attention")
         self.use_gate        = variant not in ("no_gate", "gcn_only", "lstm_only")
 
         # ── Multi-horizon output ──
@@ -793,6 +795,14 @@ class HeteroMixHopCMGM(nn.Module):
             )
             self.residual_alpha = nn.Parameter(torch.tensor(0.01))
 
+        # spatial_temporal_attention: per-timestep GNN + temporal attention
+        # (replaces mean over T in the spatial branch).  Global branch kept
+        # intact; commodity nodes never pooled.
+        if variant == "spatial_temporal_attention":
+            self.temporal_score = nn.Linear(LSTM_HIDDEN_DIM, 1)
+            # commodity output head — reuses the original head's shared body
+            self.comm_out = nn.Linear(FC_HIDDEN_DIM, self.n_horizons)
+
         # Node-level head: shared MLP applied per commodity node —
         # input (B, n_commodities, 128) → (B, n_commodities, n_horizons)
         if variant == "node_level":
@@ -845,10 +855,52 @@ class HeteroMixHopCMGM(nn.Module):
             h1 = self.singlehop1(x_proj, A)                            # (N, 64)
             h2 = self.singlehop2(h1, A)                                # (N, 64)
         h = self.gcn_norm(h2)                                          # (N, 64)
+        self._last_h = h                                               # node reps (for comm_output_residual)
 
         # Per-type pooling → expand to batch
         gcn_out = self.type_pool(h).unsqueeze(0).expand(x.size(0), -1) # (B, 64)
         return gcn_out
+
+    def _original_forward(self, x: torch.Tensor, return_h: bool = False,
+                          debug: bool = False) -> torch.Tensor:
+        """
+        THE original edge_attn forward path — single source of truth.
+        Both `edge_attn` and `comm_output_residual` call this exact code:
+
+          single-graph spatial (type_proj → EdgeAttnMixHop → type pooling)
+          → global LSTM → gate fusion → original head → reshape
+
+        return_h=True additionally returns the node representations H (N, 64)
+        from the spatial branch (used by comm_output_residual).
+        """
+        B, T, N, n_feat = x.shape
+
+        # ── 1. Spatial branch (single graph, unchanged) ──
+        gcn_out = self._spatial_forward(x)                             # (B, 64)
+
+        # ── 2. Temporal branch (global LSTM, unchanged) ──
+        x_seq = x.reshape(B, T, -1)                                    # (B, T, N*F)
+        lstm_out, (h_n, _) = self.temporal(x_seq)
+        lstm_out = h_n[-1]                                             # (B, 64)
+
+        # ── 3. Gate fusion (unchanged) ──
+        combined = torch.cat([gcn_out, lstm_out], dim=-1)              # (B, 128)
+        gate = torch.sigmoid(self.gate_fc(combined))
+        fused = gate * self.lstm_proj(lstm_out) + (1 - gate) * self.gcn_proj(gcn_out)  # (B, 64)
+
+        # ── 4. Original head + reshape (unchanged) ──
+        pred = self.head(fused)                                        # (B, out_dim)
+        if self.n_horizons > 1:
+            pred = pred.view(B, self.n_horizons, self.n_commodities)   # (B, H, Nc)
+        else:
+            pred = pred.view(B, self.n_commodities)                    # (B, Nc)
+
+        if debug:
+            print(f"  [original] GCN→{list(gcn_out.shape)} LSTM→{list(lstm_out.shape)} "
+                  f"→ gate → head → {list(pred.shape)}")
+        if return_h:
+            return pred, self._last_h
+        return pred
 
     def _temporal_attn_forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -1494,51 +1546,24 @@ class HeteroMixHopCMGM(nn.Module):
     def _comm_output_residual_forward(self, x: torch.Tensor,
                                       debug: bool = False) -> torch.Tensor:
         """
-        Original prediction path (single-graph propagation → type pooling →
-        global LSTM → gate fusion → original head) kept EXACTLY as the
-        edge_attn baseline.  Commodity graph nodes additionally produce a
-        small output residual:
+        Output residual on top of THE original edge_attn path:
 
-          base_pred   = original edge_attn output          (B, H, 24)
-          h_comm      = commodity node reps from graph H   (B, 24, 64)
-          residual    = Linear(64→32)→ReLU→Linear(32→H)    (B, 24, H)
-          pred        = base_pred + α · residual           α init 0.01
+          base_pred, H = self._original_forward(x, return_h=True)
+              ← EXACTLY the same code as edge_attn
+          h_comm       = H[commodity_idx]  (never pooled)
+          residual     = Linear(64→32)→ReLU→Linear(32→H) on h_comm
+          pred         = base_pred + α · residual   (α init 0.01)
 
-        α = 0 → pred strictly equals the original edge_attn output.
+        α = 0 → pred strictly equals edge_attn output.
         """
         B, T, N, _ = x.shape
         fut_start = self.n_stock + self.n_bond
 
-        # ── 1. Original spatial propagation (single graph, unchanged) ──
-        A = self.graph_learner() if self.use_learn_graph else self.static_A
-        x_gcn = x.mean(dim=0).permute(1, 0, 2)                       # (N, T, F)
-        x_proj = self.type_proj(x_gcn, self.n_stock, self.n_bond)    # (N, T, 64)
-        x_proj = x_proj.mean(dim=1)                                  # (N, 64)
-        h1 = F.relu(self.attn_mixhop1(x_proj, A))                    # (N, 64)
-        h2 = self.attn_mixhop2(h1, A)
-        h = self.gcn_norm(h2)                                        # (N, 64)
-        h_global_graph = self.type_pool(h)                           # (64,)
-        gcn_out = h_global_graph.unsqueeze(0).expand(B, -1)          # (B, 64)
-        h_comm = h[fut_start:].unsqueeze(0).expand(B, -1, -1)        # (B, 24, 64)
+        # ── 1-4. THE original path (shared code with edge_attn) ──
+        base_pred, H = self._original_forward(x, return_h=True)      # (B, H, 24), (N, 64)
 
-        # ── 2. Original global LSTM ──
-        x_seq = x.reshape(B, T, -1)                                  # (B, T, N*F)
-        lstm_out, (h_n, _) = self.temporal(x_seq)
-        lstm_out = h_n[-1]                                           # (B, 64)
-
-        # ── 3. Original gate fusion ──
-        combined = torch.cat([gcn_out, lstm_out], dim=-1)            # (B, 128)
-        gate = torch.sigmoid(self.gate_fc(combined))
-        fused = gate * self.lstm_proj(lstm_out) + (1 - gate) * self.gcn_proj(gcn_out)  # (B, 64)
-
-        # ── 4. Original head → base_pred (identical to edge_attn) ──
-        base_pred = self.head(fused)                                 # (B, H*24)
-        if self.n_horizons > 1:
-            base_pred = base_pred.view(B, self.n_horizons, self.n_commodities)  # (B, H, 24)
-        else:
-            base_pred = base_pred.view(B, self.n_commodities)        # (B, 24)
-
-        # ── 5. Commodity output residual ──
+        # ── 5. Commodity output residual (added AFTER the original path) ──
+        h_comm = H[fut_start:].unsqueeze(0).expand(B, -1, -1)        # (B, 24, 64)
         residual = self.residual_head(h_comm)                        # (B, 24, H)
         if self.n_horizons > 1:
             residual = residual.permute(0, 2, 1)                     # (B, H, 24)
@@ -1556,6 +1581,76 @@ class HeteroMixHopCMGM(nn.Module):
             print(f"  [comm_output_residual] α={self.residual_alpha.item():.4f} "
                   f"base={list(base_pred.shape)} residual={list(residual.shape)} "
                   f"pred={list(pred.shape)}")
+        return pred
+
+    def _spatial_temporal_attention_forward(self, x: torch.Tensor,
+                                            debug: bool = False) -> torch.Tensor:
+        """
+        Per-timestep spatial propagation + temporal attention:
+
+          for t in 1..T:
+            x_t → type_proj → GNN(EdgeAttnMixHop on shared A) → h_t (B, N, 64)
+          h_seq = stack(h_t)                     (B, T, N, 64)
+          α_t   = softmax(Linear(64→1)(h_t), over T)
+          h_spatial = Σ_t α_t · h_t              (B, N, 64)   ← replaces mean(dim=1)
+
+        Global branch (kept): type_pool(h_spatial) + global LSTM → original
+        fusion/head → pred_global (auxiliary supervision keeps it trained).
+        Commodity branch (never pooled): h_comm = h_spatial[:, 24:] →
+        original head body (shared) → comm_out → (B, H, 24).
+        """
+        B, T, N, _ = x.shape
+        fut_start = self.n_stock + self.n_bond
+
+        # ── 1. Per-timestep GNN propagation ──
+        A = self.graph_learner() if self.use_learn_graph else self.static_A
+        seqs = []
+        for t in range(T):
+            xt = x[:, t, :, :]                                       # (B, N, F)
+            x_proj = self.type_proj(xt, self.n_stock, self.n_bond)   # (B, N, 64)
+            h1 = F.relu(self.attn_mixhop1(x_proj, A))                # (B, N, 64)
+            h2 = self.attn_mixhop2(h1, A)
+            seqs.append(self.gcn_norm(h2))
+        h_seq = torch.stack(seqs, dim=1)                             # (B, T, N, 64)
+
+        # ── 2. Temporal attention over steps ──
+        scores = self.temporal_score(h_seq).squeeze(-1)              # (B, T, N)
+        alpha = F.softmax(scores, dim=1).unsqueeze(-1)               # (B, T, N, 1)
+        h_spatial = (h_seq * alpha).sum(dim=1)                       # (B, N, 64)
+
+        # ── 3. Global pooling (kept) + commodity slice (never pooled) ──
+        h_global_spatial = self.type_pool(h_spatial)                 # (B, 64)
+        h_comm = h_spatial[:, fut_start:, :]                         # (B, 24, 64)
+
+        # ── 4. Global LSTM (kept) ──
+        x_seq = x.reshape(B, T, -1)                                  # (B, T, N*F)
+        lstm_out, (h_n, _) = self.temporal(x_seq)
+        h_lstm = h_n[-1]                                             # (B, 64)
+
+        # ── 5. Global branch: original fusion + head (auxiliary) ──
+        combined = torch.cat([h_global_spatial, h_lstm], dim=-1)     # (B, 128)
+        gate = torch.sigmoid(self.gate_fc(combined))
+        fused = gate * self.lstm_proj(h_lstm) + (1 - gate) * self.gcn_proj(h_global_spatial)
+        pred_global = self.head(fused)                               # (B, H*24)
+        if self.n_horizons > 1:
+            pred_global = pred_global.view(B, self.n_horizons, self.n_commodities)
+        else:
+            pred_global = pred_global.view(B, self.n_commodities)
+        self.last_aux_pred = pred_global.detach()                    # auxiliary supervision
+        self.last_pred_global = pred_global.detach()
+
+        # ── 6. Commodity branch: original head body (shared) + comm_out ──
+        body = self.head[0:3](h_comm)                                # (B, 24, 64) → (B, 24, FC)
+        preds = self.comm_out(body)                                  # (B, 24, H)
+        if self.n_horizons > 1:
+            pred = preds.permute(0, 2, 1)                            # (B, H, 24)
+        else:
+            pred = preds.squeeze(-1)                                 # (B, 24)
+
+        if debug:
+            print(f"  [spatial_temporal_attention] h_seq={list(h_seq.shape)} "
+                  f"h_spatial={list(h_spatial.shape)} h_global={list(h_global_spatial.shape)} "
+                  f"h_comm={list(h_comm.shape)} pred={list(pred.shape)}")
         return pred
 
     def forward(self, x: torch.Tensor,
@@ -1581,6 +1676,11 @@ class HeteroMixHopCMGM(nn.Module):
             return self._comm_residual_forward(x, debug)
         if self.variant == "comm_output_residual":
             return self._comm_output_residual_forward(x, debug)
+        if self.variant == "spatial_temporal_attention":
+            return self._spatial_temporal_attention_forward(x, debug)
+        if self.variant == "edge_attn":
+            # single source of truth shared with comm_output_residual
+            return self._original_forward(x, debug=debug)
 
         B, T, N, n_feat = x.shape
 
@@ -1684,7 +1784,8 @@ class HeteroMixHopCMGM(nn.Module):
         if self.variant in ("node_level", "comm_nodes", "batch_graph",
                             "factor_res", "node_wise",
                             "market_node", "market_node_no_graph", "mkt_node",
-                            "comm_residual", "comm_output_residual"):
+                            "comm_residual", "comm_output_residual",
+                            "spatial_temporal_attention"):
             return {'mode': self.variant, 'note': 'no gate — per-node fusion'}
         if self.variant == "multiscale_graph":
             self.eval()

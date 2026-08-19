@@ -126,8 +126,9 @@ def main():
     # ── 4. Same batch, eval + no_grad comparison ──
     model_orig.eval()
     model_res.eval()
-    max_diff, mean_diff = 0.0, 0.0
+    max_diff, mean_diff, max_rel = 0.0, 0.0, 0.0
     maes_o, maes_b = [], []
+    all_orig, all_base = [], []
     n_batches = 0
     with torch.no_grad():
         for batch in loaders['test']:
@@ -140,6 +141,8 @@ def main():
             diff = (p_orig - p_base).abs()
             max_diff = max(max_diff, diff.max().item())
             mean_diff += diff.mean().item()
+            denom = p_orig.abs().clamp(min=1e-8)
+            max_rel = max(max_rel, (diff / denom).max().item())
 
             y_np = yb.numpy()
             p_orig_np = p_orig.cpu().numpy()
@@ -152,19 +155,28 @@ def main():
                 p_base_np = p_base_np[:, h_idx, :]
             maes_o.append(np.mean(np.abs(y_np - p_orig_np)))
             maes_b.append(np.mean(np.abs(y_np - p_base_np)))
+            all_orig.append(p_orig_np)
+            all_base.append(p_base_np)
             n_batches += 1
 
     mean_diff /= n_batches
     mae_orig = float(np.mean(maes_o))
     mae_base = float(np.mean(maes_b))
+    ao = np.concatenate(all_orig)
+    ab = np.concatenate(all_base)
 
     print("\n" + "=" * 60)
     print("NESTED-MODEL VERIFICATION (same checkpoint)")
     print("=" * 60)
     print(f"  max_abs_diff   = {max_diff:.3e}")
     print(f"  mean_abs_diff  = {mean_diff:.3e}")
+    print(f"  max_rel_diff   = {max_rel:.3e}")
     print(f"  MAE_original   = {mae_orig:.6f}")
     print(f"  MAE_base       = {mae_base:.6f}")
+    print(f"  pred stats (original): mean={ao.mean():.6f} std={ao.std():.6f} "
+          f"min={ao.min():.6f} max={ao.max():.6f}")
+    print(f"  pred stats (base)    : mean={ab.mean():.6f} std={ab.std():.6f} "
+          f"min={ab.min():.6f} max={ab.max():.6f}")
     ok = max_diff < 1e-6
     print(f"  RESULT         = {'PASS ✅' if ok else 'FAIL ❌'}")
     print("=" * 60)

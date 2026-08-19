@@ -137,6 +137,8 @@ ALL_VARIANTS = [
     ("+CommResidual",       "comm_residual", FEATURE_DIM, {}),
     # Output-side commodity residual: original path kept exactly
     ("+CommOutRes",         "comm_output_residual", FEATURE_DIM, {}),
+    # Per-timestep GNN + temporal attention (replaces mean over T)
+    ("+SpatTempAttn",       "spatial_temporal_attention", FEATURE_DIM, {}),
     # ── Component ablations ──
     ("-TypeProj",           "no_type_proj",     FEATURE_DIM, {}),
     ("-LearnGraph",         "no_learn_graph",   FEATURE_DIM, {}),
