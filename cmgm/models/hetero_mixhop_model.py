@@ -499,14 +499,16 @@ class HeteroMixHopCMGM(nn.Module):
                                                "market_node_no_graph", "mkt_node",
                                                "comm_residual", "comm_output_residual",
                                                "spatial_temporal_attention",
-                                               "temporal_weighted_graph")
+                                               "temporal_weighted_graph",
+                                               "temp_weighted_comm_cond")
         self.use_edge_attn   = variant in ("edge_attn", "edge_attn_static", "temporal_attn",
                                            "diff_input", "hybrid_attn", "node_level",
                                            "comm_nodes", "batch_graph", "factor_res",
                                            "node_wise", "market_node", "market_node_no_graph",
                                            "mkt_node", "comm_residual", "comm_output_residual",
                                            "spatial_temporal_attention",
-                                           "temporal_weighted_graph")
+                                           "temporal_weighted_graph",
+                                           "temp_weighted_comm_cond")
         self.use_gate        = variant not in ("no_gate", "gcn_only", "lstm_only")
 
         # ── Multi-horizon output ──
@@ -809,6 +811,15 @@ class HeteroMixHopCMGM(nn.Module):
         # temporal attention.  GNN structure, LSTM, fusion, head unchanged.
         if variant == "temporal_weighted_graph":
             self.temporal_score = nn.Linear(LSTM_HIDDEN_DIM, 1)
+
+        # temp_weighted_comm_cond: commodity graph representations
+        # condition the shared hidden state before the ORIGINAL per-commodity
+        # output layer.  α = 0 → output strictly equals TempWeighted.
+        if variant == "temp_weighted_comm_cond":
+            self.temporal_score = nn.Linear(LSTM_HIDDEN_DIM, 1)
+            self.comm_proj = nn.Linear(LSTM_HIDDEN_DIM, LSTM_HIDDEN_DIM)
+            self.alpha = nn.Parameter(torch.tensor(0.01))
+            self.shuffle_comm = False    # diagnostic: permute commodity dim
 
         # Node-level head: shared MLP applied per commodity node —
         # input (B, n_commodities, 128) → (B, n_commodities, n_horizons)
@@ -1596,6 +1607,84 @@ class HeteroMixHopCMGM(nn.Module):
                   f"GNN → {list(gcn_out.shape)} → {list(pred.shape)}")
         return pred
 
+    def _temp_weighted_comm_cond_forward(self, x: torch.Tensor,
+                                         debug: bool = False) -> torch.Tensor:
+        """
+        TempWeighted + commodity-conditioned hidden state:
+
+          H       = temporal-weighted aggregation → GNN ×2 → (B, N, 64)
+          h_comm  = H[:, 260:284] (never pooled)                  (B, 24, 64)
+          fused   = original gate fusion (global graph + global LSTM) (B, 64)
+          h       = head[0:3](fused)      ← original head body      (B, 64)
+          h_cond  = h.unsqueeze(1) + α·comm_proj(h_comm)          (B, 24, 64)
+          pred[b,h,i] = W_orig[h*24+i] @ h_cond[b,i] + b_orig[h*24+i]
+                     using the ORIGINAL head[3] weights.
+
+        α = 0 → h_cond == h (per commodity identical) → pred == TempWeighted.
+        """
+        B, T, N, _ = x.shape
+        fut_start = self.n_stock + self.n_bond
+
+        # ── 1. Temporal-weighted aggregation (same as TempWeighted) ──
+        seqs = [self.type_proj(x[:, t, :, :], self.n_stock, self.n_bond)
+                for t in range(T)]
+        H_seq = torch.stack(seqs, dim=1)                           # (B, T, N, 64)
+        score = self.temporal_score(H_seq)                         # (B, T, N, 1)
+        alpha_t = F.softmax(score, dim=1)
+        H = (H_seq * alpha_t).sum(dim=1)                           # (B, N, 64)
+        self.last_alpha = alpha_t.squeeze(-1).detach()
+
+        # ── 2. GNN ×2 (batch mode, runs once) ──
+        A = self.graph_learner() if self.use_learn_graph else self.static_A
+        h1 = F.relu(self.attn_mixhop1(H, A))                       # (B, N, 64)
+        h2 = self.attn_mixhop2(h1, A)
+        h_spatial = self.gcn_norm(h2)                              # (B, N, 64)
+
+        # ── 3. Original global path: pooling → LSTM → gate fusion ──
+        gcn_out = self.type_pool(h_spatial)                        # (B, 64)
+        x_seq = x.reshape(B, T, -1)
+        lstm_out, (h_n, _) = self.temporal(x_seq)
+        lstm_out = h_n[-1]                                         # (B, 64)
+        combined = torch.cat([gcn_out, lstm_out], dim=-1)          # (B, 128)
+        gate = torch.sigmoid(self.gate_fc(combined))
+        fused = gate * self.lstm_proj(lstm_out) + (1 - gate) * self.gcn_proj(gcn_out)  # (B, 64)
+
+        # base prediction (diagnostic — the TempWeighted output)
+        base_pred = self.head(fused)
+        if self.n_horizons > 1:
+            self.last_base_pred = base_pred.view(B, self.n_horizons, self.n_commodities).detach()
+        else:
+            self.last_base_pred = base_pred.view(B, self.n_commodities).detach()
+
+        # ── 4. Original head body (first 3 modules) ──
+        h = self.head[0](fused)                                    # (B, 64)
+        h = self.head[1](h)
+        h = self.head[2](h)                                        # (B, 64)
+
+        # ── 5. Commodity-conditioned hidden state ──
+        h_comm = h_spatial[:, fut_start:, :]                       # (B, 24, 64)
+        if self.shuffle_comm:                                      # control: permute
+            perm = torch.randperm(self.n_commodities, device=h_comm.device)
+            h_comm = h_comm[:, perm, :]
+        h_comm_proj = self.comm_proj(h_comm)                       # (B, 24, 64)
+        self.last_cond_mag = (self.alpha * h_comm_proj).abs().mean().item()
+        h_expand = h.unsqueeze(1).expand(B, self.n_commodities, -1)
+        h_cond = h_expand + self.alpha * h_comm_proj               # (B, 24, 64)
+
+        # ── 6. ORIGINAL per-commodity output layer (head[3]) ──
+        # pred[b,h,i] = Σ_c h_cond[b,i,c] · W_orig[h*24+i, c] + bias[h*24+i]
+        W = self.head[3].weight.view(self.n_horizons, self.n_commodities, -1)  # (H, 24, 64)
+        b = self.head[3].bias.view(self.n_horizons, self.n_commodities)       # (H, 24)
+        pred = torch.einsum('bic,hic->bhi', h_cond, W) + b.unsqueeze(0)       # (B, H, 24)
+        if self.n_horizons == 1:
+            pred = pred.squeeze(1)                                 # (B, 24)
+
+        if debug:
+            print(f"  [temp_weighted_comm_cond] α={self.alpha.item():.4f} "
+                  f"h_spatial={list(h_spatial.shape)} h_comm={list(h_comm.shape)} "
+                  f"h_cond={list(h_cond.shape)} pred={list(pred.shape)}")
+        return pred
+
     def _comm_output_residual_forward(self, x: torch.Tensor,
                                       debug: bool = False) -> torch.Tensor:
         """
@@ -1733,6 +1822,8 @@ class HeteroMixHopCMGM(nn.Module):
             return self._spatial_temporal_attention_forward(x, debug)
         if self.variant == "temporal_weighted_graph":
             return self._temporal_weighted_graph_forward(x, debug)
+        if self.variant == "temp_weighted_comm_cond":
+            return self._temp_weighted_comm_cond_forward(x, debug)
         if self.variant == "edge_attn":
             # single source of truth shared with comm_output_residual
             return self._original_forward(x, debug=debug)
@@ -1841,7 +1932,8 @@ class HeteroMixHopCMGM(nn.Module):
                             "market_node", "market_node_no_graph", "mkt_node",
                             "comm_residual", "comm_output_residual",
                             "spatial_temporal_attention",
-                            "temporal_weighted_graph"):
+                            "temporal_weighted_graph",
+                            "temp_weighted_comm_cond"):
             return {'mode': self.variant, 'note': 'no gate — per-node fusion'}
         if self.variant == "multiscale_graph":
             self.eval()

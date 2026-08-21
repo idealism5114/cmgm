@@ -141,6 +141,8 @@ ALL_VARIANTS = [
     ("+SpatTempAttn",       "spatial_temporal_attention", FEATURE_DIM, {}),
     # Temporal-weighted graph: attention replaces mean(dim=1), GNN unchanged
     ("+TempWeighted",       "temporal_weighted_graph", FEATURE_DIM, {}),
+    # Commodity-conditioned hidden state (original head[3] output kept)
+    ("+CommCond",           "temp_weighted_comm_cond", FEATURE_DIM, {}),
     # ── Component ablations ──
     ("-TypeProj",           "no_type_proj",     FEATURE_DIM, {}),
     ("-LearnGraph",         "no_learn_graph",   FEATURE_DIM, {}),
@@ -403,6 +405,41 @@ def run_variant(name, variant, feat_dim, kwargs, args, device, data21, data7):
                   f"corr(base_err, residual)={corr:+.4f}")
         except Exception as e:
             print(f"  [comm_output_residual diagnostics] skipped: {e}")
+
+    # ── temp_weighted_comm_cond: conditioning + shuffled control ──
+    if variant == "temp_weighted_comm_cond":
+        try:
+            base_preds, real_preds, shuf_preds, targs = [], [], [], []
+            model.eval()
+            with torch.no_grad():
+                for batch in loaders['test']:
+                    Xb, yb = batch[0], batch[1]
+                    pred_real = model(Xb.to(device))
+                    model.shuffle_comm = True
+                    pred_shuf = model(Xb.to(device))
+                    model.shuffle_comm = False
+                    real_preds.append(pred_real.cpu().numpy())
+                    shuf_preds.append(pred_shuf.cpu().numpy())
+                    base_preds.append(model.last_base_pred.cpu().numpy())
+                    targs.append(yb.numpy())
+            rp = np.concatenate(real_preds)
+            sp = np.concatenate(shuf_preds)
+            bp = np.concatenate(base_preds)
+            tt = np.concatenate(targs)
+            if tt.ndim == 3:
+                h_idx = MULTI_HORIZONS.index(TARGET_HORIZON)
+                rp, sp, bp, tt = rp[:, h_idx, :], sp[:, h_idx, :], bp[:, h_idx, :], tt[:, h_idx, :]
+            mae_final = float(np.mean(np.abs(tt - rp)))
+            mae_shuf = float(np.mean(np.abs(tt - sp)))
+            mae_base = float(np.mean(np.abs(tt - bp)))
+            alpha = model.alpha.item()
+            print(f"  [comm_cond] α={alpha:.4f}  cond_mag={model.last_cond_mag:.6f}")
+            print(f"    base MAE={mae_base:.6f}  final MAE={mae_final:.6f}  "
+                  f"shuffled MAE={mae_shuf:.6f}")
+            print(f"    real−base Δ={mae_final - mae_base:+.6f}  "
+                  f"shuffled−base Δ={mae_shuf - mae_base:+.6f}")
+        except Exception as e:
+            print(f"  [comm_cond diagnostics] skipped: {e}")
 
     # ── temporal_weighted_graph: alpha diagnostics ──
     if variant == "temporal_weighted_graph":
