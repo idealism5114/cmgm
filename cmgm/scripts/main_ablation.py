@@ -143,6 +143,8 @@ ALL_VARIANTS = [
     ("+TempWeighted",       "temporal_weighted_graph", FEATURE_DIM, {}),
     # Commodity-conditioned hidden state (original head[3] output kept)
     ("+CommCond",           "temp_weighted_comm_cond", FEATURE_DIM, {}),
+    # Temporal attention with neighbor-consulting scores (cross over nodes)
+    ("+TempCross",          "temporal_cross_weighted", FEATURE_DIM, {}),
     # ── Component ablations ──
     ("-TypeProj",           "no_type_proj",     FEATURE_DIM, {}),
     ("-LearnGraph",         "no_learn_graph",   FEATURE_DIM, {}),
@@ -441,8 +443,8 @@ def run_variant(name, variant, feat_dim, kwargs, args, device, data21, data7):
         except Exception as e:
             print(f"  [comm_cond diagnostics] skipped: {e}")
 
-    # ── temporal_weighted_graph: alpha diagnostics ──
-    if variant == "temporal_weighted_graph":
+    # ── temporal_weighted_graph / temporal_cross_weighted: alpha diagnostics ──
+    if variant in ("temporal_weighted_graph", "temporal_cross_weighted"):
         try:
             x_diag = next(iter(loaders['test']))[0][:16].to(device)
             model.eval()

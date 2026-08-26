@@ -500,7 +500,8 @@ class HeteroMixHopCMGM(nn.Module):
                                                "comm_residual", "comm_output_residual",
                                                "spatial_temporal_attention",
                                                "temporal_weighted_graph",
-                                               "temp_weighted_comm_cond")
+                                               "temp_weighted_comm_cond",
+                                               "temporal_cross_weighted")
         self.use_edge_attn   = variant in ("edge_attn", "edge_attn_static", "temporal_attn",
                                            "diff_input", "hybrid_attn", "node_level",
                                            "comm_nodes", "batch_graph", "factor_res",
@@ -508,7 +509,8 @@ class HeteroMixHopCMGM(nn.Module):
                                            "mkt_node", "comm_residual", "comm_output_residual",
                                            "spatial_temporal_attention",
                                            "temporal_weighted_graph",
-                                           "temp_weighted_comm_cond")
+                                           "temp_weighted_comm_cond",
+                                           "temporal_cross_weighted")
         self.use_gate        = variant not in ("no_gate", "gcn_only", "lstm_only")
 
         # ── Multi-horizon output ──
@@ -811,6 +813,13 @@ class HeteroMixHopCMGM(nn.Module):
         # temporal attention.  GNN structure, LSTM, fusion, head unchanged.
         if variant == "temporal_weighted_graph":
             self.temporal_score = nn.Linear(LSTM_HIDDEN_DIM, 1)
+
+        # temporal_cross_weighted: node's temporal-attention score also
+        # consults its neighbors' scores via the graph adjacency —
+        # score_final = MLP([own_score, neighbor_score]); softmax over T.
+        if variant == "temporal_cross_weighted":
+            self.temporal_score = nn.Linear(LSTM_HIDDEN_DIM, 1)
+            self.cross_score_fuse = nn.Linear(2, 1)
 
         # temp_weighted_comm_cond: commodity graph representations
         # condition the shared hidden state before the ORIGINAL per-commodity
@@ -1607,6 +1616,56 @@ class HeteroMixHopCMGM(nn.Module):
                   f"GNN → {list(gcn_out.shape)} → {list(pred.shape)}")
         return pred
 
+    def _temporal_cross_weighted_forward(self, x: torch.Tensor,
+                                         debug: bool = False) -> torch.Tensor:
+        """
+        TempWeighted + neighbor-consulting temporal attention:
+
+          score      = Linear(64→1)(H_seq)                    own score (B, T, N, 1)
+          A_norm     = row-normalized adjacency (self-loops)  (N, N)
+          score_neigh = A_norm @ score                        neighbor scores (B, T, N)
+          score_final = Linear(2→1)([score, score_neigh])     fused (B, T, N, 1)
+          α = softmax(score_final, dim=1);  H = Σ α·H_seq
+
+        Everything after (GNN ×2 → type_pool → LSTM → gate → head) is the
+        unchanged original path (shared via _original_forward).
+        """
+        B, T, N, _ = x.shape
+
+        # ── Temporal-weighted aggregation with neighbor-consulting scores ──
+        seqs = [self.type_proj(x[:, t, :, :], self.n_stock, self.n_bond)
+                for t in range(T)]
+        H_seq = torch.stack(seqs, dim=1)                               # (B, T, N, 64)
+        score = self.temporal_score(H_seq)                             # (B, T, N, 1)
+
+        A = self.graph_learner() if self.use_learn_graph else self.static_A
+        A_hat = A + torch.eye(N, device=A.device)
+        deg = A_hat.sum(dim=1, keepdim=True).clamp(min=1e-8)
+        A_norm = A_hat / deg                                           # (N, N)
+
+        score_neigh = torch.einsum(
+            'btn,ni->bti', score.squeeze(-1), A_norm).unsqueeze(-1)    # (B, T, N, 1)
+        score_final = self.cross_score_fuse(
+            torch.cat([score, score_neigh], dim=-1))                   # (B, T, N, 1)
+        alpha = F.softmax(score_final, dim=1)                          # (B, T, N, 1)
+        H = (H_seq * alpha).sum(dim=1)                                 # (B, N, 64)
+        self.last_alpha = alpha.squeeze(-1).detach()
+
+        # ── Existing GNN (batch mode, runs ONCE) + type pooling ──
+        h1 = F.relu(self.attn_mixhop1(H, A))                           # (B, N, 64)
+        h2 = self.attn_mixhop2(h1, A)
+        h = self.gcn_norm(h2)
+        gcn_out = self.type_pool(h)                                    # (B, 64)
+
+        # ── Original LSTM + gate + head (shared code) ──
+        pred = self._original_forward(x, debug=debug, gcn_out=gcn_out)
+
+        if debug:
+            print(f"  [temporal_cross_weighted] H_seq={list(H_seq.shape)} "
+                  f"score={list(score.shape)} score_neigh={list(score_neigh.shape)} "
+                  f"α mean={alpha.mean().item():.4f} → {list(H.shape)} → {list(pred.shape)}")
+        return pred
+
     def _temp_weighted_comm_cond_forward(self, x: torch.Tensor,
                                          debug: bool = False) -> torch.Tensor:
         """
@@ -1824,6 +1883,8 @@ class HeteroMixHopCMGM(nn.Module):
             return self._temporal_weighted_graph_forward(x, debug)
         if self.variant == "temp_weighted_comm_cond":
             return self._temp_weighted_comm_cond_forward(x, debug)
+        if self.variant == "temporal_cross_weighted":
+            return self._temporal_cross_weighted_forward(x, debug)
         if self.variant == "edge_attn":
             # single source of truth shared with comm_output_residual
             return self._original_forward(x, debug=debug)
@@ -1933,7 +1994,8 @@ class HeteroMixHopCMGM(nn.Module):
                             "comm_residual", "comm_output_residual",
                             "spatial_temporal_attention",
                             "temporal_weighted_graph",
-                            "temp_weighted_comm_cond"):
+                            "temp_weighted_comm_cond",
+                            "temporal_cross_weighted"):
             return {'mode': self.variant, 'note': 'no gate — per-node fusion'}
         if self.variant == "multiscale_graph":
             self.eval()
