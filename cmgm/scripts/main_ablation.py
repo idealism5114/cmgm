@@ -145,6 +145,11 @@ ALL_VARIANTS = [
     ("+CommCond",           "temp_weighted_comm_cond", FEATURE_DIM, {}),
     # Temporal attention with neighbor-consulting scores (cross over nodes)
     ("+TempCross",          "temporal_cross_weighted", FEATURE_DIM, {}),
+    # ── RegimeRPETransformer ablation family ──
+    ("B-Transformer",       "transformer_temporal", FEATURE_DIM, {}),
+    ("C-TransformerRPE",    "transformer_rpe",      FEATURE_DIM, {}),
+    ("D-TransformerRegime", "transformer_regime",   FEATURE_DIM, {}),
+    ("E-RegimeRPE",         "regime_rpe_transformer", FEATURE_DIM, {}),
     # ── Component ablations ──
     ("-TypeProj",           "no_type_proj",     FEATURE_DIM, {}),
     ("-LearnGraph",         "no_learn_graph",   FEATURE_DIM, {}),
@@ -442,6 +447,32 @@ def run_variant(name, variant, feat_dim, kwargs, args, device, data21, data7):
                   f"shuffled−base Δ={mae_shuf - mae_base:+.6f}")
         except Exception as e:
             print(f"  [comm_cond diagnostics] skipped: {e}")
+
+    # ── RegimeRPETransformer family: regime + attention diagnostics ──
+    if variant in ("transformer_temporal", "transformer_rpe",
+                   "transformer_regime", "regime_rpe_transformer"):
+        try:
+            x_diag = next(iter(loaders['test']))[0][:16].to(device)
+            model.eval()
+            with torch.no_grad():
+                model(x_diag)
+                attn = model.temporal_transformer.last_attn        # (B, T)
+            a = attn.detach().cpu().numpy()
+            print(f"  [temporal attention] mean={a.mean():.4f} std={a.std():.4f} "
+                  f"entropy={-(a*np.log(a+1e-9)).sum(axis=1).mean():.4f} "
+                  f"max={a.max(axis=1).mean():.4f}")
+            if hasattr(model.temporal_transformer, 'last_regime_p'):
+                p = model.temporal_transformer.last_regime_p.cpu().numpy()  # (B, T, K)
+                pm = p.mean(axis=(0, 1))
+                print(f"  [regime p] mean over B,T: {np.round(pm, 4)}  std={p.std():.4f}")
+                for t in [0, 5, 10, 15, 19]:
+                    print(f"    t={t}: {np.round(p[:, t, :].mean(axis=0), 4)}")
+                ent = -(p * np.log(p + 1e-9)).sum(axis=-1)
+                print(f"  [regime entropy] mean={ent.mean():.4f} std={ent.std():.4f}")
+                trans = np.abs(np.diff(p, axis=1)).sum(axis=-1)
+                print(f"  [state transition] mean ||p_t−p_{{t−1}}||_1 = {trans.mean():.4f}")
+        except Exception as e:
+            print(f"  [regime/attention diagnostics] skipped: {e}")
 
     # ── temporal_weighted_graph / temporal_cross_weighted: alpha diagnostics ──
     if variant in ("temporal_weighted_graph", "temporal_cross_weighted"):

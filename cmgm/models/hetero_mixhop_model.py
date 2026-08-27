@@ -407,6 +407,158 @@ class _InformerTemporal(nn.Module):
         return self.fc(out)                                  # (B, 64)
 
 
+class _RPEAttnLayer(nn.Module):
+    """Transformer encoder layer with additive relative-position bias."""
+
+    def __init__(self, d_model: int, n_heads: int, ffn_dim: int,
+                 dropout: float = 0.1):
+        super().__init__()
+        assert d_model % n_heads == 0
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+        self.q = nn.Linear(d_model, d_model)
+        self.k = nn.Linear(d_model, d_model)
+        self.v = nn.Linear(d_model, d_model)
+        self.out = nn.Linear(d_model, d_model)
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.ffn = nn.Sequential(nn.Linear(d_model, ffn_dim), nn.ReLU(),
+                                 nn.Linear(ffn_dim, d_model))
+        self.drop = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor, rpe: torch.Tensor = None) -> torch.Tensor:
+        # x: (B, T, d); rpe: (B, n_heads, T, T) additive bias (optional)
+        B, T, d = x.shape
+        H, hd = self.n_heads, self.head_dim
+        q = self.q(x).view(B, T, H, hd).transpose(1, 2)      # (B, H, T, hd)
+        k = self.k(x).view(B, T, H, hd).transpose(1, 2)
+        v = self.v(x).view(B, T, H, hd).transpose(1, 2)
+        scores = (q @ k.transpose(-2, -1)) / (hd ** 0.5)     # (B, H, T, T)
+        if rpe is not None:
+            scores = scores + rpe
+        attn = F.softmax(scores, dim=-1)
+        out = (attn @ v).transpose(1, 2).reshape(B, T, d)
+        out = self.out(out)
+        x = self.norm1(x + self.drop(out))
+        x = self.norm2(x + self.drop(self.ffn(x)))
+        return x
+
+
+class _SoftRegimeGenerator(nn.Module):
+    """
+    Causal soft market regime generator:
+      p_t = softmax(MLP([E_t, d_t, p_{t-1}])),  K latent regimes.
+
+      d_t = E_t − E_{t−1} (d_0 = 0); p_0 = softmax(learnable logits).
+      p_t depends ONLY on time ≤ t — no future leakage.
+    """
+
+    def __init__(self, d_model: int = 128, K: int = 3):
+        super().__init__()
+        self.K = K
+        self.mlp = nn.Sequential(
+            nn.Linear(d_model * 2 + K, 64),
+            nn.ReLU(),
+            nn.Linear(64, K),
+        )
+        self.init_logits = nn.Parameter(torch.zeros(K))
+
+    def forward(self, E: torch.Tensor) -> torch.Tensor:
+        # E: (B, T, d_model) → p: (B, T, K)
+        B, T, d = E.shape
+        d_t = torch.zeros_like(E)
+        d_t[:, 1:] = E[:, 1:] - E[:, :-1]                     # dynamic slope
+        p_prev = F.softmax(self.init_logits, dim=-1)          # (K,)
+        ps = []
+        for t in range(T):
+            r = self.mlp(torch.cat([E[:, t], d_t[:, t],
+                                    p_prev.unsqueeze(0).expand(B, -1)], dim=-1))
+            p_t = F.softmax(r, dim=-1)                        # (B, K)
+            ps.append(p_t)
+            p_prev = p_t.mean(dim=0).detach()                 # carry prev state
+        return torch.stack(ps, dim=1)                         # (B, T, K)
+
+
+class _TemporalTransformerBranch(nn.Module):
+    """
+    Temporal branch: (B, T, in_dim) → temporal transformer → (B, 64).
+
+    Config switches (for ablation A/B/C/D/E):
+      use_rpe        — standard relative position encoding (C)
+      use_regime     — soft regime as input feature context (D)
+      use_regime_rpe — regime-conditioned RPE (E, full model)
+    """
+
+    def __init__(self, in_dim: int, d_model: int = 128, n_heads: int = 4,
+                 n_layers: int = 2, ffn_dim: int = 256, dropout: float = 0.1,
+                 t_len: int = 20, K: int = 3, use_rpe: bool = False,
+                 use_regime: bool = False, use_regime_rpe: bool = False):
+        super().__init__()
+        self.proj = nn.Linear(in_dim, d_model)
+        self.layers = nn.ModuleList([
+            _RPEAttnLayer(d_model, n_heads, ffn_dim, dropout)
+            for _ in range(n_layers)])
+        self.pool_score = nn.Linear(d_model, 1)
+        self.fc = nn.Linear(d_model, 64)
+        self.t_len = t_len
+        self.K = K
+        self.use_rpe = use_rpe
+        self.use_regime = use_regime
+        self.use_regime_rpe = use_regime_rpe
+        if use_rpe or use_regime_rpe:
+            self.base_rpe = nn.Parameter(
+                torch.randn(2 * t_len - 1, n_heads) * 0.02)
+        if use_regime or use_regime_rpe:
+            self.regime_gen = _SoftRegimeGenerator(d_model, K)
+        if use_regime_rpe:
+            self.regime_rpe = nn.Parameter(
+                torch.randn(K, 2 * t_len - 1, n_heads) * 0.02)
+        if use_regime and not use_regime_rpe:
+            self.regime_proj = nn.Linear(K, d_model)
+
+    def forward(self, x_seq: torch.Tensor) -> torch.Tensor:
+        # x_seq: (B, T, in_dim) → h_temporal (B, 64)
+        B, T, _ = x_seq.shape
+        E = self.proj(x_seq)                                   # (B, T, 128)
+
+        # ── Soft regime (causal) ──
+        p = None
+        if self.use_regime or self.use_regime_rpe:
+            p = self.regime_gen(E)                             # (B, T, K)
+            self.last_regime_p = p.detach()
+
+        # ── Regime-aware / standard RPE ──
+        rpe = None
+        if self.use_rpe or self.use_regime_rpe:
+            idx = torch.arange(T, device=E.device)
+            delta = idx.unsqueeze(0) - idx.unsqueeze(1) + (T - 1)   # (T, T)
+            r_base = self.base_rpe[delta].unsqueeze(0)         # (1, T, T, H)
+            if self.use_regime_rpe:
+                # r_ij = base(delta) + Σ_k p_i[k]·regime_rpe[k, delta]
+                r_regime = torch.einsum(
+                    'btk,ktuh->btuh', p, self.regime_rpe[:, delta])  # (B, T, T, H)
+                rpe = (r_base + r_regime).permute(0, 3, 1, 2)  # (B, H, T, T)
+            else:
+                rpe = r_base.permute(0, 3, 1, 2).expand(B, -1, -1, -1)
+
+        # ── Regime as input feature context (D) ──
+        x_in = E
+        if p is not None and not self.use_regime_rpe:
+            x_in = E + self.regime_proj(p)
+
+        # ── Encoder ──
+        H = x_in
+        for layer in self.layers:
+            H = layer(H, rpe)                                  # (B, T, 128)
+
+        # ── Temporal attention pooling ──
+        score = self.pool_score(H).squeeze(-1)                 # (B, T)
+        alpha = F.softmax(score, dim=1)
+        h = (H * alpha.unsqueeze(-1)).sum(dim=1)               # (B, 128)
+        self.last_attn = alpha.detach()
+        return self.fc(h)                                      # (B, 64)
+
+
 class _ScaleAttnPool(nn.Module):
     """
     Attention pooling over a fixed window of temporal states.
@@ -501,7 +653,9 @@ class HeteroMixHopCMGM(nn.Module):
                                                "spatial_temporal_attention",
                                                "temporal_weighted_graph",
                                                "temp_weighted_comm_cond",
-                                               "temporal_cross_weighted")
+                                               "temporal_cross_weighted",
+                                               "transformer_temporal", "transformer_rpe",
+                                               "transformer_regime", "regime_rpe_transformer")
         self.use_edge_attn   = variant in ("edge_attn", "edge_attn_static", "temporal_attn",
                                            "diff_input", "hybrid_attn", "node_level",
                                            "comm_nodes", "batch_graph", "factor_res",
@@ -510,7 +664,9 @@ class HeteroMixHopCMGM(nn.Module):
                                            "spatial_temporal_attention",
                                            "temporal_weighted_graph",
                                            "temp_weighted_comm_cond",
-                                           "temporal_cross_weighted")
+                                           "temporal_cross_weighted",
+                                           "transformer_temporal", "transformer_rpe",
+                                           "transformer_regime", "regime_rpe_transformer")
         self.use_gate        = variant not in ("no_gate", "gcn_only", "lstm_only")
 
         # ── Multi-horizon output ──
@@ -736,6 +892,9 @@ class HeteroMixHopCMGM(nn.Module):
                 # Informer-style branch (ProbSparse attention encoder)
                 self.informer = _InformerTemporal(in_dim=num_nodes * feat_dim,
                                                   t_len=SEQ_LEN)
+            elif variant in ("transformer_temporal", "transformer_rpe",
+                             "transformer_regime", "regime_rpe_transformer"):
+                pass  # temporal branch is the transformer (no global LSTM)
             else:
                 # diff_input: concat first-order differences → 2× input size
                 lstm_in = num_nodes * feat_dim
@@ -820,6 +979,21 @@ class HeteroMixHopCMGM(nn.Module):
         if variant == "temporal_cross_weighted":
             self.temporal_score = nn.Linear(LSTM_HIDDEN_DIM, 1)
             self.cross_score_fuse = nn.Linear(2, 1)
+
+        # RegimeRPETransformer family (temporal branch only):
+        #   transformer_temporal (B) / transformer_rpe (C) /
+        #   transformer_regime (D) / regime_rpe_transformer (E)
+        if variant in ("transformer_temporal", "transformer_rpe",
+                       "transformer_regime", "regime_rpe_transformer"):
+            self.temporal_score = nn.Linear(LSTM_HIDDEN_DIM, 1)   # spatial branch
+            self.temporal_transformer = _TemporalTransformerBranch(
+                in_dim=num_nodes * feat_dim,
+                d_model=128, n_heads=4, n_layers=2, ffn_dim=256,
+                dropout=GCN_DROPOUT, t_len=SEQ_LEN, K=3,
+                use_rpe=(variant in ("transformer_rpe", "regime_rpe_transformer")),
+                use_regime=(variant in ("transformer_regime", "regime_rpe_transformer")),
+                use_regime_rpe=(variant == "regime_rpe_transformer"),
+            )
 
         # temp_weighted_comm_cond: commodity graph representations
         # condition the shared hidden state before the ORIGINAL per-commodity
@@ -1576,44 +1750,40 @@ class HeteroMixHopCMGM(nn.Module):
                   f"α={self.comm_alpha.item():.4f} z={list(z.shape)} pred={list(pred.shape)}")
         return pred
 
+    def _temp_weighted_spatial(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        The TempWeighted spatial branch (shared by temporal_weighted_graph
+        and the RegimeRPETransformer family):
+
+          type_proj per t → H_seq → temporal attention over T → H (B, N, 64)
+          → EdgeAttnMixHop ×2 (once) → LayerNorm → type_pool → (B, 64)
+        """
+        B, T, N, _ = x.shape
+        seqs = [self.type_proj(x[:, t, :, :], self.n_stock, self.n_bond)
+                for t in range(T)]
+        H_seq = torch.stack(seqs, dim=1)                               # (B, T, N, 64)
+        score = self.temporal_score(H_seq)                             # (B, T, N, 1)
+        alpha = F.softmax(score, dim=1)
+        H = (H_seq * alpha).sum(dim=1)                                 # (B, N, 64)
+        self.last_alpha = alpha.squeeze(-1).detach()
+        A = self.graph_learner() if self.use_learn_graph else self.static_A
+        h1 = F.relu(self.attn_mixhop1(H, A))                           # (B, N, 64)
+        h2 = self.attn_mixhop2(h1, A)
+        h = self.gcn_norm(h2)
+        return self.type_pool(h)                                       # (B, 64)
+
     def _temporal_weighted_graph_forward(self, x: torch.Tensor,
                                          debug: bool = False) -> torch.Tensor:
         """
         ONLY replaces mean(dim=1) with node-wise temporal attention.
         GNN (AdaptiveGraphLearner → MixHop/EdgeAttn ×2), global LSTM,
         gate fusion, original head — all unchanged (GNN still runs once).
-
-          type_proj per t → H_seq (B, T, N, 64)
-          score = Linear(64→1)(H_seq);  α = softmax over T
-          H = Σ α·H_seq → (B, N, 64)           ← replaces mean(dim=1)
-          → GNN ×2 → type_pool → gcn_out
-          → _original_forward path (LSTM/gate/head)
         """
-        B, T, N, _ = x.shape
-
-        # ── Temporal-weighted aggregation (the ONLY change) ──
-        seqs = [self.type_proj(x[:, t, :, :], self.n_stock, self.n_bond)
-                for t in range(T)]
-        H_seq = torch.stack(seqs, dim=1)                               # (B, T, N, 64)
-        score = self.temporal_score(H_seq)                             # (B, T, N, 1)
-        alpha = F.softmax(score, dim=1)                                # (B, T, N, 1)
-        H = (H_seq * alpha).sum(dim=1)                                 # (B, N, 64)
-        self.last_alpha = alpha.squeeze(-1).detach()                   # (B, T, N)
-
-        # ── Existing GNN (batch mode, runs ONCE) + type pooling ──
-        A = self.graph_learner() if self.use_learn_graph else self.static_A
-        h1 = F.relu(self.attn_mixhop1(H, A))                           # (B, N, 64)
-        h2 = self.attn_mixhop2(h1, A)
-        h = self.gcn_norm(h2)
-        gcn_out = self.type_pool(h)                                    # (B, 64)
-
-        # ── Original LSTM + gate + head (shared code) ──
+        gcn_out = self._temp_weighted_spatial(x)                       # (B, 64)
         pred = self._original_forward(x, debug=debug, gcn_out=gcn_out)
-
         if debug:
-            print(f"  [temporal_weighted_graph] H_seq={list(H_seq.shape)} "
-                  f"α mean={alpha.mean().item():.4f} → {list(H.shape)} → "
-                  f"GNN → {list(gcn_out.shape)} → {list(pred.shape)}")
+            print(f"  [temporal_weighted_graph] → {list(gcn_out.shape)} → "
+                  f"{list(pred.shape)}")
         return pred
 
     def _temporal_cross_weighted_forward(self, x: torch.Tensor,
@@ -1742,6 +1912,42 @@ class HeteroMixHopCMGM(nn.Module):
             print(f"  [temp_weighted_comm_cond] α={self.alpha.item():.4f} "
                   f"h_spatial={list(h_spatial.shape)} h_comm={list(h_comm.shape)} "
                   f"h_cond={list(h_cond.shape)} pred={list(pred.shape)}")
+        return pred
+
+    def _transformer_temporal_forward(self, x: torch.Tensor,
+                                      debug: bool = False) -> torch.Tensor:
+        """
+        RegimeRPETransformer family — temporal branch replaced by
+        transformer (+ soft regime + regime-aware RPE), spatial branch
+        kept EXACTLY as TempWeighted, original gated fusion + head kept.
+
+          spatial: _temp_weighted_spatial(x) → h_spatial (B, 64)
+          temporal: x.reshape(B,T,N*F) → _TemporalTransformerBranch → (B, 64)
+          fused = gate fusion (original gate_fc/gcn_proj/lstm_proj)
+          pred = original head(fused)
+        """
+        B, T, N, _ = x.shape
+
+        # ── Spatial branch (TempWeighted, unchanged) ──
+        h_spatial = self._temp_weighted_spatial(x)                   # (B, 64)
+
+        # ── Temporal branch (transformer family) ──
+        x_seq = x.reshape(B, T, -1)                                  # (B, T, N*F)
+        h_temporal = self.temporal_transformer(x_seq)                # (B, 64)
+
+        # ── Original gated fusion + head ──
+        combined = torch.cat([h_spatial, h_temporal], dim=-1)        # (B, 128)
+        gate = torch.sigmoid(self.gate_fc(combined))
+        fused = gate * self.lstm_proj(h_temporal) + (1 - gate) * self.gcn_proj(h_spatial)
+        pred = self.head(fused)                                      # (B, H*24)
+        if self.n_horizons > 1:
+            pred = pred.view(B, self.n_horizons, self.n_commodities)
+        else:
+            pred = pred.view(B, self.n_commodities)
+
+        if debug:
+            print(f"  [{self.variant}] h_spatial={list(h_spatial.shape)} "
+                  f"h_temporal={list(h_temporal.shape)} → gate → {list(pred.shape)}")
         return pred
 
     def _comm_output_residual_forward(self, x: torch.Tensor,
@@ -1885,6 +2091,9 @@ class HeteroMixHopCMGM(nn.Module):
             return self._temp_weighted_comm_cond_forward(x, debug)
         if self.variant == "temporal_cross_weighted":
             return self._temporal_cross_weighted_forward(x, debug)
+        if self.variant in ("transformer_temporal", "transformer_rpe",
+                            "transformer_regime", "regime_rpe_transformer"):
+            return self._transformer_temporal_forward(x, debug)
         if self.variant == "edge_attn":
             # single source of truth shared with comm_output_residual
             return self._original_forward(x, debug=debug)
@@ -1995,7 +2204,9 @@ class HeteroMixHopCMGM(nn.Module):
                             "spatial_temporal_attention",
                             "temporal_weighted_graph",
                             "temp_weighted_comm_cond",
-                            "temporal_cross_weighted"):
+                            "temporal_cross_weighted",
+                            "transformer_temporal", "transformer_rpe",
+                            "transformer_regime", "regime_rpe_transformer"):
             return {'mode': self.variant, 'note': 'no gate — per-node fusion'}
         if self.variant == "multiscale_graph":
             self.eval()
