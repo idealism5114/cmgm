@@ -110,6 +110,10 @@ def train_epoch(
             if y_batch.dim() == 3:
                 loss = loss + criterion(aux_pred, y_batch)
 
+        # Regime diversity regularization (prototype-based regime generator)
+        if hasattr(model, 'regime_diversity_loss'):
+            loss = loss + model.regime_diversity_loss()
+
         # Backward pass
         loss.backward()
         optimizer.step()

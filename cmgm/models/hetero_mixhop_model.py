@@ -479,6 +479,58 @@ class _SoftRegimeGenerator(nn.Module):
         return torch.stack(ps, dim=1)                         # (B, T, K)
 
 
+class _PrototypeRegimeGenerator(nn.Module):
+    """
+    Improved soft regime generator: Shared Context + K State-specific
+    Prototypes (anti-collapse design).
+
+      context_t = context_encoder([E_t, E_t − E_{t−1}])        (B, T, D_r)
+      sim_tk    = context_t · prototype_k / √D_r               (B, T, K)
+      trans_tk  = p_{t−1} @ transition_matrix                  (B, K)
+      score_tk  = sim_tk + trans_tk
+      p_t       = softmax(score_tk / temperature)              temperature = 1.0
+
+    Causal: p_t depends only on E_t, E_{t−1}, p_{t−1}.
+    """
+
+    def __init__(self, d_model: int = 128, K: int = 3, D_r: int = 32):
+        super().__init__()
+        self.K = K
+        self.D_r = D_r
+        self.context_encoder = nn.Sequential(
+            nn.Linear(d_model * 2, D_r),
+            nn.ReLU(),
+        )
+        self.regime_prototypes = nn.Parameter(torch.randn(K, D_r))
+        self.transition_matrix = nn.Parameter(torch.zeros(K, K))
+        self.temperature = 1.0
+
+    def forward(self, E: torch.Tensor) -> torch.Tensor:
+        # E: (B, T, d_model) → p: (B, T, K)
+        B, T, d = E.shape
+        d_t = torch.zeros_like(E)
+        d_t[:, 1:] = E[:, 1:] - E[:, :-1]                        # dynamic slope
+        context = self.context_encoder(torch.cat([E, d_t], dim=-1))  # (B, T, D_r)
+        sim = context @ self.regime_prototypes.T / (self.D_r ** 0.5)  # (B, T, K)
+
+        p_prev = torch.full((B, self.K), 1.0 / self.K, device=E.device)
+        ps = []
+        for t in range(T):
+            trans = p_prev @ self.transition_matrix               # (B, K)
+            score = sim[:, t] + trans
+            p_t = F.softmax(score / self.temperature, dim=-1)     # (B, K)
+            ps.append(p_t)
+            p_prev = p_t
+        return torch.stack(ps, dim=1)                             # (B, T, K)
+
+    def prototype_cosine(self) -> torch.Tensor:
+        """Mean pairwise cosine similarity across prototypes (diagnostic)."""
+        P = F.normalize(self.regime_prototypes, dim=-1)           # (K, D_r)
+        cos = P @ P.T
+        mask = ~torch.eye(self.K, dtype=torch.bool, device=cos.device)
+        return cos[mask].mean()
+
+
 class _TemporalTransformerBranch(nn.Module):
     """
     Temporal branch: (B, T, in_dim) → temporal transformer → (B, 64).
@@ -492,7 +544,8 @@ class _TemporalTransformerBranch(nn.Module):
     def __init__(self, in_dim: int, d_model: int = 128, n_heads: int = 4,
                  n_layers: int = 2, ffn_dim: int = 256, dropout: float = 0.1,
                  t_len: int = 20, K: int = 3, use_rpe: bool = False,
-                 use_regime: bool = False, use_regime_rpe: bool = False):
+                 use_regime: bool = False, use_regime_rpe: bool = False,
+                 use_prototype_regime: bool = False):
         super().__init__()
         self.proj = nn.Linear(in_dim, d_model)
         self.layers = nn.ModuleList([
@@ -509,7 +562,10 @@ class _TemporalTransformerBranch(nn.Module):
             self.base_rpe = nn.Parameter(
                 torch.randn(2 * t_len - 1, n_heads) * 0.02)
         if use_regime or use_regime_rpe:
-            self.regime_gen = _SoftRegimeGenerator(d_model, K)
+            if use_prototype_regime:
+                self.regime_gen = _PrototypeRegimeGenerator(d_model, K)
+            else:
+                self.regime_gen = _SoftRegimeGenerator(d_model, K)
         if use_regime_rpe:
             self.regime_rpe = nn.Parameter(
                 torch.randn(K, 2 * t_len - 1, n_heads) * 0.02)
@@ -655,7 +711,8 @@ class HeteroMixHopCMGM(nn.Module):
                                                "temp_weighted_comm_cond",
                                                "temporal_cross_weighted",
                                                "transformer_temporal", "transformer_rpe",
-                                               "transformer_regime", "regime_rpe_transformer")
+                                               "transformer_regime", "regime_rpe_transformer",
+                                               "transformer_regime2", "regime_rpe_transformer2")
         self.use_edge_attn   = variant in ("edge_attn", "edge_attn_static", "temporal_attn",
                                            "diff_input", "hybrid_attn", "node_level",
                                            "comm_nodes", "batch_graph", "factor_res",
@@ -666,7 +723,8 @@ class HeteroMixHopCMGM(nn.Module):
                                            "temp_weighted_comm_cond",
                                            "temporal_cross_weighted",
                                            "transformer_temporal", "transformer_rpe",
-                                           "transformer_regime", "regime_rpe_transformer")
+                                           "transformer_regime", "regime_rpe_transformer",
+                                           "transformer_regime2", "regime_rpe_transformer2")
         self.use_gate        = variant not in ("no_gate", "gcn_only", "lstm_only")
 
         # ── Multi-horizon output ──
@@ -893,7 +951,8 @@ class HeteroMixHopCMGM(nn.Module):
                 self.informer = _InformerTemporal(in_dim=num_nodes * feat_dim,
                                                   t_len=SEQ_LEN)
             elif variant in ("transformer_temporal", "transformer_rpe",
-                             "transformer_regime", "regime_rpe_transformer"):
+                             "transformer_regime", "regime_rpe_transformer",
+                             "transformer_regime2", "regime_rpe_transformer2"):
                 pass  # temporal branch is the transformer (no global LSTM)
             else:
                 # diff_input: concat first-order differences → 2× input size
@@ -983,16 +1042,23 @@ class HeteroMixHopCMGM(nn.Module):
         # RegimeRPETransformer family (temporal branch only):
         #   transformer_temporal (B) / transformer_rpe (C) /
         #   transformer_regime (D) / regime_rpe_transformer (E)
+        #   transformer_regime2 (R2) / regime_rpe_transformer2 (R3)
         if variant in ("transformer_temporal", "transformer_rpe",
-                       "transformer_regime", "regime_rpe_transformer"):
+                       "transformer_regime", "regime_rpe_transformer",
+                       "transformer_regime2", "regime_rpe_transformer2"):
             self.temporal_score = nn.Linear(LSTM_HIDDEN_DIM, 1)   # spatial branch
             self.temporal_transformer = _TemporalTransformerBranch(
                 in_dim=num_nodes * feat_dim,
                 d_model=128, n_heads=4, n_layers=2, ffn_dim=256,
                 dropout=GCN_DROPOUT, t_len=SEQ_LEN, K=3,
-                use_rpe=(variant in ("transformer_rpe", "regime_rpe_transformer")),
-                use_regime=(variant in ("transformer_regime", "regime_rpe_transformer")),
-                use_regime_rpe=(variant == "regime_rpe_transformer"),
+                use_rpe=(variant in ("transformer_rpe", "regime_rpe_transformer",
+                                     "regime_rpe_transformer2")),
+                use_regime=(variant in ("transformer_regime", "regime_rpe_transformer",
+                                        "transformer_regime2", "regime_rpe_transformer2")),
+                use_regime_rpe=(variant in ("regime_rpe_transformer",
+                                            "regime_rpe_transformer2")),
+                use_prototype_regime=(variant in ("transformer_regime2",
+                                                  "regime_rpe_transformer2")),
             )
 
         # temp_weighted_comm_cond: commodity graph representations
@@ -1950,6 +2016,29 @@ class HeteroMixHopCMGM(nn.Module):
                   f"h_temporal={list(h_temporal.shape)} → gate → {list(pred.shape)}")
         return pred
 
+    def regime_diversity_loss(self, lambda_proto: float = 0.001) -> torch.Tensor:
+        """
+        Lightweight regime diversity regularization (prototype-based only):
+          L_proto   = mean pairwise cosine across prototypes  (separate them)
+          L_balance = Σ_k p̄_k·log(p̄_k·K) on batch-level p̄    (no monopoly)
+        Returns 0 if the variant has no prototype regime generator.
+        """
+        tb = getattr(self, 'temporal_transformer', None)
+        if tb is None:
+            return torch.zeros((), device=next(self.parameters()).device)
+        rg = getattr(tb, 'regime_gen', None)
+        if rg is None or not hasattr(rg, 'regime_prototypes'):
+            return torch.zeros((), device=next(self.parameters()).device)
+        # 1. prototype separation
+        l_proto = rg.prototype_cosine()
+        # 2. batch-level state balance
+        p = getattr(tb, 'last_regime_p', None)
+        l_balance = torch.zeros((), device=l_proto.device)
+        if p is not None:
+            p_mean = p.mean(dim=(0, 1))                            # (K,)
+            l_balance = (p_mean * torch.log(p_mean * rg.K + 1e-8)).sum()
+        return lambda_proto * (l_proto + l_balance)
+
     def _comm_output_residual_forward(self, x: torch.Tensor,
                                       debug: bool = False) -> torch.Tensor:
         """
@@ -2092,7 +2181,8 @@ class HeteroMixHopCMGM(nn.Module):
         if self.variant == "temporal_cross_weighted":
             return self._temporal_cross_weighted_forward(x, debug)
         if self.variant in ("transformer_temporal", "transformer_rpe",
-                            "transformer_regime", "regime_rpe_transformer"):
+                            "transformer_regime", "regime_rpe_transformer",
+                            "transformer_regime2", "regime_rpe_transformer2"):
             return self._transformer_temporal_forward(x, debug)
         if self.variant == "edge_attn":
             # single source of truth shared with comm_output_residual
@@ -2206,7 +2296,8 @@ class HeteroMixHopCMGM(nn.Module):
                             "temp_weighted_comm_cond",
                             "temporal_cross_weighted",
                             "transformer_temporal", "transformer_rpe",
-                            "transformer_regime", "regime_rpe_transformer"):
+                            "transformer_regime", "regime_rpe_transformer",
+                            "transformer_regime2", "regime_rpe_transformer2"):
             return {'mode': self.variant, 'note': 'no gate — per-node fusion'}
         if self.variant == "multiscale_graph":
             self.eval()
