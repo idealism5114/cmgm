@@ -154,6 +154,8 @@ ALL_VARIANTS = [
     # Improved prototype-based regime generator (anti-collapse)
     ("R2-Regime2",          "transformer_regime2", FEATURE_DIM, {}),
     ("R3-RegimeRPE2",       "regime_rpe_transformer2", FEATURE_DIM, {}),
+    # F: regime-specific dynamics + soft mixing + regime-aware RPE
+    ("F-RegimeDynamic",     "regime_dynamic_transformer", FEATURE_DIM, {}),
     # ── Component ablations ──
     ("-TypeProj",           "no_type_proj",     FEATURE_DIM, {}),
     ("-LearnGraph",         "no_learn_graph",   FEATURE_DIM, {}),
@@ -517,6 +519,100 @@ def run_variant(name, variant, feat_dim, kwargs, args, device, data21, data7):
                     model.eval()
         except Exception as e:
             print(f"  [regime/attention diagnostics] skipped: {e}")
+
+    # ── F: RegimeDynamic complete diagnostics ──
+    if variant == "regime_dynamic_transformer":
+        try:
+            x_diag, y_diag = next(iter(loaders['test']))
+            x_diag = x_diag[:16].to(device)
+            y_diag = y_diag[:16]
+            rd = model.regime_dynamic
+            model.eval()
+            with torch.no_grad():
+                model(x_diag)
+                p = rd.last_regime_p.cpu().numpy()           # (B, T, K)
+                zs = rd.last_zs.cpu().numpy()                # (K, B, T, 128)
+            K = p.shape[-1]
+            pm = p.mean(axis=(0, 1))
+            print(f"  [F regime p] mean={np.round(pm, 4)} std={p.std():.4f} "
+                  f"min={p.min():.4f} max={p.max():.4f}")
+            for t in range(0, 20, 2):
+                print(f"    t={t}: {np.round(p[:, t, :].mean(axis=0), 4)}")
+            ent = -(p * np.log(p + 1e-9)).sum(axis=-1)
+            print(f"  [F entropy] mean={ent.mean():.4f} std={ent.std():.4f} (logK={np.log(K):.4f})")
+            trans = np.abs(np.diff(p, axis=1)).sum(axis=-1)
+            print(f"  [F transition] mean ||p_t−p_{{t−1}}||_1 = {trans.mean():.4f}")
+            # prototype cosine
+            with torch.no_grad():
+                P = rd.regime_gen.regime_prototypes
+                Pn = P / P.norm(dim=-1, keepdim=True)
+                c = (Pn @ Pn.T).cpu().numpy()
+                mask = ~np.eye(K, dtype=bool)
+                print(f"  [F prototype cosine] pairwise={np.round(c[mask], 4)} "
+                      f"mean={c[mask].mean():.4f}")
+            # adapter similarity
+            zn = zs.reshape(K, -1)
+            zn = zn / (np.linalg.norm(zn, axis=-1, keepdims=True) + 1e-8)
+            cos_ij = zn @ zn.T
+            print(f"  [F adapter cosine] cos12={cos_ij[0,1]:.4f} cos13={cos_ij[0,2]:.4f} "
+                  f"cos23={cos_ij[1,2]:.4f}")
+            # gradient diagnostics
+            model.train()
+            model.zero_grad()
+            loss_d = nn.MSELoss()(model(x_diag), torch.FloatTensor(y_diag).to(device))
+            loss_d.backward()
+            for name, par in [('prototypes', rd.regime_gen.regime_prototypes),
+                              ('context_enc', rd.regime_gen.context_encoder[0].weight),
+                              ('transition', rd.regime_gen.transition_matrix),
+                              ('adapter1', rd.adapters.adapters[0][0].weight),
+                              ('adapter2', rd.adapters.adapters[1][0].weight),
+                              ('adapter3', rd.adapters.adapters[2][0].weight)]:
+                g = par.grad
+                print(f"  [F grad] ||∇{name}|| = {g.norm().item():.4f}" if g is not None
+                      else f"  [F grad] {name}: None")
+            model.eval()
+            # forced regime perturbation
+            print("  [F forced regime] h_temporal / pred differences vs real")
+            with torch.no_grad():
+                h_real = rd.fc(rd.last_z.mean(dim=1)) if hasattr(rd, 'last_z') else None
+                for rname, onehot in [('real', None), ('r1', [1, 0, 0]),
+                                      ('r2', [0, 1, 0]), ('r3', [0, 0, 1])]:
+                    rd.forced_regime = (None if onehot is None
+                                        else torch.tensor(onehot, dtype=torch.float32, device=device))
+                    pred_f = model(x_diag)
+                    h_t = rd.fc((rd.last_z).mean(dim=1))
+                    print(f"    {rname}: h_temporal_norm={h_t.norm().item():.4f} "
+                          f"pred_norm={pred_f.norm().item():.4f}")
+                rd.forced_regime = None
+            # semantic diagnostics using p_last
+            p_last = p[:, -1, :]                                 # (B, K)
+            y_np = y_diag.numpy()
+            if y_np.ndim == 3:
+                h_idx = MULTI_HORIZONS.index(TARGET_HORIZON)
+                y_np = y_np[:, h_idx, :]
+            y_mean = y_np.mean(axis=-1)[:16]
+            print("  [F regime semantics] (soft-weighted by p_last)")
+            for k in range(K):
+                w = p_last[:, k]
+                denom = w.sum() + 1e-8
+                m_ret = (w * y_mean).sum() / denom
+                m_abs = (w * np.abs(y_mean)).sum() / denom
+                m_vol = np.sqrt((w * (y_mean - m_ret) ** 2).sum() / denom)
+                print(f"    regime {k}: weight={w.mean():.3f} mean_ret={m_ret:+.6f} "
+                      f"mean_abs={m_abs:.6f} vol={m_vol:.6f}")
+            # causality test (future perturbation)
+            with torch.no_grad():
+                x2 = x_diag.clone()
+                x2[:, 10:, :, :] = torch.randn_like(x2[:, 10:, :, :])
+                E1 = rd.proj(x_diag.reshape(16, 20, -1))
+                E2 = rd.proj(x2.reshape(16, 20, -1))
+                p1 = rd.regime_gen(E1)
+                p2 = rd.regime_gen(E2)
+                cdiff = (p1[:, :9] - p2[:, :9]).abs().max().item()
+            print(f"  [F causality] max p diff at t<10 = {cdiff:.3e} "
+                  f"({'PASS' if cdiff < 1e-6 else 'FAIL'})")
+        except Exception as e:
+            print(f"  [F diagnostics] skipped: {e}")
 
     # ── temporal_weighted_graph / temporal_cross_weighted: alpha diagnostics ──
     if variant in ("temporal_weighted_graph", "temporal_cross_weighted"):

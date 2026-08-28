@@ -113,6 +113,10 @@ def train_epoch(
         # Regime diversity regularization (prototype-based regime generator)
         if hasattr(model, 'regime_diversity_loss'):
             loss = loss + model.regime_diversity_loss()
+        # RegimeDynamic (F): adapter divergence + balance regularization
+        rd = getattr(model, 'regime_dynamic', None)
+        if rd is not None:
+            loss = loss + rd.dynamic_loss()
 
         # Backward pass
         loss.backward()
