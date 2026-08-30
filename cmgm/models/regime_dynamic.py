@@ -238,11 +238,12 @@ class RegimeDynamicRPETransformer(nn.Module):
                  n_layers: int = 2, ffn_dim: int = 256, dropout: float = 0.1,
                  t_len: int = 20, K: int = 3, D_regime: int = 32,
                  use_state_loss: bool = False,
-                 use_semantic_router: bool = False):
+                 use_semantic_router: bool = False,
+                 lambda_cluster: float = 0.005):
         super().__init__()
         self.proj = nn.Linear(in_dim, d_model)
         self.use_semantic_router = use_semantic_router
-        self.lambda_cluster = 0.005
+        self.lambda_cluster = float(lambda_cluster)
         self.lambda_info_max = 0.001
         self.regime_gen = (
             SemanticRegimeRouter(d_model, K, D_regime)
@@ -270,7 +271,7 @@ class RegimeDynamicRPETransformer(nn.Module):
 
         if self.use_semantic_router:
             if market_descriptor is None:
-                raise ValueError("G-SemanticRouter requires market_descriptor")
+                raise ValueError("Semantic-router variants require market_descriptor")
             p = self.regime_gen(E, market_descriptor, self.state_centers)
             self._m_t_for_loss = market_descriptor
             self.last_m_t = market_descriptor.detach()
@@ -303,7 +304,8 @@ class RegimeDynamicRPETransformer(nn.Module):
                      lambda_balance: float = 0.001,
                      lambda_state: float = 0.01) -> torch.Tensor:
         """
-        L = λd·L_dynamic_div + λb·L_balance [+ λs·L_state]
+        F/F2: L = λd·L_dynamic_div + λb·L_balance [+ λs·L_state]
+        G/H:  L = λd·L_dynamic_div + λcluster·L_cluster + λIM·L_InfoMax
           L_dynamic_div = mean pairwise cosine of adapter outputs
           L_balance     = Σ_k p̄_k·log(p̄_k·K) on batch-level p̄
           L_state       = MSE(Σ_k p_tk·μ_k, m_t)  (if use_state_loss)
@@ -337,6 +339,11 @@ class RegimeDynamicRPETransformer(nn.Module):
                 'info_max': l_info_max.detach(),
                 'conditional_entropy': h_cond.detach(),
                 'marginal_entropy': h_marg.detach(),
+            }
+            self.last_loss_weights = {
+                'dynamic': float(lambda_dynamic),
+                'cluster': self.lambda_cluster,
+                'info_max': self.lambda_info_max,
             }
             return (
                 lambda_dynamic * l_dyn

@@ -9,6 +9,7 @@ from cmgm.models.regime_dynamic import (
     RegimeDynamicRPETransformer,
     SemanticRegimeRouter,
 )
+from cmgm.models.hetero_mixhop_model import HeteroMixHopCMGM
 
 
 def _synthetic_prices():
@@ -101,3 +102,72 @@ def test_g_auxiliary_loss_reaches_all_router_parameters():
     ]
     assert all(parameter.grad is not None for parameter in parameters)
     assert all(torch.isfinite(parameter.grad).all() for parameter in parameters)
+
+
+def test_h_differs_from_g_only_by_cluster_coefficient():
+    common = dict(
+        in_dim=6,
+        d_model=8,
+        n_heads=2,
+        n_layers=1,
+        ffn_dim=16,
+        t_len=20,
+        K=3,
+        D_regime=4,
+        use_semantic_router=True,
+    )
+    torch.manual_seed(3)
+    model_g = RegimeDynamicRPETransformer(**common, lambda_cluster=0.005)
+    torch.manual_seed(3)
+    model_h = RegimeDynamicRPETransformer(**common, lambda_cluster=0.0005)
+
+    assert model_g.state_dict().keys() == model_h.state_dict().keys()
+    for name, tensor_g in model_g.state_dict().items():
+        torch.testing.assert_close(tensor_g, model_h.state_dict()[name])
+    assert model_g.lambda_cluster == 0.005
+    assert model_h.lambda_cluster == 0.0005
+    assert model_g.lambda_info_max == model_h.lambda_info_max == 0.001
+
+    x = torch.randn(3, 20, 6)
+    descriptor = torch.randn(3, 20, 3)
+    model_g.eval()
+    model_h.eval()
+    prediction_g = model_g(x, descriptor)
+    prediction_h = model_h(x, descriptor)
+    torch.testing.assert_close(prediction_g, prediction_h)
+    loss_g = model_g.dynamic_loss()
+    loss_h = model_h.dynamic_loss()
+    torch.testing.assert_close(
+        loss_g - loss_h,
+        torch.tensor(0.0045) * model_g.last_loss_components["cluster"],
+    )
+    assert model_g.last_loss_weights == {
+        "dynamic": 0.001,
+        "cluster": 0.005,
+        "info_max": 0.001,
+    }
+    assert model_h.last_loss_weights == {
+        "dynamic": 0.001,
+        "cluster": 0.0005,
+        "info_max": 0.001,
+    }
+
+
+def test_h_variant_wires_the_same_architecture_as_g():
+    common = dict(
+        num_nodes=4,
+        n_commodities=2,
+        n_stock=1,
+        n_bond=1,
+        feat_dim=21,
+    )
+    torch.manual_seed(4)
+    model_g = HeteroMixHopCMGM(variant="semantic_router", **common)
+    torch.manual_seed(4)
+    model_h = HeteroMixHopCMGM(variant="loss_rebalance", **common)
+
+    assert model_g.state_dict().keys() == model_h.state_dict().keys()
+    for name, tensor_g in model_g.state_dict().items():
+        torch.testing.assert_close(tensor_g, model_h.state_dict()[name])
+    assert model_g.regime_dynamic.lambda_cluster == 0.005
+    assert model_h.regime_dynamic.lambda_cluster == 0.0005
