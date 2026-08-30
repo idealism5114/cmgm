@@ -171,3 +171,135 @@ def test_h_variant_wires_the_same_architecture_as_g():
         torch.testing.assert_close(tensor_g, model_h.state_dict()[name])
     assert model_g.regime_dynamic.lambda_cluster == 0.005
     assert model_h.regime_dynamic.lambda_cluster == 0.0005
+
+
+def test_i_preserves_h_raw_routing_and_loss_but_smooths_downstream_use():
+    common = dict(
+        in_dim=6,
+        d_model=8,
+        n_heads=2,
+        n_layers=1,
+        ffn_dim=16,
+        t_len=20,
+        K=3,
+        D_regime=4,
+        use_semantic_router=True,
+        lambda_cluster=0.0005,
+    )
+    torch.manual_seed(5)
+    model_h = RegimeDynamicRPETransformer(**common, routing_strength=1.0)
+    torch.manual_seed(5)
+    model_i = RegimeDynamicRPETransformer(**common, routing_strength=0.25)
+    model_h.eval()
+    model_i.eval()
+
+    assert model_h.state_dict().keys() == model_i.state_dict().keys()
+    for name, tensor_h in model_h.state_dict().items():
+        torch.testing.assert_close(tensor_h, model_i.state_dict()[name])
+
+    x = torch.randn(3, 20, 6)
+    descriptor = torch.randn(3, 20, 3)
+    model_h(x, descriptor)
+    model_i(x, descriptor)
+    torch.testing.assert_close(model_h.last_regime_p, model_i.last_regime_p)
+    expected_use = 0.75 * torch.full_like(model_i.last_regime_p, 1.0 / 3.0)
+    expected_use = expected_use + 0.25 * model_i.last_regime_p
+    torch.testing.assert_close(model_i.last_regime_p_use, expected_use)
+    torch.testing.assert_close(
+        model_i.last_regime_p_use.sum(dim=-1),
+        torch.ones_like(model_i.last_regime_p_use[..., 0]),
+    )
+
+    loss_h = model_h.dynamic_loss()
+    loss_i = model_i.dynamic_loss()
+    torch.testing.assert_close(loss_h, loss_i)
+    for component in ("cluster", "info_max", "dynamic"):
+        torch.testing.assert_close(
+            model_h.last_loss_components[component],
+            model_i.last_loss_components[component],
+        )
+
+
+def test_i_prediction_path_remains_differentiable_to_router():
+    torch.manual_seed(6)
+    model = RegimeDynamicRPETransformer(
+        in_dim=6,
+        d_model=8,
+        n_heads=2,
+        n_layers=1,
+        ffn_dim=16,
+        t_len=20,
+        K=3,
+        D_regime=4,
+        use_semantic_router=True,
+        lambda_cluster=0.0005,
+        routing_strength=0.25,
+    )
+    output = model(torch.randn(3, 20, 6), torch.randn(3, 20, 3))
+    output.square().mean().backward()
+    router = model.regime_gen
+    parameters = (
+        router.regime_prototypes,
+        router.context_encoder[0].weight,
+        router.transition_matrix,
+        model.state_centers,
+    )
+    assert all(parameter.grad is not None for parameter in parameters)
+    assert all(torch.isfinite(parameter.grad).all() for parameter in parameters)
+    assert all(parameter.grad.norm().item() > 0.0 for parameter in parameters)
+
+
+def test_i_variant_wires_only_routing_strength_differently_from_h():
+    common = dict(
+        num_nodes=4,
+        n_commodities=2,
+        n_stock=1,
+        n_bond=1,
+        feat_dim=21,
+    )
+    torch.manual_seed(7)
+    model_h = HeteroMixHopCMGM(variant="loss_rebalance", **common)
+    torch.manual_seed(7)
+    model_i = HeteroMixHopCMGM(variant="routing_strength", **common)
+
+    assert model_h.state_dict().keys() == model_i.state_dict().keys()
+    for name, tensor_h in model_h.state_dict().items():
+        torch.testing.assert_close(tensor_h, model_i.state_dict()[name])
+    assert model_h.regime_dynamic.lambda_cluster == 0.0005
+    assert model_i.regime_dynamic.lambda_cluster == 0.0005
+    assert model_h.regime_dynamic.lambda_info_max == 0.001
+    assert model_i.regime_dynamic.lambda_info_max == 0.001
+    assert model_h.regime_dynamic.routing_strength == 1.0
+    assert model_i.regime_dynamic.routing_strength == 0.25
+
+
+def test_i_forced_raw_and_downstream_overrides_are_distinct():
+    torch.manual_seed(8)
+    model = RegimeDynamicRPETransformer(
+        in_dim=6,
+        d_model=8,
+        n_heads=2,
+        n_layers=1,
+        ffn_dim=16,
+        t_len=20,
+        K=3,
+        D_regime=4,
+        use_semantic_router=True,
+        lambda_cluster=0.0005,
+        routing_strength=0.25,
+    )
+    model.eval()
+    x = torch.randn(2, 20, 6)
+    descriptor = torch.randn(2, 20, 3)
+    one_hot = torch.tensor([1.0, 0.0, 0.0])
+
+    model.forced_regime = one_hot
+    model(x, descriptor)
+    torch.testing.assert_close(
+        model.last_regime_p_use[0, 0], torch.tensor([0.5, 0.25, 0.25])
+    )
+
+    model.forced_regime = None
+    model.forced_regime_use = one_hot
+    model(x, descriptor)
+    torch.testing.assert_close(model.last_regime_p_use[0, 0], one_hot)

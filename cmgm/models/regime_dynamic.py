@@ -239,12 +239,16 @@ class RegimeDynamicRPETransformer(nn.Module):
                  t_len: int = 20, K: int = 3, D_regime: int = 32,
                  use_state_loss: bool = False,
                  use_semantic_router: bool = False,
-                 lambda_cluster: float = 0.005):
+                 lambda_cluster: float = 0.005,
+                 routing_strength: float = 1.0):
         super().__init__()
         self.proj = nn.Linear(in_dim, d_model)
         self.use_semantic_router = use_semantic_router
         self.lambda_cluster = float(lambda_cluster)
         self.lambda_info_max = 0.001
+        self.routing_strength = float(routing_strength)
+        if not 0.0 <= self.routing_strength <= 1.0:
+            raise ValueError("routing_strength must be in [0, 1]")
         self.regime_gen = (
             SemanticRegimeRouter(d_model, K, D_regime)
             if use_semantic_router
@@ -258,6 +262,7 @@ class RegimeDynamicRPETransformer(nn.Module):
         self.pool_score = nn.Linear(d_model, 1)
         self.fc = nn.Linear(d_model, 64)
         self.forced_regime = None   # diagnostic: one-hot (K,) or None
+        self.forced_regime_use = None  # diagnostic: direct downstream override
         self.use_state_loss = use_state_loss
         if use_state_loss or use_semantic_router:
             # latent state centers: typical market-dynamics profile per regime
@@ -268,29 +273,44 @@ class RegimeDynamicRPETransformer(nn.Module):
         # x_flat: (B, T, in_dim) → h_temporal (B, 64)
         B, T, _ = x_flat.shape
         E = self.proj(x_flat)                                     # (B, T, 128)
+        self.last_E = E.detach()
 
         if self.use_semantic_router:
             if market_descriptor is None:
                 raise ValueError("Semantic-router variants require market_descriptor")
-            p = self.regime_gen(E, market_descriptor, self.state_centers)
+            p_raw = self.regime_gen(E, market_descriptor, self.state_centers)
             self._m_t_for_loss = market_descriptor
             self.last_m_t = market_descriptor.detach()
         else:
-            p = self.regime_gen(E)                                # (B, T, K)
+            p_raw = self.regime_gen(E)                            # (B, T, K)
         if self.forced_regime is not None:                        # diagnostic override
-            p = self.forced_regime.unsqueeze(0).unsqueeze(0).expand(B, T, -1)
-        self.last_regime_p = p.detach()
-        self._p_for_loss = p                                      # non-detached (loss)
+            p_raw = self.forced_regime.unsqueeze(0).unsqueeze(0).expand(B, T, -1)
 
-        z, zs = self.adapters(E, p)                               # (B, T, 128), (K, B, T, 128)
+        if self.use_semantic_router and self.routing_strength != 1.0:
+            uniform_p = torch.full_like(p_raw, 1.0 / p_raw.shape[-1])
+            p_use = (
+                (1.0 - self.routing_strength) * uniform_p
+                + self.routing_strength * p_raw
+            )
+        else:
+            p_use = p_raw
+        if self.forced_regime_use is not None:
+            p_use = self.forced_regime_use.unsqueeze(0).unsqueeze(0).expand(B, T, -1)
+
+        self.last_regime_p = p_raw.detach()  # raw recognition probability
+        self.last_regime_p_use = p_use.detach()
+        self._p_for_loss = p_raw                                 # non-detached (loss)
+
+        z, zs = self.adapters(E, p_use)                           # (B, T, 128), (K, B, T, 128)
         self.last_z = z.detach()
         self.last_zs = zs.detach()
         self._zs_for_loss = zs                                    # non-detached (loss)
 
-        rpe = self.rpe(p, T)                                      # (B, H, T, T)
+        rpe = self.rpe(p_use, T)                                 # (B, H, T, T)
         H = z
         for layer in self.attn_layers:
             H = layer(H, rpe)                                     # (B, T, 128)
+        self.last_transformer_output = H.detach()
 
         score = self.pool_score(H).squeeze(-1)                    # (B, T)
         alpha = F.softmax(score, dim=1)
