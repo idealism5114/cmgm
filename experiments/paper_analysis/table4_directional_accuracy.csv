@@ -1,9 +1,0 @@
-Model,Directional_Accuracy_%
-PCA+Ridge,48.37
-PCA+SVR,48.95
-LSTM,48.13
-BiLSTM,48.08
-GCN-Only,48.20
-GCN+GAT,48.13
-CMGM-Feat,48.45
-HeteroMix,48.86

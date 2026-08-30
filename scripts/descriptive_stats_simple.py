@@ -6,8 +6,9 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 
-DATA_ROOT = Path("/home/yangxiaotong/projects/myresearch/Commedities/Data")
-OUTPUT_DIR = Path("/home/yangxiaotong/projects/myresearch/Commedities/experiments/descriptive_stats")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DATA_ROOT = PROJECT_ROOT / "Data"
+OUTPUT_DIR = PROJECT_ROOT / "experiments" / "descriptive_stats"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 pd.set_option('display.max_rows', 100)

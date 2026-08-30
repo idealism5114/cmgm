@@ -674,12 +674,23 @@ class HeteroMixHopCMGM(nn.Module):
 
     def __init__(self, num_nodes: int, n_commodities: int,
                  n_stock: int = 248, n_bond: int = 12,
-                 variant: str = "full", feat_dim: int = FEATURE_DIM,
+                 variant: str = "edge_attn", feat_dim: int = FEATURE_DIM,
                  attn_heads: int = 8, attn_dropout: float = 0.1,
                  attn_prior_scale: float = 0.5, attn_self_heads: int = 4,
                  graph_cfg: str = "full", use_embedding: bool = True,
                  relations: str = "cc"):
         super().__init__()
+        supported_variants = {
+            "edge_attn",
+            "temporal_weighted_graph",
+            "regime_dynamic_transformer",
+            "regime_dynamic_semantic",
+        }
+        if variant not in supported_variants:
+            supported = ", ".join(sorted(supported_variants))
+            raise ValueError(
+                f"Unsupported variant {variant!r}; choose one of: {supported}"
+            )
         self.num_nodes = num_nodes
         self.n_commodities = n_commodities
         self.n_stock = n_stock
