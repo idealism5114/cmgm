@@ -288,6 +288,7 @@ class MarketSequenceDataset(Dataset):
         raw_prices: np.ndarray = None,
         target_type: str = "price",
         horizons: list = None,
+        market_descriptors: np.ndarray = None,
     ):
         self.prices = prices
         self.market_indices = market_indices
@@ -296,6 +297,11 @@ class MarketSequenceDataset(Dataset):
         self.raw_prices = raw_prices
         self.target_type = target_type
         self.horizons = horizons if horizons is not None else MULTI_HORIZONS
+        self.market_descriptors = market_descriptors
+        if market_descriptors is not None and len(market_descriptors) != len(prices):
+            raise ValueError(
+                "market_descriptors and prices must share the same timeline length"
+            )
 
         self.commodity_start, self.commodity_end = market_indices['commodity']
         self.n_commodities = self.commodity_end - self.commodity_start
@@ -351,7 +357,68 @@ class MarketSequenceDataset(Dataset):
             # Original behaviour: z-scored price at time t+seq_len
             y = self.prices[idx + self.seq_len, cs:ce]
 
+        if self.market_descriptors is not None:
+            descriptor = self.market_descriptors[idx: idx + self.seq_len]
+            return (
+                torch.FloatTensor(X),
+                torch.FloatTensor(y),
+                torch.FloatTensor(descriptor),
+            )
         return torch.FloatTensor(X), torch.FloatTensor(y)
+
+
+def build_market_descriptor_timeline(
+    raw_prices: np.ndarray,
+    market_indices: Dict[str, Tuple[int, int]],
+    train_end: int,
+    lookback: int = 5,
+    eps: float = 1e-6,
+):
+    """Build one causal market-dynamics descriptor per real timestamp.
+
+    The descriptor is ``[abs_return, trailing_volatility, slope]`` where
+    market return is the cross-commodity mean one-day return. Volatility uses
+    at most the current and previous ``lookback - 1`` observations and never
+    restarts at a sliding-window boundary. Normalization statistics are fitted
+    strictly on ``[:train_end]`` and reused for validation and test.
+    """
+    if raw_prices.ndim != 2:
+        raise ValueError("raw_prices must have shape (time, nodes)")
+    if not 1 < train_end <= len(raw_prices):
+        raise ValueError("train_end must contain at least two timeline points")
+    if lookback < 2:
+        raise ValueError("lookback must be at least 2")
+
+    commodity_start, commodity_end = market_indices["commodity"]
+    commodity_prices = raw_prices[:, commodity_start:commodity_end]
+    node_returns = np.zeros_like(commodity_prices, dtype=np.float64)
+    denominator = np.maximum(np.abs(commodity_prices[:-1]), 1e-8)
+    node_returns[1:] = commodity_prices[1:] / denominator - 1.0
+    market_return = node_returns.mean(axis=1)
+
+    abs_return = np.abs(market_return)
+    slope = np.zeros_like(market_return)
+    slope[1:] = market_return[1:] - market_return[:-1]
+    volatility = np.zeros_like(market_return)
+    for index in range(1, len(market_return)):
+        # Index 0 has no preceding price and is causal zero padding, not an
+        # observed return; exclude it from rolling-volatility observations.
+        start = max(1, index - lookback + 1)
+        history = market_return[start:index + 1]
+        volatility[index] = history.std(ddof=1) if len(history) >= 2 else 0.0
+
+    descriptor = np.stack([abs_return, volatility, slope], axis=-1)
+    descriptor = np.nan_to_num(descriptor, nan=0.0, posinf=0.0, neginf=0.0)
+    descriptor_mean = descriptor[:train_end].mean(axis=0, keepdims=True)
+    descriptor_std = descriptor[:train_end].std(axis=0, keepdims=True)
+    normalized = (descriptor - descriptor_mean) / (descriptor_std + eps)
+    stats = {
+        "mean": descriptor_mean.squeeze(0).astype(np.float32),
+        "std": descriptor_std.squeeze(0).astype(np.float32),
+        "eps": eps,
+        "lookback": lookback,
+    }
+    return normalized.astype(np.float32), descriptor.astype(np.float32), stats
 
 
 # =============================================================================

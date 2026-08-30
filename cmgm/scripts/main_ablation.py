@@ -1,4 +1,4 @@
-"""Run the three retained HeteroMixHop ablation variants.
+"""Run A/F/F2 and the independent G-SemanticRouter experiment.
 
 Usage:
     python -m cmgm.scripts.main_ablation
@@ -24,23 +24,29 @@ from cmgm.config import (
     TARGET_HORIZON,
     TARGET_TYPE,
 )
-from cmgm.data.data_loader import MarketSequenceDataset, create_data_loaders, set_seed
+from cmgm.data.data_loader import (
+    MarketSequenceDataset,
+    build_market_descriptor_timeline,
+    create_data_loaders,
+    set_seed,
+)
 from cmgm.data.feature_builder import build_feature_matrix
 from cmgm.experiment_logger import ExperimentLogger
 from cmgm.models.hetero_mixhop_model import HeteroMixHopCMGM
 from cmgm.training.evaluate import compute_metrics, inverse_transform_predictions
-from cmgm.training.train import train
+from cmgm.training.train import make_loss, train
 
 
 VARIANTS = [
     ("+TempWeighted", "temporal_weighted_graph"),
     ("F-RegimeDynamic", "regime_dynamic_transformer"),
     ("F2-RegimeSemantic", "regime_dynamic_semantic"),
+    ("G-SemanticRouter", "semantic_router"),
 ]
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Retained HeteroMixHop ablations")
+    parser = argparse.ArgumentParser(description="HeteroMixHop A/F/F2/G ablations")
     parser.add_argument("--epochs", type=int, default=NUM_EPOCHS)
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
     parser.add_argument("--seq-len", type=int, default=SEQ_LEN)
@@ -49,7 +55,7 @@ def parse_args():
     parser.add_argument("--no-cuda", action="store_true")
     parser.add_argument(
         "--variants",
-        help="Comma-separated display or internal names; defaults to all retained variants",
+        help="Comma-separated display or internal names; defaults to A/F/F2/G",
     )
     return parser.parse_args()
 
@@ -81,6 +87,17 @@ def build_data(args):
         data["raw_prices_val"],
         data["raw_prices_test"],
     ]
+    descriptors, descriptors_raw, descriptor_stats = build_market_descriptor_timeline(
+        raw_full,
+        data["market_indices"],
+        train_end=train_size,
+        lookback=5,
+    )
+    descriptor_splits = [
+        descriptors[:train_end],
+        descriptors[train_end:val_end],
+        descriptors[val_end:],
+    ]
     horizons = MULTI_HORIZONS if TARGET_TYPE == "return" else [TARGET_HORIZON]
     datasets = {
         split: MarketSequenceDataset(
@@ -93,7 +110,29 @@ def build_data(args):
             horizons=horizons,
         )
         for split, norm, feature, raw in zip(
-            ("train", "val", "test"), norm_splits, feature_splits, raw_splits
+            ("train", "val", "test"),
+            norm_splits,
+            feature_splits,
+            raw_splits,
+        )
+    }
+    semantic_datasets = {
+        split: MarketSequenceDataset(
+            norm,
+            data["market_indices"],
+            args.seq_len,
+            feature_matrix=feature,
+            raw_prices=raw,
+            target_type=TARGET_TYPE,
+            horizons=horizons,
+            market_descriptors=descriptor,
+        )
+        for split, norm, feature, raw, descriptor in zip(
+            ("train", "val", "test"),
+            norm_splits,
+            feature_splits,
+            raw_splits,
+            descriptor_splits,
         )
     }
     data["loaders"] = {
@@ -105,6 +144,18 @@ def build_data(args):
         )
         for split, dataset in datasets.items()
     }
+    data["semantic_loaders"] = {
+        split: DataLoader(
+            dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            drop_last=split == "train",
+        )
+        for split, dataset in semantic_datasets.items()
+    }
+    data["descriptor_timeline"] = descriptors
+    data["descriptor_timeline_raw"] = descriptors_raw
+    data["descriptor_stats"] = descriptor_stats
     return data
 
 
@@ -113,8 +164,12 @@ def evaluate_primary_horizon(model, loader, data, device):
     predictions, targets = [], []
     horizon_index = MULTI_HORIZONS.index(TARGET_HORIZON)
     with torch.no_grad():
-        for x_batch, y_batch in loader:
-            pred = model(x_batch.to(device)).cpu().numpy()
+        for batch in loader:
+            x_batch, y_batch = batch[:2]
+            descriptor = batch[2].to(device) if len(batch) == 3 else None
+            pred = model(
+                x_batch.to(device), market_descriptor=descriptor
+            ).cpu().numpy()
             target = y_batch.numpy()
             if pred.ndim == 3:
                 pred = pred[:, horizon_index, :]
@@ -137,11 +192,183 @@ def evaluate_primary_horizon(model, loader, data, device):
     return normalized_metrics, compute_metrics(pred_original, target_original), target
 
 
-def print_diagnostics(model, variant, test_loader, device):
-    x_batch = next(iter(test_loader))[0][:16].to(device)
+def _prediction_loss(prediction, target, criterion):
+    if prediction.dim() == 3:
+        return sum(
+            criterion(prediction[:, horizon], target[:, horizon])
+            for horizon in range(prediction.size(1))
+        )
+    return criterion(prediction, target)
+
+
+def _event_test(name, values, probabilities):
+    count = max(1, int(np.ceil(len(values) * 0.1)))
+    order = np.argsort(values)
+    low = probabilities[order[:count]].mean(axis=0)
+    high = probabilities[order[-count:]].mean(axis=0)
+    print(f"  [G event/{name}] high p={np.round(high, 4)}")
+    print(f"  [G event/{name}] low  p={np.round(low, 4)}")
+    print(f"  [G event/{name}] L1 difference={np.abs(high - low).sum():.6f}")
+
+
+def _semantic_router_diagnostics(model, test_loader, device):
+    rd = model.regime_dynamic
+    router = rd.regime_gen
+    probability_batches, descriptor_batches = [], []
+    score_batches = {name: [] for name in ("context", "semantic", "transition", "final")}
+
     model.eval()
     with torch.no_grad():
-        model(x_batch)
+        for batch in test_loader:
+            x_batch, _, descriptor = batch
+            model(
+                x_batch.to(device),
+                market_descriptor=descriptor.to(device),
+            )
+            probability_batches.append(rd.last_regime_p.cpu())
+            descriptor_batches.append(descriptor.cpu())
+            score_batches["context"].append(router.last_context_score.cpu())
+            score_batches["semantic"].append(router.last_semantic_score.cpu())
+            score_batches["transition"].append(router.last_transition_score.cpu())
+            score_batches["final"].append(router.last_final_score.cpu())
+
+    p = torch.cat(probability_batches).numpy()
+    descriptor = torch.cat(descriptor_batches).numpy()
+    scores = {name: torch.cat(parts).numpy() for name, parts in score_batches.items()}
+    for name in ("context", "semantic", "transition", "final"):
+        print(
+            f"  [G router score] {name}_score mean={scores[name].mean():+.6f} "
+            f"std={scores[name].std():.6f} min={scores[name].min():+.6f} "
+            f"max={scores[name].max():+.6f}"
+        )
+    for name in ("context", "semantic", "transition"):
+        print(
+            f"  [G router score] mean absolute {name}_score="
+            f"{np.abs(scores[name]).mean():.6f}"
+        )
+
+    entropy = -(p * np.log(p + 1e-9)).sum(axis=-1)
+    transition = np.abs(np.diff(p, axis=1)).sum(axis=-1)
+    print(
+        f"  [G p] mean={np.round(p.mean(axis=(0, 1)), 4)} "
+        f"std={p.std():.6f} min={p.min():.6f} max={p.max():.6f}"
+    )
+    print(f"  [G p] per-sample p std (B,T,K)={p.std(axis=(1, 2)).mean():.6f}")
+    print(f"  [G p] mean max regime probability={p.max(axis=-1).mean():.6f}")
+    print(f"  [G entropy] mean={entropy.mean():.6f} std={entropy.std():.6f}")
+    print(f"  [G transition] mean ||p_t-p_(t-1)||_1={transition.mean():.6f}")
+    for step in range(0, min(p.shape[1], 20), 2):
+        print(f"  [G p t={step}] {np.round(p[:, step].mean(axis=0), 4)}")
+
+    p_last = p[:, -1]
+    m_last = descriptor[:, -1]
+    _event_test("volatility", m_last[:, 1], p_last)
+    _event_test("abs_return", m_last[:, 0], p_last)
+
+    centers = rd.state_centers.detach().cpu().numpy()
+    for state, center in enumerate(centers):
+        print(f"  [G center_{state}] {np.round(center, 4)}")
+    print(
+        "  [G center distance] "
+        f"d01={np.linalg.norm(centers[0] - centers[1]):.6f} "
+        f"d02={np.linalg.norm(centers[0] - centers[2]):.6f} "
+        f"d12={np.linalg.norm(centers[1] - centers[2]):.6f}"
+    )
+    semantic_means = []
+    for state in range(p_last.shape[1]):
+        weights = p_last[:, state]
+        weighted = (weights[:, None] * m_last).sum(axis=0) / (weights.sum() + 1e-8)
+        semantic_means.append(weighted)
+        print(
+            f"  [G state {state}] abs_ret={weighted[0]:+.6f} "
+            f"vol={weighted[1]:+.6f} slope={weighted[2]:+.6f}"
+        )
+    semantic_means = np.stack(semantic_means)
+    separation = np.linalg.norm(
+        semantic_means[:, None] - semantic_means[None, :], axis=-1
+    )
+    if separation[np.triu_indices(3, 1)].max() < 1e-3:
+        print("  [G semantics] semantic separation failed")
+
+    # Gradient diagnostic uses exactly return + G auxiliary training loss.
+    x_batch, y_batch, descriptor_batch = next(iter(test_loader))
+    x_batch = x_batch[:16].to(device)
+    y_batch = y_batch[:16].to(device)
+    descriptor_batch = descriptor_batch[:16].to(device)
+    model.train()
+    model.zero_grad(set_to_none=True)
+    prediction = model(x_batch, market_descriptor=descriptor_batch)
+    return_loss = _prediction_loss(prediction, y_batch, make_loss())
+    auxiliary_loss = rd.dynamic_loss()
+    diagnostic_loss = return_loss + auxiliary_loss
+    diagnostic_loss.backward()
+    components = rd.last_loss_components
+    print(f"  [G loss] L_return={return_loss.item():.6e}")
+    print(f"  [G loss] L_cluster={components['cluster'].item():.6e}")
+    print(f"  [G loss] L_InfoMax={components['info_max'].item():.6e}")
+    print(f"  [G loss] L_dynamic={components['dynamic'].item():.6e}")
+    gradients = [
+        ("prototypes", router.regime_prototypes),
+        ("context_encoder", router.context_encoder[0].weight),
+        ("transition_matrix", router.transition_matrix),
+        ("state_centers", rd.state_centers),
+        ("adapter1", rd.adapters.adapters[0][0].weight),
+        ("adapter2", rd.adapters.adapters[1][0].weight),
+        ("adapter3", rd.adapters.adapters[2][0].weight),
+    ]
+    for name, parameter in gradients:
+        norm = parameter.grad.norm().item() if parameter.grad is not None else float("nan")
+        print(f"  [G grad] {name}={norm:.3e}")
+
+    # Forced-state comparison uses the complete temporal and prediction paths.
+    model.eval()
+    with torch.no_grad():
+        rd.forced_regime = None
+        prediction_real = model(x_batch, market_descriptor=descriptor_batch)
+        temporal_real = rd.last_h_temporal.clone()
+        for state in range(3):
+            forced = torch.zeros(3, device=device)
+            forced[state] = 1.0
+            rd.forced_regime = forced
+            prediction_forced = model(x_batch, market_descriptor=descriptor_batch)
+            temporal_forced = rd.last_h_temporal
+            print(
+                f"  [G forced state {state}] max_abs_diff h_temporal="
+                f"{(temporal_forced - temporal_real).abs().max().item():.6e} "
+                f"prediction={(prediction_forced - prediction_real).abs().max().item():.6e}"
+            )
+        rd.forced_regime = None
+
+        # Both neural input and descriptor are perturbed only at t >= 10.
+        split = min(10, x_batch.size(1))
+        x_perturbed = x_batch.clone()
+        descriptor_perturbed = descriptor_batch.clone()
+        x_perturbed[:, split:] = torch.randn_like(x_perturbed[:, split:])
+        descriptor_perturbed[:, split:] = torch.randn_like(
+            descriptor_perturbed[:, split:]
+        )
+        encoded = rd.proj(x_batch.reshape(x_batch.size(0), x_batch.size(1), -1))
+        encoded_perturbed = rd.proj(
+            x_perturbed.reshape(x_perturbed.size(0), x_perturbed.size(1), -1)
+        )
+        p_original = router(encoded, descriptor_batch, rd.state_centers)
+        p_perturbed = router(
+            encoded_perturbed, descriptor_perturbed, rd.state_centers
+        )
+        causal_diff = (
+            p_original[:, :split] - p_perturbed[:, :split]
+        ).abs().max().item()
+    print(f"  [G causality] max p diff before t=10={causal_diff:.3e}")
+    print("  [RPE delta] implementation uses query index i minus key index j")
+
+
+def print_diagnostics(model, variant, test_loader, device):
+    batch = next(iter(test_loader))
+    x_batch = batch[0][:16].to(device)
+    descriptor = batch[2][:16].to(device) if len(batch) == 3 else None
+    model.eval()
+    with torch.no_grad():
+        model(x_batch, market_descriptor=descriptor)
 
     alpha = model.last_alpha
     print(
@@ -149,7 +376,9 @@ def print_diagnostics(model, variant, test_loader, device):
         f"std={alpha.std().item():.4f} min={alpha.min().item():.4f} "
         f"max={alpha.max().item():.4f}"
     )
-    if variant.startswith("regime_dynamic"):
+    if variant == "semantic_router":
+        _semantic_router_diagnostics(model, test_loader, device)
+    elif variant.startswith("regime_dynamic"):
         probabilities = model.regime_dynamic.last_regime_p
         mean_probability = probabilities.mean(dim=(0, 1)).cpu().numpy()
         entropy = -(probabilities * (probabilities + 1e-9).log()).sum(dim=-1).mean()
@@ -178,12 +407,15 @@ def run_variant(name, variant, args, device, data):
     print(f"\n{name} ({variant}) — {parameter_count:,} parameters")
 
     started = time.time()
+    loaders = (
+        data["semantic_loaders"] if variant == "semantic_router" else data["loaders"]
+    )
     empty_edges = torch.empty(2, 0, dtype=torch.long)
     empty_weights = torch.zeros(0)
     train(
         model,
-        data["loaders"]["train"],
-        data["loaders"]["val"],
+        loaders["train"],
+        loaders["val"],
         empty_edges,
         empty_weights,
         device,
@@ -191,9 +423,9 @@ def run_variant(name, variant, args, device, data):
         patience=args.patience,
     )
     normalized, original, target = evaluate_primary_horizon(
-        model, data["loaders"]["test"], data, device
+        model, loaders["test"], data, device
     )
-    print_diagnostics(model, variant, data["loaders"]["test"], device)
+    print_diagnostics(model, variant, loaders["test"], device)
 
     zero_metrics = compute_metrics(np.zeros_like(target), target)
     versus_zero = (normalized["MAE"] - zero_metrics["MAE"]) / zero_metrics["MAE"] * 100
@@ -237,6 +469,12 @@ def main():
         f"variants={[variant[0] for variant in variants]}"
     )
     data = build_data(args)
+    descriptor_stats = data["descriptor_stats"]
+    print(
+        "Descriptor timeline: [abs_return, volatility_5, slope], "
+        f"train mean={np.round(descriptor_stats['mean'], 6)}, "
+        f"train std={np.round(descriptor_stats['std'], 6)}"
+    )
     results = [run_variant(name, variant, args, device, data) for name, variant in variants]
 
     print("\nRetained ablation summary")

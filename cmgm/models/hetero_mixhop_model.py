@@ -685,6 +685,7 @@ class HeteroMixHopCMGM(nn.Module):
             "temporal_weighted_graph",
             "regime_dynamic_transformer",
             "regime_dynamic_semantic",
+            "semantic_router",
         }
         if variant not in supported_variants:
             supported = ", ".join(sorted(supported_variants))
@@ -726,7 +727,8 @@ class HeteroMixHopCMGM(nn.Module):
                                                "transformer_regime", "regime_rpe_transformer",
                                                "transformer_regime2", "regime_rpe_transformer2",
                                                "regime_dynamic_transformer",
-                                               "regime_dynamic_semantic")
+                                               "regime_dynamic_semantic",
+                                               "semantic_router")
         self.use_edge_attn   = variant in ("edge_attn", "edge_attn_static", "temporal_attn",
                                            "diff_input", "hybrid_attn", "node_level",
                                            "comm_nodes", "batch_graph", "factor_res",
@@ -740,7 +742,8 @@ class HeteroMixHopCMGM(nn.Module):
                                            "transformer_regime", "regime_rpe_transformer",
                                            "transformer_regime2", "regime_rpe_transformer2",
                                            "regime_dynamic_transformer",
-                                           "regime_dynamic_semantic")
+                                           "regime_dynamic_semantic",
+                                           "semantic_router")
         self.use_gate        = variant not in ("no_gate", "gcn_only", "lstm_only")
 
         # ── Multi-horizon output ──
@@ -969,7 +972,8 @@ class HeteroMixHopCMGM(nn.Module):
             elif variant in ("transformer_temporal", "transformer_rpe",
                              "transformer_regime", "regime_rpe_transformer",
                              "transformer_regime2", "regime_rpe_transformer2",
-                             "regime_dynamic_transformer", "regime_dynamic_semantic"):
+                             "regime_dynamic_transformer", "regime_dynamic_semantic",
+                             "semantic_router"):
                 pass  # temporal branch is the transformer (no global LSTM)
             else:
                 # diff_input: concat first-order differences → 2× input size
@@ -1081,13 +1085,15 @@ class HeteroMixHopCMGM(nn.Module):
         # RegimeDynamicRPETransformer (F): modular regime → dynamics →
         # regime-aware RPE → transformer temporal branch
         # F2 (regime_dynamic_semantic): adds market-dynamics state target
-        if variant in ("regime_dynamic_transformer", "regime_dynamic_semantic"):
+        if variant in ("regime_dynamic_transformer", "regime_dynamic_semantic",
+                       "semantic_router"):
             self.temporal_score = nn.Linear(LSTM_HIDDEN_DIM, 1)   # spatial branch
             self.regime_dynamic = RegimeDynamicRPETransformer(
                 in_dim=num_nodes * feat_dim,
                 d_model=128, n_heads=4, n_layers=2, ffn_dim=256,
                 dropout=GCN_DROPOUT, t_len=SEQ_LEN, K=3, D_regime=32,
                 use_state_loss=(variant == "regime_dynamic_semantic"),
+                use_semantic_router=(variant == "semantic_router"),
             )
 
         # temp_weighted_comm_cond: commodity graph representations
@@ -2069,7 +2075,8 @@ class HeteroMixHopCMGM(nn.Module):
         return lambda_proto * (l_proto + l_balance)
 
     def _regime_dynamic_forward(self, x: torch.Tensor,
-                                debug: bool = False) -> torch.Tensor:
+                                debug: bool = False,
+                                market_descriptor: torch.Tensor = None) -> torch.Tensor:
         """
         RegimeDynamicRPETransformer (F):
           spatial  = TempWeighted (unchanged) → h_spatial (B, 64)
@@ -2096,7 +2103,9 @@ class HeteroMixHopCMGM(nn.Module):
             self.regime_dynamic.last_m_t = m_t.detach()
 
         x_flat = x.reshape(B, T, -1)                               # (B, T, N*F)
-        h_temporal = self.regime_dynamic(x_flat)                   # (B, 64)
+        h_temporal = self.regime_dynamic(
+            x_flat, market_descriptor=market_descriptor
+        )                                                           # (B, 64)
 
         combined = torch.cat([h_spatial, h_temporal], dim=-1)      # (B, 128)
         gate = torch.sigmoid(self.gate_fc(combined))
@@ -2224,7 +2233,8 @@ class HeteroMixHopCMGM(nn.Module):
 
     def forward(self, x: torch.Tensor,
                 edge_index=None, edge_weight=None,
-                debug: bool = False) -> torch.Tensor:
+                debug: bool = False,
+                market_descriptor=None) -> torch.Tensor:
         if self.variant == "multiscale_graph":
             return self._multiscale_graph_forward(x, debug)
         if self.variant == "node_level":
@@ -2257,8 +2267,11 @@ class HeteroMixHopCMGM(nn.Module):
                             "transformer_regime", "regime_rpe_transformer",
                             "transformer_regime2", "regime_rpe_transformer2"):
             return self._transformer_temporal_forward(x, debug)
-        if self.variant in ("regime_dynamic_transformer", "regime_dynamic_semantic"):
-            return self._regime_dynamic_forward(x, debug)
+        if self.variant in ("regime_dynamic_transformer", "regime_dynamic_semantic",
+                            "semantic_router"):
+            return self._regime_dynamic_forward(
+                x, market_descriptor=market_descriptor, debug=debug
+            )
         if self.variant == "edge_attn":
             # single source of truth shared with comm_output_residual
             return self._original_forward(x, debug=debug)
@@ -2373,7 +2386,8 @@ class HeteroMixHopCMGM(nn.Module):
                             "transformer_temporal", "transformer_rpe",
                             "transformer_regime", "regime_rpe_transformer",
                             "transformer_regime2", "regime_rpe_transformer2",
-                            "regime_dynamic_transformer", "regime_dynamic_semantic"):
+                            "regime_dynamic_transformer", "regime_dynamic_semantic",
+                            "semantic_router"):
             return {'mode': self.variant, 'note': 'no gate — per-node fusion'}
         if self.variant == "multiscale_graph":
             self.eval()

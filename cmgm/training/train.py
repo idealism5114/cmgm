@@ -9,6 +9,7 @@ Implements:
   - Model checkpointing (best validation loss)
 """
 
+import copy
 import time
 import torch
 import torch.nn as nn
@@ -65,10 +66,16 @@ def train_epoch(
 
     for batch_idx, batch in enumerate(loader):
         # Support both static graphs (X, y) and dynamic graphs (X, y, ei, ew)
+        market_descriptor = None
         if len(batch) == 4:
             X_batch, y_batch, batch_ei, batch_ew = batch
             cur_ei = batch_ei.to(device)
             cur_ew = batch_ew.to(device)
+        elif len(batch) == 3:
+            X_batch, y_batch, market_descriptor = batch
+            market_descriptor = market_descriptor.to(device)
+            cur_ei = edge_index.to(device)
+            cur_ew = edge_weight.to(device)
         else:
             X_batch, y_batch = batch
             cur_ei = edge_index.to(device)
@@ -84,7 +91,14 @@ def train_epoch(
         # Models with internal graph_learner (e.g. AdaptiveCMGM) don't
         # need edge_index/edge_weight passed from outside.
         if hasattr(model, 'graph_learner'):
-            pred = model(X_batch, debug=(debug and batch_idx == 0))
+            if market_descriptor is None:
+                pred = model(X_batch, debug=(debug and batch_idx == 0))
+            else:
+                pred = model(
+                    X_batch,
+                    market_descriptor=market_descriptor,
+                    debug=(debug and batch_idx == 0),
+                )
         else:
             pred = model(X_batch, cur_ei, cur_ew, debug=(debug and batch_idx == 0))
         # pred: (B, N_commodities)
@@ -156,10 +170,16 @@ def validate_epoch(
     num_batches = 0
 
     for batch in loader:
+        market_descriptor = None
         if len(batch) == 4:
             X_batch, y_batch, batch_ei, batch_ew = batch
             cur_ei = batch_ei.to(device)
             cur_ew = batch_ew.to(device)
+        elif len(batch) == 3:
+            X_batch, y_batch, market_descriptor = batch
+            market_descriptor = market_descriptor.to(device)
+            cur_ei = edge_index.to(device)
+            cur_ew = edge_weight.to(device)
         else:
             X_batch, y_batch = batch
             cur_ei = edge_index.to(device)
@@ -169,7 +189,12 @@ def validate_epoch(
         y_batch = y_batch.to(device)
 
         if hasattr(model, 'graph_learner'):
-            pred = model(X_batch, debug=False)
+            if market_descriptor is None:
+                pred = model(X_batch, debug=False)
+            else:
+                pred = model(
+                    X_batch, market_descriptor=market_descriptor, debug=False
+                )
         else:
             pred = model(X_batch, cur_ei, cur_ew, debug=False)
         if pred.dim() == 3:
@@ -321,7 +346,7 @@ def train(
         # Early stopping: check improvement
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            best_model_state = model.state_dict().copy()
+            best_model_state = copy.deepcopy(model.state_dict())
             history['best_epoch'] = epoch
             epochs_no_improve = 0
         else:
