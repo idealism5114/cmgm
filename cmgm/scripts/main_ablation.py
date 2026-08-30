@@ -1,787 +1,265 @@
-"""
-Ablation study for HeteroMixHopCMGM.
-
-Runs 9 variants (full + 8 ablations) with identical config and reports
-MAE / RMSE / Hit% / vs-Zero on the primary horizon (5-day return).
+"""Run the three retained HeteroMixHop ablation variants.
 
 Usage:
-    CUDA_VISIBLE_DEVICES=1 python -m cmgm.scripts.main_ablation --epochs 200
-    CUDA_VISIBLE_DEVICES=1 python -m cmgm.scripts.main_ablation --epochs 200 --variants full,no_gate,no_mixhop
+    python -m cmgm.scripts.main_ablation
+    python -m cmgm.scripts.main_ablation --variants +TempWeighted,F-RegimeDynamic
 """
 
-import argparse, os, sys, time, numpy as np
+import argparse
+import time
+
+import numpy as np
 import torch
-import torch.nn as nn
 from torch.utils.data import DataLoader
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 from cmgm.config import (
-    NUM_EPOCHS, BATCH_SIZE, SEQ_LEN, RANDOM_SEED, PATIENCE,
-    FEATURE_DIM, TARGET_TYPE, TARGET_HORIZON, MULTI_HORIZONS, FEAT_ZSCORE_EPS,
+    BATCH_SIZE,
+    FEATURE_DIM,
+    FEAT_ZSCORE_EPS,
+    MULTI_HORIZONS,
+    NUM_EPOCHS,
+    PATIENCE,
+    RANDOM_SEED,
+    SEQ_LEN,
+    TARGET_HORIZON,
+    TARGET_TYPE,
 )
-from cmgm.data.data_loader import set_seed, create_data_loaders, compute_features, MarketSequenceDataset
+from cmgm.data.data_loader import MarketSequenceDataset, create_data_loaders, set_seed
 from cmgm.data.feature_builder import build_feature_matrix
-from cmgm.models.hetero_mixhop_model import HeteroMixHopCMGM
-from cmgm.training.train import train
-from cmgm.training.evaluate import compute_metrics, inverse_transform_predictions
-from cmgm.graph.graph_builder import build_graph
 from cmgm.experiment_logger import ExperimentLogger
+from cmgm.models.hetero_mixhop_model import HeteroMixHopCMGM
+from cmgm.training.evaluate import compute_metrics, inverse_transform_predictions
+from cmgm.training.train import train
 
-from torch_geometric.utils import to_dense_adj
 
-
-def build_ewma_graph(returns: np.ndarray, lam: float, top_k: int = 10) -> torch.Tensor:
-    """
-    Exponentially-weighted (EWMA) correlation graph.
-
-    Weight w_t = (1−λ)·λ^(T−1−t): recent days matter more.  λ controls
-    the time memory of the graph — small λ → short-memory (fast linkages),
-    large λ → long-memory (stable structure).
-
-    Returns: dense adjacency (N, N) — top-k, symmetrized, self-loops,
-    row-normalized (suitable for EdgeAttnMixHop hard-mask mode).
-    """
-    T, N = returns.shape
-    w = (1.0 - lam) * lam ** np.arange(T - 1, -1, -1)      # (T,)
-    w /= w.sum()
-    mu = (returns * w[:, None]).sum(axis=0)                 # (N,)
-    centered = returns - mu
-    cov = (centered * w[:, None]).T @ centered              # (N, N)
-    sigma = np.sqrt(np.diag(cov))
-    sigma[sigma < 1e-12] = 1e-12
-    corr = cov / np.outer(sigma, sigma)
-    corr = np.nan_to_num(corr, nan=0.0, posinf=0.0, neginf=0.0)
-
-    # Top-k per row (keep signed correlations)
-    A = np.zeros_like(corr)
-    idx = np.argsort(np.abs(corr), axis=1)[:, -top_k:]
-    for i in range(N):
-        A[i, idx[i]] = corr[i, idx[i]]
-    # Symmetrize + self-loops + row-normalize
-    A = np.maximum(A, A.T)
-    A = A + np.eye(N)
-    A = A / A.sum(axis=1, keepdims=True).clip(min=1e-8)
-    return torch.from_numpy(A.astype(np.float32))
-
-# All variants: (display name, model variant, feat_dim, model kwargs)
-ALL_VARIANTS = [
-    ("Full",                "full",             FEATURE_DIM, {}),
-    ("+EdgeAttn",           "edge_attn",        FEATURE_DIM, {}),
-    ("+EdgeAttnStatic",     "edge_attn_static", FEATURE_DIM, {}),
-    # ── Attention hyperparameter scan (heads / dropout / prior strength) ──
-    ("+AttnH8",             "edge_attn",        FEATURE_DIM, {'attn_heads': 8}),
-    ("+AttnH2",             "edge_attn",        FEATURE_DIM, {'attn_heads': 2}),
-    ("+AttnDrop05",         "edge_attn",        FEATURE_DIM, {'attn_dropout': 0.05}),
-    ("+AttnPrior2",         "edge_attn",        FEATURE_DIM, {'attn_prior_scale': 2.0}),
-    ("+AttnPrior05",        "edge_attn",        FEATURE_DIM, {'attn_prior_scale': 0.5}),
-    # Cross-validation of the two best directions (heads=8 × prior=0.5)
-    ("+AttnH8P05",          "edge_attn",        FEATURE_DIM,
-     {'attn_heads': 8, 'attn_prior_scale': 0.5}),
-    ("+AttnH8Drop05",       "edge_attn",        FEATURE_DIM,
-     {'attn_heads': 8, 'attn_dropout': 0.05}),
-    # ── Temporal branch upgrade: per-type compression + temporal attention ──
-    ("+TemporalAttn",       "temporal_attn",    FEATURE_DIM, {}),
-    # Multi-scale temporal pooling: last + full + 10-step + 5-step means
-    ("+MultiScaleT",        "multiscale_time",  FEATURE_DIM, {}),
-    # Diff input: concat first-order differences to LSTM input
-    ("+DiffInput",          "diff_input",       FEATURE_DIM, {}),
-    # Horizon-aligned output: per-horizon context window + per-horizon head
-    ("+HorizonAlign",       "horizon_align",    FEATURE_DIM, {}),
-    # Multi-scale TCN replaces the LSTM temporal branch
-    ("+TCNTemporal",        "tcn_temporal",     FEATURE_DIM, {}),
-    # PatchTST-style temporal branch (patch_len=5 aligned with 5d horizon)
-    ("+PatchTST",           "patch_temporal",   FEATURE_DIM, {}),
-    # Multi-scale attention pooling (attention in window instead of mean)
-    ("+AttnPool",           "attn_pool",        FEATURE_DIM, {}),
-    # Multi-scale graph: dual spatial branches (EWMA short λ=0.9 / long λ=0.99)
-    ("+MultiScaleGraph",    "multiscale_graph", FEATURE_DIM, {}),
-    # Mamba (SSM) temporal branch — requires mamba-ssm (Linux CUDA)
-    ("+MambaTemporal",      "mamba_temporal",   FEATURE_DIM, {}),
-    # Informer-style temporal branch (ProbSparse attention encoder)
-    ("+InformerTemporal",   "informer_temporal", FEATURE_DIM, {}),
-    # Hybrid attention: 4 self (full graph) + 4 directed cross-market heads
-    ("+HybridAttn",         "hybrid_attn",      FEATURE_DIM, {}),
-    # Cross-only: all 8 heads restricted to directed cross-market pairs
-    ("+CrossOnly",          "hybrid_attn",      FEATURE_DIM, {'attn_self_heads': 0}),
-    # Node-level spatial: no type pooling — per-commodity graph features
-    ("+NodeLevel",          "node_level",       FEATURE_DIM, {}),
-    # Commodity nodes kept + external markets pooled + per-commodity heads
-    ("+CommNodes",          "comm_nodes",       FEATURE_DIM, {}),
-    # Batch-aware graph propagation: per-sample node representations
-    ("+BatchGraph",         "batch_graph",      FEATURE_DIM, {}),
-    # Factor + residual: pooled market-mean + per-commodity direction
-    ("+FactorRes",          "factor_res",       FEATURE_DIM, {}),
-    # Clean node-level baseline: batch-aware graph + node-wise LSTM + shared MLP
-    ("+NodeWise",           "node_wise",        FEATURE_DIM, {}),
-    # Market + Node dual representation (full: node temporal + GNN + global factor)
-    ("+MarketNode",         "market_node",      FEATURE_DIM, {}),
-    # Market + Node without GNN (node temporal + global factor + embedding)
-    ("+MktNodeNoG",         "market_node_no_graph", FEATURE_DIM, {}),
-    # ── E-series diagnostics (unified mkt_node variant) ──
-    ("E1-CNoEmb",           "mkt_node", FEATURE_DIM,
-     {'graph_cfg': 'none', 'use_embedding': False}),
-    ("E2-Residual",         "mkt_node", FEATURE_DIM, {'graph_cfg': 'res'}),
-    ("E3-Gate",             "mkt_node", FEATURE_DIM, {'graph_cfg': 'gate'}),
-    ("E4-CCOnly",           "mkt_node", FEATURE_DIM, {'graph_cfg': 'cc'}),
-    ("E5-CC",               "mkt_node", FEATURE_DIM,
-     {'graph_cfg': 'rel', 'relations': 'cc'}),
-    ("E5-CCSC",             "mkt_node", FEATURE_DIM,
-     {'graph_cfg': 'rel', 'relations': 'cc_sc'}),
-    ("E5-CCBC",             "mkt_node", FEATURE_DIM,
-     {'graph_cfg': 'rel', 'relations': 'cc_bc'}),
-    ("E5-CCSCBC",           "mkt_node", FEATURE_DIM,
-     {'graph_cfg': 'rel', 'relations': 'cc_sc_bc'}),
-    ("E5-Full",             "mkt_node", FEATURE_DIM,
-     {'graph_cfg': 'rel', 'relations': 'full'}),
-    # Minimal commodity-residual enhancement (original architecture kept)
-    ("+CommResidual",       "comm_residual", FEATURE_DIM, {}),
-    # Output-side commodity residual: original path kept exactly
-    ("+CommOutRes",         "comm_output_residual", FEATURE_DIM, {}),
-    # Per-timestep GNN + temporal attention (replaces mean over T)
-    ("+SpatTempAttn",       "spatial_temporal_attention", FEATURE_DIM, {}),
-    # Temporal-weighted graph: attention replaces mean(dim=1), GNN unchanged
-    ("+TempWeighted",       "temporal_weighted_graph", FEATURE_DIM, {}),
-    # Commodity-conditioned hidden state (original head[3] output kept)
-    ("+CommCond",           "temp_weighted_comm_cond", FEATURE_DIM, {}),
-    # Temporal attention with neighbor-consulting scores (cross over nodes)
-    ("+TempCross",          "temporal_cross_weighted", FEATURE_DIM, {}),
-    # ── RegimeRPETransformer ablation family ──
-    ("B-Transformer",       "transformer_temporal", FEATURE_DIM, {}),
-    ("C-TransformerRPE",    "transformer_rpe",      FEATURE_DIM, {}),
-    ("D-TransformerRegime", "transformer_regime",   FEATURE_DIM, {}),
-    ("E-RegimeRPE",         "regime_rpe_transformer", FEATURE_DIM, {}),
-    # Improved prototype-based regime generator (anti-collapse)
-    ("R2-Regime2",          "transformer_regime2", FEATURE_DIM, {}),
-    ("R3-RegimeRPE2",       "regime_rpe_transformer2", FEATURE_DIM, {}),
-    # F: regime-specific dynamics + soft mixing + regime-aware RPE
-    ("F-RegimeDynamic",     "regime_dynamic_transformer", FEATURE_DIM, {}),
-    # F2: F + market-dynamics state reconstruction target
-    ("F2-RegimeSemantic",   "regime_dynamic_semantic", FEATURE_DIM, {}),
-    # ── Component ablations ──
-    ("-TypeProj",           "no_type_proj",     FEATURE_DIM, {}),
-    ("-LearnGraph",         "no_learn_graph",   FEATURE_DIM, {}),
-    ("-MixHop",             "no_mixhop",        FEATURE_DIM, {}),
-    ("-Gate",               "no_gate",          FEATURE_DIM, {}),
-    ("-GCN",                "lstm_only",        FEATURE_DIM, {}),
-    ("-LSTM",               "gcn_only",         FEATURE_DIM, {}),
-    ("-MultiHorizon",       "single_horizon",   FEATURE_DIM, {}),
-    ("-Feat21",             "feat7",            7,           {}),
+VARIANTS = [
+    ("+TempWeighted", "temporal_weighted_graph"),
+    ("F-RegimeDynamic", "regime_dynamic_transformer"),
+    ("F2-RegimeSemantic", "regime_dynamic_semantic"),
 ]
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description='HeteroMixHopCMGM ablation study')
-    p.add_argument('--epochs', type=int, default=NUM_EPOCHS)
-    p.add_argument('--batch-size', type=int, default=BATCH_SIZE)
-    p.add_argument('--seq-len', type=int, default=SEQ_LEN)
-    p.add_argument('--seed', type=int, default=RANDOM_SEED)
-    p.add_argument('--patience', type=int, default=PATIENCE)
-    p.add_argument('--no-cuda', action='store_true')
-    p.add_argument('--variants', type=str, default=None,
-                   help='Comma-separated display names, e.g. "Full,no_gate"')
-    return p.parse_args()
+    parser = argparse.ArgumentParser(description="Retained HeteroMixHop ablations")
+    parser.add_argument("--epochs", type=int, default=NUM_EPOCHS)
+    parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
+    parser.add_argument("--seq-len", type=int, default=SEQ_LEN)
+    parser.add_argument("--seed", type=int, default=RANDOM_SEED)
+    parser.add_argument("--patience", type=int, default=PATIENCE)
+    parser.add_argument("--no-cuda", action="store_true")
+    parser.add_argument(
+        "--variants",
+        help="Comma-separated display or internal names; defaults to all retained variants",
+    )
+    return parser.parse_args()
 
 
-def build_data(args, feat_dim):
-    """Build train/val/test loaders for a given feature dim."""
+def build_data(args):
+    """Build the shared 21-feature train/validation/test pipeline once."""
     data = create_data_loaders(batch_size=args.batch_size, seq_len=args.seq_len)
+    raw_full = np.concatenate(
+        [data["raw_prices_train"], data["raw_prices_val"], data["raw_prices_test"]],
+        axis=0,
+    )
+    feat_raw, _ = build_feature_matrix(raw_full)
+    train_size = data["raw_prices_train"].shape[0]
+    feat_mean = feat_raw[:train_size].mean(axis=0, keepdims=True)
+    feat_std = np.maximum(
+        feat_raw[:train_size].std(axis=0, keepdims=True), FEAT_ZSCORE_EPS
+    )
+    features = (feat_raw - feat_mean) / feat_std
 
-    raw_full = np.concatenate([
-        data['raw_prices_train'], data['raw_prices_val'], data['raw_prices_test'],
-    ], axis=0)
-
-    # ── Features: 21-dim (build_feature_matrix) or 7-dim (compute_features) ──
-    if feat_dim == 21:
-        feat_raw, _ = build_feature_matrix(raw_full)          # (T, N, 21)
-    else:
-        feat_raw = compute_features(raw_full)                 # (T, N, 7)
-
-    train_sz = data['raw_prices_train'].shape[0]
-    feat_train = feat_raw[:train_sz]
-    feat_mean = feat_train.mean(axis=(0,), keepdims=True)
-    feat_std  = np.maximum(feat_train.std(axis=(0,), keepdims=True), FEAT_ZSCORE_EPS)
-    feat_tensor = (feat_raw - feat_mean) / feat_std
-
-    # ── Z-scored prices (for X base) ──
-    norm_mean = data['norm_stats']['mean']
-    norm_std  = data['norm_stats']['std']
-    full_norm = (raw_full - norm_mean) / norm_std
-
-    T = feat_raw.shape[0]
-    tr, va = int(T * 0.7), int(T * 0.7) + int(T * 0.15)
-    feat_splits = [feat_tensor[:tr], feat_tensor[tr:va], feat_tensor[va:]]
-    norm_splits = [full_norm[:tr], full_norm[tr:va], full_norm[va:]]
-    raw_splits  = [data['raw_prices_train'],
-                   data['raw_prices_val'],
-                   data['raw_prices_test']]
-
-    # Multi-horizon for return targets; single primary horizon otherwise
-    use_multi = (TARGET_TYPE == "return")
-    hrz = MULTI_HORIZONS if use_multi else [TARGET_HORIZON]
-
-    dss = {k: MarketSequenceDataset(
-               n, data['market_indices'], args.seq_len,
-               feature_matrix=f, raw_prices=r, target_type=TARGET_TYPE,
-               horizons=hrz,
-           )
-           for k, n, f, r in zip(['train','val','test'],
-                                  norm_splits, feat_splits, raw_splits)}
-    loaders = {k: DataLoader(dss[k], batch_size=args.batch_size, shuffle=False,
-                             drop_last=(k=='train')) for k in ['train','val','test']}
-
-    data['loaders'] = loaders
-    data['feat_splits'] = feat_splits
-    data['norm_splits'] = norm_splits
-    data['raw_splits'] = raw_splits
+    norm_mean = data["norm_stats"]["mean"]
+    norm_std = data["norm_stats"]["std"]
+    normalized = (raw_full - norm_mean) / norm_std
+    train_end = int(len(raw_full) * 0.7)
+    val_end = train_end + int(len(raw_full) * 0.15)
+    feature_splits = [features[:train_end], features[train_end:val_end], features[val_end:]]
+    norm_splits = [normalized[:train_end], normalized[train_end:val_end], normalized[val_end:]]
+    raw_splits = [
+        data["raw_prices_train"],
+        data["raw_prices_val"],
+        data["raw_prices_test"],
+    ]
+    horizons = MULTI_HORIZONS if TARGET_TYPE == "return" else [TARGET_HORIZON]
+    datasets = {
+        split: MarketSequenceDataset(
+            norm,
+            data["market_indices"],
+            args.seq_len,
+            feature_matrix=feature,
+            raw_prices=raw,
+            target_type=TARGET_TYPE,
+            horizons=horizons,
+        )
+        for split, norm, feature, raw in zip(
+            ("train", "val", "test"), norm_splits, feature_splits, raw_splits
+        )
+    }
+    data["loaders"] = {
+        split: DataLoader(
+            dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            drop_last=split == "train",
+        )
+        for split, dataset in datasets.items()
+    }
     return data
 
 
-def build_single_horizon_data(args, data, feat_splits, norm_splits, raw_splits):
-    """Loaders with only the primary horizon (for single_horizon variant)."""
-    dss = {k: MarketSequenceDataset(
-               n, data['market_indices'], args.seq_len,
-               feature_matrix=f, raw_prices=r, target_type=TARGET_TYPE,
-               horizons=[TARGET_HORIZON],
-           )
-           for k, n, f, r in zip(['train','val','test'],
-                                  norm_splits, feat_splits, raw_splits)}
-    return {k: DataLoader(dss[k], batch_size=args.batch_size, shuffle=False,
-                          drop_last=(k=='train')) for k in ['train','val','test']}
-
-
 def evaluate_primary_horizon(model, loader, data, device):
-    """Evaluate on primary horizon (5d) — handles multi and single output."""
-    h_idx = MULTI_HORIZONS.index(TARGET_HORIZON)
     model.eval()
-    all_p, all_t = [], []
+    predictions, targets = [], []
+    horizon_index = MULTI_HORIZONS.index(TARGET_HORIZON)
     with torch.no_grad():
-        for batch in loader:
-            X_batch, y_batch = batch[0], batch[1]
-            X_batch = X_batch.to(device)
-            pred = model(X_batch)                    # (B, H, Nc) or (B, Nc)
-            pred_np = pred.cpu().numpy()
-            y_np = y_batch.numpy()
-            if pred_np.ndim == 3:
-                pred_np = pred_np[:, h_idx, :]
-            if y_np.ndim == 3:
-                y_np = y_np[:, h_idx, :]
-            all_p.append(pred_np)
-            all_t.append(y_np)
-    p, t = np.concatenate(all_p), np.concatenate(all_t)
-    mn = compute_metrics(p, t)
-    po, to = inverse_transform_predictions(
-        p, t, data['norm_stats'], data['raw_prices_test'],
-        data['market_indices'], target_type=TARGET_TYPE,
+        for x_batch, y_batch in loader:
+            pred = model(x_batch.to(device)).cpu().numpy()
+            target = y_batch.numpy()
+            if pred.ndim == 3:
+                pred = pred[:, horizon_index, :]
+            if target.ndim == 3:
+                target = target[:, horizon_index, :]
+            predictions.append(pred)
+            targets.append(target)
+
+    pred = np.concatenate(predictions)
+    target = np.concatenate(targets)
+    normalized_metrics = compute_metrics(pred, target)
+    pred_original, target_original = inverse_transform_predictions(
+        pred,
+        target,
+        data["norm_stats"],
+        data["raw_prices_test"],
+        data["market_indices"],
+        target_type=TARGET_TYPE,
     )
-    return mn, compute_metrics(po, to)
+    return normalized_metrics, compute_metrics(pred_original, target_original), target
 
 
-def run_variant(name, variant, feat_dim, kwargs, args, device, data21, data7):
+def print_diagnostics(model, variant, test_loader, device):
+    x_batch = next(iter(test_loader))[0][:16].to(device)
+    model.eval()
+    with torch.no_grad():
+        model(x_batch)
+
+    alpha = model.last_alpha
+    print(
+        f"  Temporal weights: mean={alpha.mean().item():.4f} "
+        f"std={alpha.std().item():.4f} min={alpha.min().item():.4f} "
+        f"max={alpha.max().item():.4f}"
+    )
+    if variant.startswith("regime_dynamic"):
+        probabilities = model.regime_dynamic.last_regime_p
+        mean_probability = probabilities.mean(dim=(0, 1)).cpu().numpy()
+        entropy = -(probabilities * (probabilities + 1e-9).log()).sum(dim=-1).mean()
+        print(
+            f"  Regime probabilities: {np.round(mean_probability, 4)}; "
+            f"entropy={entropy.item():.4f}"
+        )
+        if variant == "regime_dynamic_semantic":
+            centers = model.regime_dynamic.state_centers.detach().cpu().numpy()
+            print(f"  Semantic state centers:\n{np.round(centers, 4)}")
+
+
+def run_variant(name, variant, args, device, data):
     set_seed(args.seed)
-    print(f"\n{'=' * 90}")
-    print(f"  ABLATION: {name}  (variant={variant}, feat_dim={feat_dim}, {kwargs})")
-    print(f"{'=' * 90}")
-    t0 = time.time()
+    n_stock = data["market_indices"]["stock"][1] - data["market_indices"]["stock"][0]
+    n_bond = data["market_indices"]["bond"][1] - data["market_indices"]["bond"][0]
+    model = HeteroMixHopCMGM(
+        data["n_nodes"],
+        data["n_commodities"],
+        n_stock=n_stock,
+        n_bond=n_bond,
+        variant=variant,
+        feat_dim=FEATURE_DIM,
+    ).to(device)
+    parameter_count = sum(parameter.numel() for parameter in model.parameters())
+    print(f"\n{name} ({variant}) — {parameter_count:,} parameters")
 
-    # ── Data ──
-    feat_splits = data21['feat_splits']
-    norm_splits = data21['norm_splits']
-    raw_splits  = data21['raw_splits']
-    if feat_dim == 7:
-        data = data7
-        feat_splits = data7['feat_splits']
-        norm_splits = data7['norm_splits']
-        raw_splits  = data7['raw_splits']
-    else:
-        data = data21
+    started = time.time()
+    empty_edges = torch.empty(2, 0, dtype=torch.long)
+    empty_weights = torch.zeros(0)
+    train(
+        model,
+        data["loaders"]["train"],
+        data["loaders"]["val"],
+        empty_edges,
+        empty_weights,
+        device,
+        num_epochs=args.epochs,
+        patience=args.patience,
+    )
+    normalized, original, target = evaluate_primary_horizon(
+        model, data["loaders"]["test"], data, device
+    )
+    print_diagnostics(model, variant, data["loaders"]["test"], device)
 
-    if variant == "single_horizon":
-        loaders = build_single_horizon_data(args, data, feat_splits, norm_splits, raw_splits)
-    else:
-        loaders = data['loaders'] if feat_dim == 21 else data7['loaders']
-
-    # ── Model ──
-    n_stock = data['market_indices']['stock'][1] - data['market_indices']['stock'][0]
-    n_bond  = data['market_indices']['bond'][1] - data['market_indices']['bond'][0]
-    model = HeteroMixHopCMGM(data['n_nodes'], data['n_commodities'],
-                             n_stock=n_stock, n_bond=n_bond,
-                             variant=variant, feat_dim=feat_dim, **kwargs).to(device)
-
-    # ── alpha=0 check: with α=0, pred must strictly equal base_pred
-    #    (the base path is line-for-line the original edge_attn forward) ──
-    if variant == "comm_output_residual":
-        try:
-            x_chk = next(iter(loaders['test']))[0][:8].to(device)
-            with torch.no_grad():
-                model.residual_alpha.fill_(0.0)
-                p_res = model(x_chk)
-                p_base = model.last_base_pred
-                diff = (p_res - p_base).abs().max().item()
-                model.residual_alpha.data.fill_(0.01)
-            print(f"  [alpha=0 check] max|pred − base_pred| = {diff:.2e}  "
-                  f"({'PASS' if diff < 1e-6 else 'FAIL'})")
-        except Exception as e:
-            print(f"  [alpha=0 check] skipped: {e}")
-
-    # ── Static graph for variants without adaptive learner ──
-    if variant in ("no_learn_graph", "edge_attn_static"):
-        graph = build_graph(data['train_returns'], data['market_indices'], method='pearson')
-        ei, ew = graph['edge_index'], graph['edge_weight']
-        A = to_dense_adj(ei, edge_attr=ew)[0].to(device)   # (N, N)
-        model.static_A.copy_(A)
-        print(f"  [Static graph] Pearson top-10 dense adjacency: {tuple(A.shape)}")
-
-    # ── Dual EWMA graphs for multi-scale graph variant ──
-    if variant == "multiscale_graph":
-        A_short = build_ewma_graph(data['train_returns'], lam=0.9).to(device)
-        A_long  = build_ewma_graph(data['train_returns'], lam=0.99).to(device)
-        model.static_A_short.copy_(A_short)
-        model.static_A_long.copy_(A_long)
-        print(f"  [EWMA graphs] short λ=0.9: {tuple(A_short.shape)}  "
-              f"long λ=0.99: {tuple(A_long.shape)}")
-
-    n_params = sum(p.numel() for p in model.parameters())
-    print(f"  Params: {n_params:,}")
-
-    # ── Train ──
-    dummy = torch.empty(2, 0, dtype=torch.long), torch.zeros(0)
-    history = train(model, loaders['train'], loaders['val'],
-                    dummy[0], dummy[1], device,
-                    num_epochs=args.epochs, patience=args.patience)
-
-    # ── Evaluate on primary horizon ──
-    mn, mo = evaluate_primary_horizon(model, loaders['test'], data, device)
-
-    # ── Oversmoothing diagnostic (market_node variants) ──
-    if variant in ("market_node", "market_node_no_graph") and hasattr(model, 'node_similarity'):
-        try:
-            x_diag = next(iter(loaders['test']))[0][:16].to(device)
-            sim = model.node_similarity(x_diag)
-            print(f"  [Node similarity] commodity pairwise cosine: "
-                  f"mean={sim['sim_mean']:.4f}  std={sim['sim_std']:.4f}  "
-                  f"({'oversmoothed' if sim['sim_mean'] > 0.9 else 'distinct'})")
-        except Exception as e:
-            print(f"  [Node similarity] skipped: {e}")
-
-    # ── E6: per-layer oversmoothing diagnostic (mkt_node variants) ──
-    if variant == "mkt_node" and kwargs.get('graph_cfg', 'full') != 'none':
-        try:
-            x_diag = next(iter(loaders['test']))[0][:16].to(device)
-            ls = model.layer_similarity(x_diag)
-            print("  [E6 layer similarity]  all-node        commodity")
-            for layer in ['input', 'layer1', 'layer2']:
-                print(f"    {layer:<8s}  mean={ls[f'{layer}_all_mean']:.4f} "
-                      f"(std {ls[f'{layer}_all_std']:.4f})   "
-                      f"mean={ls[f'{layer}_comm_mean']:.4f} "
-                      f"(std {ls[f'{layer}_comm_std']:.4f})")
-        except Exception as e:
-            print(f"  [E6 layer similarity] skipped: {e}")
-
-    # ── E3: gate statistics ──
-    if variant == "mkt_node" and kwargs.get('graph_cfg') == 'gate':
-        try:
-            x_diag = next(iter(loaders['test']))[0][:16].to(device)
-            model.eval()
-            with torch.no_grad():
-                model(x_diag)
-                g = model.last_gate
-            print(f"  [E3 gate] mean={g.mean().item():.4f} std={g.std().item():.4f} "
-                  f"min={g.min().item():.4f} max={g.max().item():.4f}")
-        except Exception as e:
-            print(f"  [E3 gate] skipped: {e}")
-
-    # ── comm_output_residual diagnostics ──
-    if variant == "comm_output_residual":
-        try:
-            base_preds, res_preds, targs = [], [], []
-            model.eval()
-            with torch.no_grad():
-                for batch in loaders['test']:
-                    Xb, yb = batch[0], batch[1]
-                    pred = model(Xb.to(device))
-                    base_preds.append(model.last_base_pred.cpu().numpy())
-                    res_preds.append(model.last_residual.cpu().numpy())
-                    targs.append(yb.numpy())
-            bp = np.concatenate(base_preds)
-            rp = np.concatenate(res_preds)
-            tt = np.concatenate(targs)
-            if tt.ndim == 3:  # multi-horizon: extract primary horizon
-                h_idx = MULTI_HORIZONS.index(TARGET_HORIZON)
-                bp, rp, tt = bp[:, h_idx, :], rp[:, h_idx, :], tt[:, h_idx, :]
-            base_mae = float(np.mean(np.abs(tt - bp)))
-            res_mag = float(np.mean(np.abs(rp)))
-            base_err = (tt - bp).ravel()
-            corr = float(np.corrcoef(base_err, rp.ravel())[0, 1])
-            alpha = model.residual_alpha.item()
-            print(f"  [comm_output_residual] α={alpha:.4f}  "
-                  f"base MAE={base_mae:.6f}  final MAE={mn['MAE']:.6f}  "
-                  f"residual magnitude={res_mag:.6f}  "
-                  f"corr(base_err, residual)={corr:+.4f}")
-        except Exception as e:
-            print(f"  [comm_output_residual diagnostics] skipped: {e}")
-
-    # ── temp_weighted_comm_cond: conditioning + shuffled control ──
-    if variant == "temp_weighted_comm_cond":
-        try:
-            base_preds, real_preds, shuf_preds, targs = [], [], [], []
-            model.eval()
-            with torch.no_grad():
-                for batch in loaders['test']:
-                    Xb, yb = batch[0], batch[1]
-                    pred_real = model(Xb.to(device))
-                    model.shuffle_comm = True
-                    pred_shuf = model(Xb.to(device))
-                    model.shuffle_comm = False
-                    real_preds.append(pred_real.cpu().numpy())
-                    shuf_preds.append(pred_shuf.cpu().numpy())
-                    base_preds.append(model.last_base_pred.cpu().numpy())
-                    targs.append(yb.numpy())
-            rp = np.concatenate(real_preds)
-            sp = np.concatenate(shuf_preds)
-            bp = np.concatenate(base_preds)
-            tt = np.concatenate(targs)
-            if tt.ndim == 3:
-                h_idx = MULTI_HORIZONS.index(TARGET_HORIZON)
-                rp, sp, bp, tt = rp[:, h_idx, :], sp[:, h_idx, :], bp[:, h_idx, :], tt[:, h_idx, :]
-            mae_final = float(np.mean(np.abs(tt - rp)))
-            mae_shuf = float(np.mean(np.abs(tt - sp)))
-            mae_base = float(np.mean(np.abs(tt - bp)))
-            alpha = model.alpha.item()
-            print(f"  [comm_cond] α={alpha:.4f}  cond_mag={model.last_cond_mag:.6f}")
-            print(f"    base MAE={mae_base:.6f}  final MAE={mae_final:.6f}  "
-                  f"shuffled MAE={mae_shuf:.6f}")
-            print(f"    real−base Δ={mae_final - mae_base:+.6f}  "
-                  f"shuffled−base Δ={mae_shuf - mae_base:+.6f}")
-        except Exception as e:
-            print(f"  [comm_cond diagnostics] skipped: {e}")
-
-    # ── RegimeRPETransformer family: regime + attention diagnostics ──
-    if variant in ("transformer_temporal", "transformer_rpe",
-                   "transformer_regime", "regime_rpe_transformer",
-                   "transformer_regime2", "regime_rpe_transformer2"):
-        try:
-            x_diag, y_diag = next(iter(loaders['test']))
-            x_diag = x_diag[:16].to(device)
-            y_diag = y_diag[:16]
-            model.eval()
-            with torch.no_grad():
-                model(x_diag)
-                attn = model.temporal_transformer.last_attn        # (B, T)
-            a = attn.detach().cpu().numpy()
-            print(f"  [temporal attention] mean={a.mean():.4f} std={a.std():.4f} "
-                  f"entropy={-(a*np.log(a+1e-9)).sum(axis=1).mean():.4f} "
-                  f"max={a.max(axis=1).mean():.4f}")
-            if hasattr(model.temporal_transformer, 'last_regime_p'):
-                p = model.temporal_transformer.last_regime_p.cpu().numpy()  # (B, T, K)
-                K = p.shape[-1]
-                pm = p.mean(axis=(0, 1))
-                print(f"  [regime p] mean={np.round(pm, 4)} std={p.std():.4f} "
-                      f"min={p.min():.4f} max={p.max():.4f}")
-                for t in range(0, 20, 2):
-                    print(f"    t={t}: {np.round(p[:, t, :].mean(axis=0), 4)}")
-                ent = -(p * np.log(p + 1e-9)).sum(axis=-1)
-                print(f"  [regime entropy] mean={ent.mean():.4f} std={ent.std():.4f} "
-                      f"(log(K)={np.log(K):.4f})")
-                trans = np.abs(np.diff(p, axis=1)).sum(axis=-1)
-                print(f"  [state transition] mean ||p_t−p_{{t−1}}||_1 = {trans.mean():.4f}")
-                # state-specific weighted statistics on 5d returns
-                y_np = y_diag.numpy()
-                if y_np.ndim == 3:
-                    h_idx = MULTI_HORIZONS.index(TARGET_HORIZON)
-                    y_np = y_np[:, h_idx, :]
-                y_mean = y_np.mean(axis=-1)[:16]                   # (B,) market mean ret
-                print("  [state-specific stats] (soft-weighted)")
-                for k in range(K):
-                    w = p[:, :, k]                                 # (B, T)
-                    # align y with p: y is per-sample (B,), p per (B, T)
-                    wb = w.mean(axis=1)                            # (B,) per-sample weight
-                    denom = wb.sum() + 1e-8
-                    m_ret = (wb * y_mean).sum() / denom
-                    m_abs = (wb * np.abs(y_mean)).sum() / denom
-                    m_vol = np.sqrt((wb * (y_mean - m_ret) ** 2).sum() / denom)
-                    print(f"    regime {k}: weight={wb.mean():.3f} "
-                          f"mean_ret={m_ret:+.6f} mean_abs={m_abs:.6f} vol={m_vol:.6f}")
-                # prototype cosine (if prototype-based)
-                rg = model.temporal_transformer.regime_gen
-                if hasattr(rg, 'prototype_cosine'):
-                    with torch.no_grad():
-                        pc = rg.prototype_cosine().item()
-                    print(f"  [prototype cosine] mean pairwise = {pc:.4f}")
-                    # gradient diagnostics
-                    model.train()
-                    model.zero_grad()
-                    loss_d = nn.MSELoss()(model(x_diag),
-                                          torch.FloatTensor(y_diag).to(device))
-                    loss_d.backward()
-                    g_proto = rg.regime_prototypes.grad
-                    g_enc = rg.context_encoder[0].weight.grad
-                    print(f"  [grad] ||∇prototypes||={g_proto.norm().item():.4f} "
-                          f"||∇context_enc||={g_enc.norm().item():.4f}")
-                    model.eval()
-        except Exception as e:
-            print(f"  [regime/attention diagnostics] skipped: {e}")
-
-    # ── F / F2: RegimeDynamic complete diagnostics ──
-    if variant in ("regime_dynamic_transformer", "regime_dynamic_semantic"):
-        try:
-            x_diag, y_diag = next(iter(loaders['test']))
-            x_diag = x_diag[:16].to(device)
-            y_diag = y_diag[:16]
-            rd = model.regime_dynamic
-            model.eval()
-            with torch.no_grad():
-                model(x_diag)
-                p = rd.last_regime_p.cpu().numpy()           # (B, T, K)
-                zs = rd.last_zs.cpu().numpy()                # (K, B, T, 128)
-            K = p.shape[-1]
-            pm = p.mean(axis=(0, 1))
-            print(f"  [F regime p] mean={np.round(pm, 4)} std={p.std():.4f} "
-                  f"min={p.min():.4f} max={p.max():.4f}")
-            for t in range(0, 20, 2):
-                print(f"    t={t}: {np.round(p[:, t, :].mean(axis=0), 4)}")
-            ent = -(p * np.log(p + 1e-9)).sum(axis=-1)
-            print(f"  [F entropy] mean={ent.mean():.4f} std={ent.std():.4f} (logK={np.log(K):.4f})")
-            trans = np.abs(np.diff(p, axis=1)).sum(axis=-1)
-            print(f"  [F transition] mean ||p_t−p_{{t−1}}||_1 = {trans.mean():.4f}")
-            # prototype cosine
-            with torch.no_grad():
-                P = rd.regime_gen.regime_prototypes
-                Pn = P / P.norm(dim=-1, keepdim=True)
-                c = (Pn @ Pn.T).cpu().numpy()
-                mask = ~np.eye(K, dtype=bool)
-                print(f"  [F prototype cosine] pairwise={np.round(c[mask], 4)} "
-                      f"mean={c[mask].mean():.4f}")
-            # adapter similarity
-            zn = zs.reshape(K, -1)
-            zn = zn / (np.linalg.norm(zn, axis=-1, keepdims=True) + 1e-8)
-            cos_ij = zn @ zn.T
-            print(f"  [F adapter cosine] cos12={cos_ij[0,1]:.4f} cos13={cos_ij[0,2]:.4f} "
-                  f"cos23={cos_ij[1,2]:.4f}")
-            # ── F2 state diagnostics ──
-            if hasattr(rd, 'state_centers'):
-                sc = rd.state_centers.detach().cpu().numpy()       # (K, 3)
-                print(f"  [F2 state centers]")
-                for k in range(K):
-                    print(f"    center_{k} = {np.round(sc[k], 4)}")
-                # pairwise distance between centers
-                dmat = np.linalg.norm(sc[:, None] - sc[None, :], axis=-1)
-                maskd = ~np.eye(K, dtype=bool)
-                print(f"  [F2 center distances] pairwise={np.round(dmat[maskd], 4)}")
-                # reconstruction error (using stored m_t)
-                m_t = getattr(rd, 'last_m_t', None)
-                if m_t is not None:
-                    mt = m_t.cpu().numpy()
-                    p_np = p
-                    m_hat = np.einsum('btk,kd->btd', p_np, sc)
-                    recon = float(np.mean((m_hat - mt) ** 2))
-                    print(f"  [F2 reconstruction] mean ||m_hat−m||² = {recon:.6f}")
-                    # state-specific weighted m (p_last)
-                    p_last = p_np[:, -1, :]                        # (B, K)
-                    print("  [F2 state semantics] (weighted by p_last)")
-                    for k in range(K):
-                        w = p_last[:, k]
-                        denom = w.sum() + 1e-8
-                        wm = np.array([(w * mt[:, -1, d]).sum() / denom
-                                       for d in range(3)])
-                        print(f"    state {k}: weight={w.mean():.3f} "
-                              f"m=[abs_ret={wm[0]:+.4f} vol={wm[1]:+.4f} slope={wm[2]:+.4f}]")
-                    # regime temporal event test: high-vol vs normal windows
-                    vol_t = mt[:, :, 1]
-                    hi = vol_t.max(axis=1).mean()
-                    lo = vol_t.min(axis=1).mean()
-                    print(f"  [F2 event test] vol range: min={lo:.4f} max={hi:.4f}")
-            # gradient diagnostics
-            model.train()
-            model.zero_grad()
-            loss_d = nn.MSELoss()(model(x_diag), torch.FloatTensor(y_diag).to(device))
-            loss_d.backward()
-            grads = [('prototypes', rd.regime_gen.regime_prototypes),
-                     ('context_enc', rd.regime_gen.context_encoder[0].weight),
-                     ('transition', rd.regime_gen.transition_matrix),
-                     ('adapter1', rd.adapters.adapters[0][0].weight),
-                     ('adapter2', rd.adapters.adapters[1][0].weight),
-                     ('adapter3', rd.adapters.adapters[2][0].weight)]
-            if hasattr(rd, 'state_centers'):
-                grads.append(('state_centers', rd.state_centers))
-            for name, par in grads:
-                g = par.grad
-                print(f"  [F grad] ||∇{name}|| = {g.norm().item():.4f}" if g is not None
-                      else f"  [F grad] {name}: None")
-            model.eval()
-            # forced regime perturbation
-            print("  [F forced regime] h_temporal / pred differences vs real")
-            with torch.no_grad():
-                h_real = rd.fc(rd.last_z.mean(dim=1)) if hasattr(rd, 'last_z') else None
-                for rname, onehot in [('real', None), ('r1', [1, 0, 0]),
-                                      ('r2', [0, 1, 0]), ('r3', [0, 0, 1])]:
-                    rd.forced_regime = (None if onehot is None
-                                        else torch.tensor(onehot, dtype=torch.float32, device=device))
-                    pred_f = model(x_diag)
-                    h_t = rd.fc((rd.last_z).mean(dim=1))
-                    print(f"    {rname}: h_temporal_norm={h_t.norm().item():.4f} "
-                          f"pred_norm={pred_f.norm().item():.4f}")
-                rd.forced_regime = None
-            # semantic diagnostics using p_last
-            p_last = p[:, -1, :]                                 # (B, K)
-            y_np = y_diag.numpy()
-            if y_np.ndim == 3:
-                h_idx = MULTI_HORIZONS.index(TARGET_HORIZON)
-                y_np = y_np[:, h_idx, :]
-            y_mean = y_np.mean(axis=-1)[:16]
-            print("  [F regime semantics] (soft-weighted by p_last)")
-            for k in range(K):
-                w = p_last[:, k]
-                denom = w.sum() + 1e-8
-                m_ret = (w * y_mean).sum() / denom
-                m_abs = (w * np.abs(y_mean)).sum() / denom
-                m_vol = np.sqrt((w * (y_mean - m_ret) ** 2).sum() / denom)
-                print(f"    regime {k}: weight={w.mean():.3f} mean_ret={m_ret:+.6f} "
-                      f"mean_abs={m_abs:.6f} vol={m_vol:.6f}")
-            # causality test (future perturbation)
-            with torch.no_grad():
-                x2 = x_diag.clone()
-                x2[:, 10:, :, :] = torch.randn_like(x2[:, 10:, :, :])
-                E1 = rd.proj(x_diag.reshape(16, 20, -1))
-                E2 = rd.proj(x2.reshape(16, 20, -1))
-                p1 = rd.regime_gen(E1)
-                p2 = rd.regime_gen(E2)
-                cdiff = (p1[:, :9] - p2[:, :9]).abs().max().item()
-            print(f"  [F causality] max p diff at t<10 = {cdiff:.3e} "
-                  f"({'PASS' if cdiff < 1e-6 else 'FAIL'})")
-        except Exception as e:
-            print(f"  [F diagnostics] skipped: {e}")
-
-    # ── temporal_weighted_graph / temporal_cross_weighted: alpha diagnostics ──
-    if variant in ("temporal_weighted_graph", "temporal_cross_weighted"):
-        try:
-            x_diag = next(iter(loaders['test']))[0][:16].to(device)
-            model.eval()
-            with torch.no_grad():
-                model(x_diag)
-                a = model.last_alpha          # (B, T, N)
-            print(f"  [alpha] mean={a.mean().item():.4f} std={a.std().item():.4f} "
-                  f"min={a.min().item():.4f} max={a.max().item():.4f}")
-            per_t = a.mean(dim=(0, 2)).cpu().numpy()   # (T,)
-            print(f"  [alpha per t] " + " ".join(f"{i}:{v:.3f}" for i, v in enumerate(per_t)))
-        except Exception as e:
-            print(f"  [alpha diagnostics] skipped: {e}")
-
-    # ── Learned residual scale (comm_residual) ──
-    if variant == "comm_residual":
-        print(f"  [comm_residual] learned α = {model.comm_alpha.item():.4f}  "
-              f"({'≈0 → degenerates to pooled' if abs(model.comm_alpha.item()) < 0.01 else 'residual active'})")
-
-    # ── E7: graph contribution test (final model = mkt_node full) ──
-    if variant == "mkt_node" and kwargs.get('graph_cfg', 'full') == 'full':
-        try:
-            x_diag = next(iter(loaders['test']))[0][:16].to(device)
-            print("  [E7 graph contribution]")
-            for mode in ['normal', 'zero', 'identity']:
-                model.graph_mode = mode
-                mn_m, _ = evaluate_primary_horizon(model, loaders['test'], data, device)
-                print(f"    graph_mode={mode:<8s} MAE={mn_m['MAE']:.6f} "
-                      f"Hit%={mn_m.get('Hit_Ratio', float('nan'))*100:.1f}")
-            model.graph_mode = 'normal'
-        except Exception as e:
-            print(f"  [E7 graph contribution] skipped: {e}")
-
-    # ── Zero baseline (always 0 for returns, mean vol otherwise) ──
-    # NOTE: must use PRIMARY horizon only — y from multi-horizon loaders is (N, H, Nc)
-    from cmgm.baselines.traditional import prepare_sklearn_data
-    X_te, y_te = prepare_sklearn_data(loaders['test'])
-    if y_te.ndim == 3:
-        h_idx = MULTI_HORIZONS.index(TARGET_HORIZON)
-        y_te = y_te[:, h_idx, :]
-    if TARGET_TYPE == "volatility":
-        zero_preds = np.tile(y_te.mean(axis=0, keepdims=True), (len(y_te), 1))
-    else:
-        zero_preds = np.zeros_like(y_te)
-    mn_zero = compute_metrics(zero_preds, y_te)
-    vs_zero = (mn['MAE'] - mn_zero['MAE']) / mn_zero['MAE'] * 100
-
-    hit = mn.get('Hit_Ratio', float('nan'))
-    result = {
-        'variant': name,
-        'params': n_params,
-        'time': time.time() - t0,
-        'MAE': mn['MAE'],
-        'RMSE': mn['RMSE'],
-        'MSE': mn['MSE'],
-        'Hit_Ratio': hit,
-        'vs_zero_pct': vs_zero,
-        'mn': mn,     # full metrics dict for logger
-        'mo': mo,     # full original-space metrics dict for logger
+    zero_metrics = compute_metrics(np.zeros_like(target), target)
+    versus_zero = (normalized["MAE"] - zero_metrics["MAE"]) / zero_metrics["MAE"] * 100
+    elapsed = time.time() - started
+    hit_ratio = normalized.get("Hit_Ratio", float("nan"))
+    print(
+        f"  MAE={normalized['MAE']:.6f} RMSE={normalized['RMSE']:.6f} "
+        f"Hit={hit_ratio * 100:.1f}% vs-zero={versus_zero:+.2f}% ({elapsed:.0f}s)"
+    )
+    return {
+        "variant": name,
+        "params": parameter_count,
+        "time": elapsed,
+        "MAE": normalized["MAE"],
+        "RMSE": normalized["RMSE"],
+        "Hit_Ratio": hit_ratio,
+        "vs_zero_pct": versus_zero,
+        "mn": normalized,
+        "mo": original,
     }
-    print(f"\n  ── Result ──")
-    print(f"  MAE: {mn['MAE']:.6f}  RMSE: {mn['RMSE']:.6f}  "
-          f"Hit%: {hit*100:.1f}  vs Zero: {vs_zero:+.2f}%  [{time.time()-t0:.0f}s]")
-    return result
+
+
+def select_variants(requested):
+    if not requested:
+        return VARIANTS
+    names = {item.strip() for item in requested.split(",") if item.strip()}
+    selected = [item for item in VARIANTS if item[0] in names or item[1] in names]
+    matched = {value for item in selected for value in item}
+    unknown = names - matched
+    if unknown:
+        raise ValueError(f"Unknown variants: {', '.join(sorted(unknown))}")
+    return selected
 
 
 def main():
     args = parse_args()
-    device = torch.device('cuda' if torch.cuda.is_available() and not args.no_cuda else 'cpu')
-    print(f"Device: {device}  |  Epochs: {args.epochs}  |  Seed: {args.seed}")
-    print(f"Target: {TARGET_TYPE}  |  Primary horizon: {TARGET_HORIZON}d  |  "
-          f"Multi-horizons: {MULTI_HORIZONS}")
+    variants = select_variants(args.variants)
+    device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
+    print(
+        f"Device={device} target={TARGET_TYPE} horizon={TARGET_HORIZON} "
+        f"variants={[variant[0] for variant in variants]}"
+    )
+    data = build_data(args)
+    results = [run_variant(name, variant, args, device, data) for name, variant in variants]
 
-    # Filter variants if requested
-    variants = ALL_VARIANTS
-    if args.variants:
-        requested = [v.strip() for v in args.variants.split(',')]
-        variants = [v for v in ALL_VARIANTS if v[1] in requested or v[0] in requested]
-        print(f"Filtered to {len(variants)} variants: {[v[0] for v in variants]}")
+    print("\nRetained ablation summary")
+    print(f"{'Variant':<20} {'Params':>12} {'MAE':>10} {'RMSE':>10} {'Hit%':>8} {'vs Zero':>10}")
+    for result in results:
+        print(
+            f"{result['variant']:<20} {result['params']:>12,d} "
+            f"{result['MAE']:>10.6f} {result['RMSE']:>10.6f} "
+            f"{result['Hit_Ratio'] * 100:>7.1f}% {result['vs_zero_pct']:>+9.2f}%"
+        )
 
-    # ── Build data once (21-dim and 7-dim) ──
-    print("\n[Data] Building 21-dim feature pipeline...")
-    data21 = build_data(args, 21)
-    print("\n[Data] Building 7-dim feature pipeline...")
-    data7 = build_data(args, 7)
-
-    # ── Run all variants ──
-    results = []
-    for name, variant, feat_dim, kwargs in variants:
-        try:
-            r = run_variant(name, variant, feat_dim, kwargs, args, device, data21, data7)
-            results.append(r)
-        except Exception as e:
-            print(f"\n[FAILED] {name}: {e}")
-            import traceback; traceback.print_exc()
-            results.append({'variant': name, 'MAE': float('nan'),
-                            'RMSE': float('nan'), 'MSE': float('nan'),
-                            'Hit_Ratio': float('nan'), 'vs_zero_pct': float('nan'),
-                            'params': 0, 'time': 0,
-                            'mn': {'MAE': float('nan'), 'MSE': float('nan'),
-                                   'RMSE': float('nan'), 'Residual_Mean': float('nan'),
-                                   'Residual_Std': float('nan'), 'Skewness': float('nan')},
-                            'mo': {'MAE': float('nan'), 'MSE': float('nan'),
-                                   'RMSE': float('nan')}})
-
-    # ── Summary table ──
-    print("\n" + "=" * 100)
-    print("ABLATION STUDY — 5-day Return Space")
-    print("=" * 100)
-    print(f"{'Variant':<18s} {'Params':>10s} {'Time':>7s} {'MAE':>10s} "
-          f"{'RMSE':>10s} {'Hit%':>7s} {'vs Zero':>10s}")
-    print("-" * 100)
-    for r in results:
-        hit = r['Hit_Ratio']
-        hit_str = f"{hit*100:>6.1f}" if not np.isnan(hit) else "    nan"
-        vs = r['vs_zero_pct']
-        vs_str = f"{vs:>+9.2f}%" if not np.isnan(vs) else "      nan"
-        print(f"{r['variant']:<18s} {r['params']:>10,d} {r['time']:>6.0f}s "
-              f"{r['MAE']:>10.6f} {r['RMSE']:>10.6f} {hit_str} {vs_str}")
-    print("=" * 100)
-
-    # ── Log ──
     ExperimentLogger().log_run(
-        {'version': 'ablation-v1', 'epochs': args.epochs, 'seed': args.seed,
-         'target': TARGET_TYPE, 'horizon': TARGET_HORIZON},
-        [(r['variant'], r['time'], r['mn'], r['mo']) for r in results],
+        {
+            "version": "retained-ablation-v1",
+            "epochs": args.epochs,
+            "seed": args.seed,
+            "target": TARGET_TYPE,
+            "horizon": TARGET_HORIZON,
+        },
+        [(result["variant"], result["time"], result["mn"], result["mo"]) for result in results],
     )
     return results
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

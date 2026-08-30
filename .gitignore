@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Experiments (auto-generated)
+experiments/EXPERIMENTS.jsonl
+experiments/SUMMARY.md
+
+# Model checkpoints (large binary files)
+*.pth
+
+# Jupyter
+.ipynb_checkpoints/
