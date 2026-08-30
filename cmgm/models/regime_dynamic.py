@@ -168,7 +168,8 @@ class RegimeDynamicRPETransformer(nn.Module):
 
     def __init__(self, in_dim: int, d_model: int = 128, n_heads: int = 4,
                  n_layers: int = 2, ffn_dim: int = 256, dropout: float = 0.1,
-                 t_len: int = 20, K: int = 3, D_regime: int = 32):
+                 t_len: int = 20, K: int = 3, D_regime: int = 32,
+                 use_state_loss: bool = False):
         super().__init__()
         self.proj = nn.Linear(in_dim, d_model)
         self.regime_gen = SoftRegimeGeneratorV2(d_model, K, D_regime)
@@ -180,6 +181,10 @@ class RegimeDynamicRPETransformer(nn.Module):
         self.pool_score = nn.Linear(d_model, 1)
         self.fc = nn.Linear(d_model, 64)
         self.forced_regime = None   # diagnostic: one-hot (K,) or None
+        self.use_state_loss = use_state_loss
+        if use_state_loss:
+            # latent state centers: typical market-dynamics profile per regime
+            self.state_centers = nn.Parameter(torch.randn(K, 3) * 0.02)
 
     def forward(self, x_flat: torch.Tensor) -> torch.Tensor:
         # x_flat: (B, T, in_dim) → h_temporal (B, 64)
@@ -209,11 +214,14 @@ class RegimeDynamicRPETransformer(nn.Module):
         return self.fc(h)                                         # (B, 64)
 
     def dynamic_loss(self, lambda_dynamic: float = 0.001,
-                     lambda_balance: float = 0.001) -> torch.Tensor:
+                     lambda_balance: float = 0.001,
+                     lambda_state: float = 0.01) -> torch.Tensor:
         """
-        L = λd · L_dynamic_div + λb · L_balance
-          L_dynamic_div = mean pairwise cosine of adapter outputs (K, B*T*d)
-          L_balance     = Σ_k p̄_k·log(p̄_k·K) on batch-level p̄ (non-detached)
+        L = λd·L_dynamic_div + λb·L_balance [+ λs·L_state]
+          L_dynamic_div = mean pairwise cosine of adapter outputs
+          L_balance     = Σ_k p̄_k·log(p̄_k·K) on batch-level p̄
+          L_state       = MSE(Σ_k p_tk·μ_k, m_t)  (if use_state_loss)
+        All terms use NON-detached p / zs / m (full computational graph).
         """
         p = getattr(self, '_p_for_loss', None)
         zs = getattr(self, '_zs_for_loss', None)
@@ -226,4 +234,11 @@ class RegimeDynamicRPETransformer(nn.Module):
         l_dyn = cos[mask].mean()
         p_mean = p.mean(dim=(0, 1))                               # (K,)
         l_bal = (p_mean * torch.log(p_mean * K + 1e-8)).sum()
-        return lambda_dynamic * l_dyn + lambda_balance * l_bal
+        loss = lambda_dynamic * l_dyn + lambda_balance * l_bal
+        if self.use_state_loss:
+            m_t = getattr(self, '_m_t_for_loss', None)
+            if m_t is not None:
+                m_hat = torch.einsum('btk,kd->btd', p, self.state_centers)  # (B, T, 3)
+                self._m_hat_for_loss = m_hat
+                loss = loss + lambda_state * F.mse_loss(m_hat, m_t)
+        return loss

@@ -156,6 +156,8 @@ ALL_VARIANTS = [
     ("R3-RegimeRPE2",       "regime_rpe_transformer2", FEATURE_DIM, {}),
     # F: regime-specific dynamics + soft mixing + regime-aware RPE
     ("F-RegimeDynamic",     "regime_dynamic_transformer", FEATURE_DIM, {}),
+    # F2: F + market-dynamics state reconstruction target
+    ("F2-RegimeSemantic",   "regime_dynamic_semantic", FEATURE_DIM, {}),
     # ── Component ablations ──
     ("-TypeProj",           "no_type_proj",     FEATURE_DIM, {}),
     ("-LearnGraph",         "no_learn_graph",   FEATURE_DIM, {}),
@@ -520,8 +522,8 @@ def run_variant(name, variant, feat_dim, kwargs, args, device, data21, data7):
         except Exception as e:
             print(f"  [regime/attention diagnostics] skipped: {e}")
 
-    # ── F: RegimeDynamic complete diagnostics ──
-    if variant == "regime_dynamic_transformer":
+    # ── F / F2: RegimeDynamic complete diagnostics ──
+    if variant in ("regime_dynamic_transformer", "regime_dynamic_semantic"):
         try:
             x_diag, y_diag = next(iter(loaders['test']))
             x_diag = x_diag[:16].to(device)
@@ -556,17 +558,53 @@ def run_variant(name, variant, feat_dim, kwargs, args, device, data21, data7):
             cos_ij = zn @ zn.T
             print(f"  [F adapter cosine] cos12={cos_ij[0,1]:.4f} cos13={cos_ij[0,2]:.4f} "
                   f"cos23={cos_ij[1,2]:.4f}")
+            # ── F2 state diagnostics ──
+            if hasattr(rd, 'state_centers'):
+                sc = rd.state_centers.detach().cpu().numpy()       # (K, 3)
+                print(f"  [F2 state centers]")
+                for k in range(K):
+                    print(f"    center_{k} = {np.round(sc[k], 4)}")
+                # pairwise distance between centers
+                dmat = np.linalg.norm(sc[:, None] - sc[None, :], axis=-1)
+                maskd = ~np.eye(K, dtype=bool)
+                print(f"  [F2 center distances] pairwise={np.round(dmat[maskd], 4)}")
+                # reconstruction error (using stored m_t)
+                m_t = getattr(rd, 'last_m_t', None)
+                if m_t is not None:
+                    mt = m_t.cpu().numpy()
+                    p_np = p
+                    m_hat = np.einsum('btk,kd->btd', p_np, sc)
+                    recon = float(np.mean((m_hat - mt) ** 2))
+                    print(f"  [F2 reconstruction] mean ||m_hat−m||² = {recon:.6f}")
+                    # state-specific weighted m (p_last)
+                    p_last = p_np[:, -1, :]                        # (B, K)
+                    print("  [F2 state semantics] (weighted by p_last)")
+                    for k in range(K):
+                        w = p_last[:, k]
+                        denom = w.sum() + 1e-8
+                        wm = np.array([(w * mt[:, -1, d]).sum() / denom
+                                       for d in range(3)])
+                        print(f"    state {k}: weight={w.mean():.3f} "
+                              f"m=[abs_ret={wm[0]:+.4f} vol={wm[1]:+.4f} slope={wm[2]:+.4f}]")
+                    # regime temporal event test: high-vol vs normal windows
+                    vol_t = mt[:, :, 1]
+                    hi = vol_t.max(axis=1).mean()
+                    lo = vol_t.min(axis=1).mean()
+                    print(f"  [F2 event test] vol range: min={lo:.4f} max={hi:.4f}")
             # gradient diagnostics
             model.train()
             model.zero_grad()
             loss_d = nn.MSELoss()(model(x_diag), torch.FloatTensor(y_diag).to(device))
             loss_d.backward()
-            for name, par in [('prototypes', rd.regime_gen.regime_prototypes),
-                              ('context_enc', rd.regime_gen.context_encoder[0].weight),
-                              ('transition', rd.regime_gen.transition_matrix),
-                              ('adapter1', rd.adapters.adapters[0][0].weight),
-                              ('adapter2', rd.adapters.adapters[1][0].weight),
-                              ('adapter3', rd.adapters.adapters[2][0].weight)]:
+            grads = [('prototypes', rd.regime_gen.regime_prototypes),
+                     ('context_enc', rd.regime_gen.context_encoder[0].weight),
+                     ('transition', rd.regime_gen.transition_matrix),
+                     ('adapter1', rd.adapters.adapters[0][0].weight),
+                     ('adapter2', rd.adapters.adapters[1][0].weight),
+                     ('adapter3', rd.adapters.adapters[2][0].weight)]
+            if hasattr(rd, 'state_centers'):
+                grads.append(('state_centers', rd.state_centers))
+            for name, par in grads:
                 g = par.grad
                 print(f"  [F grad] ||∇{name}|| = {g.norm().item():.4f}" if g is not None
                       else f"  [F grad] {name}: None")
