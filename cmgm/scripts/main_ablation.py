@@ -1,4 +1,4 @@
-"""Run the retained A/F/F2/G ablations and H-LossRebalance.
+"""Run the retained A/F/F2/G/H ablations and I-RoutingStrength.
 
 Usage:
     python -m cmgm.scripts.main_ablation
@@ -43,11 +43,12 @@ VARIANTS = [
     ("F2-RegimeSemantic", "regime_dynamic_semantic"),
     ("G-SemanticRouter", "semantic_router"),
     ("H-LossRebalance", "loss_rebalance"),
+    ("I-RoutingStrength", "routing_strength"),
 ]
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="HeteroMixHop A/F/F2/G/H ablations")
+    parser = argparse.ArgumentParser(description="HeteroMixHop A/F/F2/G/H/I ablations")
     parser.add_argument("--epochs", type=int, default=NUM_EPOCHS)
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
     parser.add_argument("--seq-len", type=int, default=SEQ_LEN)
@@ -56,7 +57,7 @@ def parse_args():
     parser.add_argument("--no-cuda", action="store_true")
     parser.add_argument(
         "--variants",
-        help="Comma-separated display or internal names; defaults to A/F/F2/G/H",
+        help="Comma-separated display or internal names; defaults to A/F/F2/G/H/I",
     )
     return parser.parse_args()
 
@@ -212,10 +213,44 @@ def _event_test(label, name, values, probabilities):
     print(f"  [{label} event/{name}] L1 difference={np.abs(high - low).sum():.6f}")
 
 
-def _semantic_router_diagnostics(model, test_loader, device, label):
+def _print_split_router_diagnostics(model, loaders, device, label):
+    rd = model.regime_dynamic
+    model.eval()
+    for split_name, loader in loaders.items():
+        probability_batches = []
+        with torch.no_grad():
+            for x_batch, _, descriptor in loader:
+                model(x_batch.to(device), market_descriptor=descriptor.to(device))
+                probability_batches.append(rd.last_regime_p.cpu())
+        p_raw = torch.cat(probability_batches).numpy()
+        entropy = -(p_raw * np.log(p_raw + 1e-9)).sum(axis=-1)
+        occupancy = p_raw.argmax(axis=-1)
+        prefix = f"{label} {split_name.upper()} router"
+        print(f"  [{prefix}] mean p={np.round(p_raw.mean(axis=(0, 1)), 4)}")
+        print(
+            f"  [{prefix}] entropy={entropy.mean():.6f} "
+            f"mean max p={p_raw.max(axis=-1).mean():.6f}"
+        )
+        print(f"  [{prefix}] argmax occupancy")
+        for state in range(p_raw.shape[-1]):
+            print(f"    state {state} = {(occupancy == state).mean() * 100:.2f}%")
+
+        timeline = np.asarray(loader.dataset.market_descriptors)
+        for index, descriptor_name in enumerate(("abs_return", "volatility", "slope")):
+            values = timeline[:, index]
+            p01, p50, p99 = np.percentile(values, (1, 50, 99))
+            print(
+                f"  [{label} {split_name.upper()} descriptor {descriptor_name}] "
+                f"mean={values.mean():+.6f} std={values.std():.6f} "
+                f"min={values.min():+.6f} p01={p01:+.6f} p50={p50:+.6f} "
+                f"p99={p99:+.6f} max={values.max():+.6f}"
+            )
+
+
+def _semantic_router_diagnostics(model, test_loader, device, label, all_loaders=None):
     rd = model.regime_dynamic
     router = rd.regime_gen
-    probability_batches, descriptor_batches = [], []
+    probability_batches, effective_probability_batches, descriptor_batches = [], [], []
     score_batches = {name: [] for name in ("context", "semantic", "transition", "final")}
 
     model.eval()
@@ -227,6 +262,7 @@ def _semantic_router_diagnostics(model, test_loader, device, label):
                 market_descriptor=descriptor.to(device),
             )
             probability_batches.append(rd.last_regime_p.cpu())
+            effective_probability_batches.append(rd.last_regime_p_use.cpu())
             descriptor_batches.append(descriptor.cpu())
             score_batches["context"].append(router.last_context_score.cpu())
             score_batches["semantic"].append(router.last_semantic_score.cpu())
@@ -234,6 +270,7 @@ def _semantic_router_diagnostics(model, test_loader, device, label):
             score_batches["final"].append(router.last_final_score.cpu())
 
     p = torch.cat(probability_batches).numpy()
+    p_use = torch.cat(effective_probability_batches).numpy()
     descriptor = torch.cat(descriptor_batches).numpy()
     scores = {name: torch.cat(parts).numpy() for name, parts in score_batches.items()}
     for name in ("context", "semantic", "transition", "final"):
@@ -247,19 +284,54 @@ def _semantic_router_diagnostics(model, test_loader, device, label):
             f"  [{label} router score] mean absolute {name}_score="
             f"{np.abs(scores[name]).mean():.6f}"
         )
+    if label == "I":
+        for name in ("context", "semantic", "transition", "final"):
+            within_range = scores[name].max(axis=-1) - scores[name].min(axis=-1)
+            within_std = scores[name].std(axis=-1)
+            print(
+                f"  [I router score] {name} within-K range "
+                f"mean={within_range.mean():.6f} std={within_range.std():.6f}"
+            )
+            print(
+                f"  [I router score] {name} within-K std="
+                f"{within_std.mean():.6f}"
+            )
 
     entropy = -(p * np.log(p + 1e-9)).sum(axis=-1)
     transition = np.abs(np.diff(p, axis=1)).sum(axis=-1)
+    probability_label = f"{label} p_raw" if label == "I" else f"{label} p"
     print(
-        f"  [{label} p] mean={np.round(p.mean(axis=(0, 1)), 4)} "
+        f"  [{probability_label}] mean={np.round(p.mean(axis=(0, 1)), 4)} "
         f"std={p.std():.6f} min={p.min():.6f} max={p.max():.6f}"
     )
-    print(f"  [{label} p] per-sample p std (B,T,K)={p.std(axis=(1, 2)).mean():.6f}")
-    print(f"  [{label} p] mean max regime probability={p.max(axis=-1).mean():.6f}")
-    print(f"  [{label} entropy] mean={entropy.mean():.6f} std={entropy.std():.6f}")
-    print(f"  [{label} transition] mean ||p_t-p_(t-1)||_1={transition.mean():.6f}")
+    print(f"  [{probability_label}] per-sample p std (B,T,K)={p.std(axis=(1, 2)).mean():.6f}")
+    print(f"  [{probability_label}] mean max regime probability={p.max(axis=-1).mean():.6f}")
+    print(f"  [{probability_label}] entropy mean={entropy.mean():.6f} std={entropy.std():.6f}")
+    print(f"  [{probability_label}] mean ||p_t-p_(t-1)||_1={transition.mean():.6f}")
     for step in range(0, min(p.shape[1], 20), 2):
-        print(f"  [{label} p t={step}] {np.round(p[:, step].mean(axis=0), 4)}")
+        print(f"  [{probability_label} t={step}] {np.round(p[:, step].mean(axis=0), 4)}")
+
+    if label == "I":
+        entropy_use = -(p_use * np.log(p_use + 1e-9)).sum(axis=-1)
+        print(
+            f"  [I p_use] mean={np.round(p_use.mean(axis=(0, 1)), 4)} "
+            f"std={p_use.std():.6f} min={p_use.min():.6f} max={p_use.max():.6f}"
+        )
+        print(f"  [I p_use] entropy mean={entropy_use.mean():.6f} std={entropy_use.std():.6f}")
+        print(f"  [I p_use] mean max regime probability={p_use.max(axis=-1).mean():.6f}")
+        raw_example = p[0, 0]
+        use_example = p_use[0, 0]
+        expected_use = (1.0 - rd.routing_strength) / p.shape[-1] + rd.routing_strength * raw_example
+        print(f"  [I routing strength] rho={rd.routing_strength:.2f}")
+        print(
+            f"  [I routing strength] p_raw={np.round(raw_example, 6)} "
+            f"sum={raw_example.sum():.8f}"
+        )
+        print(
+            f"  [I routing strength] p_use={np.round(use_example, 6)} "
+            f"sum={use_example.sum():.8f} formula_max_error="
+            f"{np.abs(use_example - expected_use).max():.3e}"
+        )
 
     p_last = p[:, -1]
     m_last = descriptor[:, -1]
@@ -272,8 +344,16 @@ def _semantic_router_diagnostics(model, test_loader, device, label):
     for state in range(p.shape[-1]):
         print(f"    state {state} = {(last_hard_state == state).mean() * 100:.2f}%")
 
-    _event_test(label, "volatility", m_last[:, 1], p_last)
-    _event_test(label, "abs_return", m_last[:, 0], p_last)
+    event_label = f"{label} p_raw" if label == "I" else label
+    _event_test(event_label, "volatility", m_last[:, 1], p_last)
+    _event_test(event_label, "abs_return", m_last[:, 0], p_last)
+    if label == "I":
+        p_use_last = p_use[:, -1]
+        _event_test("I p_use", "volatility", m_last[:, 1], p_use_last)
+        _event_test("I p_use", "abs_return", m_last[:, 0], p_use_last)
+
+    if label == "I" and all_loaders is not None:
+        _print_split_router_diagnostics(model, all_loaders, device, label)
 
     centers = rd.state_centers.detach().cpu().numpy()
     for state, center in enumerate(centers):
@@ -300,7 +380,7 @@ def _semantic_router_diagnostics(model, test_loader, device, label):
     if separation[np.triu_indices(3, 1)].max() < 1e-3:
         print(f"  [{label} semantics] semantic separation failed")
 
-    # Gradient diagnostic uses the selected G/H variant's exact training loss.
+    # Gradient diagnostic uses the selected G/H/I variant's exact training loss.
     x_batch, y_batch, descriptor_batch = next(iter(test_loader))
     x_batch = x_batch[:16].to(device)
     y_batch = y_batch[:16].to(device)
@@ -311,6 +391,23 @@ def _semantic_router_diagnostics(model, test_loader, device, label):
     return_loss = _prediction_loss(prediction, y_batch, make_loss())
     auxiliary_loss = rd.dynamic_loss()
     diagnostic_loss = return_loss + auxiliary_loss
+    router_prediction_parameters = [
+        router.regime_prototypes,
+        *router.context_encoder.parameters(),
+        router.transition_matrix,
+        rd.state_centers,
+    ]
+    prediction_router_gradients = torch.autograd.grad(
+        return_loss,
+        router_prediction_parameters,
+        retain_graph=True,
+        allow_unused=True,
+    )
+    prediction_router_grad_norm = sum(
+        gradient.square().sum()
+        for gradient in prediction_router_gradients
+        if gradient is not None
+    ).sqrt().item()
     diagnostic_loss.backward()
     components = rd.last_loss_components
     weights = rd.last_loss_weights
@@ -337,6 +434,10 @@ def _semantic_router_diagnostics(model, test_loader, device, label):
         f"  [{label} loss/ratio] aux_to_return_ratio="
         f"{abs(weighted_aux_total) / (return_magnitude + eps):.6e}"
     )
+    print(
+        f"  [{label} grad] prediction-path Router aggregate="
+        f"{prediction_router_grad_norm:.3e}"
+    )
     gradients = [
         ("prototypes", router.regime_prototypes),
         ("context_encoder", router.context_encoder[0].weight),
@@ -350,24 +451,61 @@ def _semantic_router_diagnostics(model, test_loader, device, label):
         norm = parameter.grad.norm().item() if parameter.grad is not None else float("nan")
         print(f"  [{label} grad] {name}={norm:.3e}")
 
+    if label == "I":
+        print(f"  [I temporal norm] E={rd.last_E.norm(dim=-1).mean().item():.6e}")
+        for state in range(rd.last_zs.shape[0]):
+            value = rd.last_zs[state].norm(dim=-1).mean().item()
+            print(f"  [I temporal norm] adapter{state + 1}(E)={value:.6e}")
+        print(f"  [I temporal norm] z_mixed={rd.last_z.norm(dim=-1).mean().item():.6e}")
+        print(
+            f"  [I temporal norm] transformer_output="
+            f"{rd.last_transformer_output.norm(dim=-1).mean().item():.6e}"
+        )
+        print(
+            f"  [I temporal norm] h_temporal="
+            f"{rd.last_h_temporal.norm(dim=-1).mean().item():.6e}"
+        )
+
     # Forced-state comparison uses the complete temporal and prediction paths.
     model.eval()
     with torch.no_grad():
         rd.forced_regime = None
+        rd.forced_regime_use = None
         prediction_real = model(x_batch, market_descriptor=descriptor_batch)
         temporal_real = rd.last_h_temporal.clone()
         for state in range(3):
             forced = torch.zeros(3, device=device)
             forced[state] = 1.0
-            rd.forced_regime = forced
+            if label == "I":
+                rd.forced_regime_use = forced
+            else:
+                rd.forced_regime = forced
             prediction_forced = model(x_batch, market_descriptor=descriptor_batch)
             temporal_forced = rd.last_h_temporal
+            forced_label = "forced downstream p_use" if label == "I" else "forced state"
             print(
-                f"  [{label} forced state {state}] max_abs_diff h_temporal="
+                f"  [{label} {forced_label} {state}] max_abs_diff h_temporal="
                 f"{(temporal_forced - temporal_real).abs().max().item():.6e} "
                 f"prediction={(prediction_forced - prediction_real).abs().max().item():.6e}"
             )
         rd.forced_regime = None
+        rd.forced_regime_use = None
+
+        if label == "I":
+            for state in range(3):
+                forced = torch.zeros(3, device=device)
+                forced[state] = 1.0
+                rd.forced_regime = forced
+                prediction_forced = model(x_batch, market_descriptor=descriptor_batch)
+                temporal_forced = rd.last_h_temporal
+                effective = rd.last_regime_p_use[0, 0].cpu().numpy()
+                print(
+                    f"  [I forced raw-state-smoothed {state}] p_use="
+                    f"{np.round(effective, 4)} max_abs_diff h_temporal="
+                    f"{(temporal_forced - temporal_real).abs().max().item():.6e} "
+                    f"prediction={(prediction_forced - prediction_real).abs().max().item():.6e}"
+                )
+            rd.forced_regime = None
 
         # Both neural input and descriptor are perturbed only at t >= 10.
         split = min(10, x_batch.size(1))
@@ -388,11 +526,27 @@ def _semantic_router_diagnostics(model, test_loader, device, label):
         causal_diff = (
             p_original[:, :split] - p_perturbed[:, :split]
         ).abs().max().item()
-    print(f"  [{label} causality] max p diff before t=10={causal_diff:.3e}")
+        uniform_original = torch.full_like(p_original, 1.0 / p_original.shape[-1])
+        uniform_perturbed = torch.full_like(p_perturbed, 1.0 / p_perturbed.shape[-1])
+        p_use_original = (
+            (1.0 - rd.routing_strength) * uniform_original
+            + rd.routing_strength * p_original
+        )
+        p_use_perturbed = (
+            (1.0 - rd.routing_strength) * uniform_perturbed
+            + rd.routing_strength * p_perturbed
+        )
+        causal_use_diff = (
+            p_use_original[:, :split] - p_use_perturbed[:, :split]
+        ).abs().max().item()
+    print(f"  [{label} causality] max p_raw diff before t=10={causal_diff:.3e}")
+    if label == "I":
+        print(f"  [I causality] max p_use diff before t=10={causal_use_diff:.3e}")
     print("  [RPE delta] implementation uses query index i minus key index j")
 
 
-def print_diagnostics(model, variant, test_loader, device):
+def print_diagnostics(model, variant, loaders, device):
+    test_loader = loaders["test"]
     batch = next(iter(test_loader))
     x_batch = batch[0][:16].to(device)
     descriptor = batch[2][:16].to(device) if len(batch) == 3 else None
@@ -406,9 +560,20 @@ def print_diagnostics(model, variant, test_loader, device):
         f"std={alpha.std().item():.4f} min={alpha.min().item():.4f} "
         f"max={alpha.max().item():.4f}"
     )
-    if variant in ("semantic_router", "loss_rebalance"):
-        label = "G" if variant == "semantic_router" else "H"
-        _semantic_router_diagnostics(model, test_loader, device, label)
+    if variant in ("semantic_router", "loss_rebalance", "routing_strength"):
+        labels = {
+            "semantic_router": "G",
+            "loss_rebalance": "H",
+            "routing_strength": "I",
+        }
+        label = labels[variant]
+        _semantic_router_diagnostics(
+            model,
+            test_loader,
+            device,
+            label,
+            all_loaders=(loaders if variant == "routing_strength" else None),
+        )
     elif variant.startswith("regime_dynamic"):
         probabilities = model.regime_dynamic.last_regime_p
         mean_probability = probabilities.mean(dim=(0, 1)).cpu().numpy()
@@ -440,7 +605,7 @@ def run_variant(name, variant, args, device, data):
     started = time.time()
     loaders = (
         data["semantic_loaders"]
-        if variant in ("semantic_router", "loss_rebalance")
+        if variant in ("semantic_router", "loss_rebalance", "routing_strength")
         else data["loaders"]
     )
     empty_edges = torch.empty(2, 0, dtype=torch.long)
@@ -458,7 +623,7 @@ def run_variant(name, variant, args, device, data):
     normalized, original, target = evaluate_primary_horizon(
         model, loaders["test"], data, device
     )
-    print_diagnostics(model, variant, loaders["test"], device)
+    print_diagnostics(model, variant, loaders, device)
 
     zero_metrics = compute_metrics(np.zeros_like(target), target)
     versus_zero = (normalized["MAE"] - zero_metrics["MAE"]) / zero_metrics["MAE"] * 100
