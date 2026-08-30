@@ -67,6 +67,74 @@ class SoftRegimeGeneratorV2(nn.Module):
         return torch.stack(ps, dim=1)                             # (B, T, K)
 
 
+class SemanticRegimeRouter(nn.Module):
+    """G router: neural context + market semantics + previous soft state."""
+
+    def __init__(self, d_model: int = 128, K: int = 3,
+                 D_regime: int = 32, gamma: float = 5.0,
+                 tau_m: float = 1.0, lambda_sem: float = 1.0):
+        super().__init__()
+        self.K = K
+        self.gamma = gamma
+        self.tau_m = tau_m
+        self.lambda_sem = lambda_sem
+        self.context_encoder = nn.Sequential(
+            nn.Linear(d_model * 2 + 3, 64),
+            nn.ReLU(),
+            nn.Linear(64, D_regime),
+        )
+        self.regime_prototypes = nn.Parameter(torch.randn(K, D_regime) * 0.02)
+        self.transition_matrix = nn.Parameter(torch.zeros(K, K))
+        self.initial_regime_logits = nn.Parameter(torch.zeros(K))
+
+    def forward(self, E: torch.Tensor, descriptor: torch.Tensor,
+                state_centers: torch.Tensor) -> torch.Tensor:
+        B, T, _ = E.shape
+        if descriptor.shape != (B, T, 3):
+            raise ValueError(
+                f"descriptor must have shape {(B, T, 3)}, got {tuple(descriptor.shape)}"
+            )
+
+        delta = torch.zeros_like(E)
+        delta[:, 1:] = E[:, 1:] - E[:, :-1]
+        context = self.context_encoder(torch.cat([E, delta, descriptor], dim=-1))
+        context_hat = F.normalize(context, p=2, dim=-1, eps=1e-8)
+        prototype_hat = F.normalize(
+            self.regime_prototypes, p=2, dim=-1, eps=1e-8
+        )
+        context_scores = self.gamma * torch.einsum(
+            'btd,kd->btk', context_hat, prototype_hat
+        )
+        distances = ((
+            descriptor.unsqueeze(2) - state_centers.view(1, 1, self.K, 3)
+        ) ** 2).sum(dim=-1)
+        semantic_scores = -distances / self.tau_m
+
+        p_prev = F.softmax(self.initial_regime_logits, dim=-1)
+        p_prev = p_prev.unsqueeze(0).expand(B, -1)
+        probabilities, transition_scores, final_scores = [], [], []
+        for step in range(T):
+            transition = p_prev @ self.transition_matrix
+            score = (
+                context_scores[:, step]
+                + self.lambda_sem * semantic_scores[:, step]
+                + transition
+            )
+            p_t = F.softmax(score, dim=-1)
+            probabilities.append(p_t)
+            transition_scores.append(transition)
+            final_scores.append(score)
+            p_prev = p_t
+
+        p = torch.stack(probabilities, dim=1)
+        self.last_context_score = context_scores.detach()
+        self.last_semantic_score = semantic_scores.detach()
+        self.last_transition_score = torch.stack(transition_scores, dim=1).detach()
+        self.last_final_score = torch.stack(final_scores, dim=1).detach()
+        self.last_distances = distances.detach()
+        return p
+
+
 class RegimeTemporalAdapter(nn.Module):
     """
     K independent regime-specific temporal dynamics adapters:
@@ -169,10 +237,18 @@ class RegimeDynamicRPETransformer(nn.Module):
     def __init__(self, in_dim: int, d_model: int = 128, n_heads: int = 4,
                  n_layers: int = 2, ffn_dim: int = 256, dropout: float = 0.1,
                  t_len: int = 20, K: int = 3, D_regime: int = 32,
-                 use_state_loss: bool = False):
+                 use_state_loss: bool = False,
+                 use_semantic_router: bool = False):
         super().__init__()
         self.proj = nn.Linear(in_dim, d_model)
-        self.regime_gen = SoftRegimeGeneratorV2(d_model, K, D_regime)
+        self.use_semantic_router = use_semantic_router
+        self.lambda_cluster = 0.005
+        self.lambda_info_max = 0.001
+        self.regime_gen = (
+            SemanticRegimeRouter(d_model, K, D_regime)
+            if use_semantic_router
+            else SoftRegimeGeneratorV2(d_model, K, D_regime)
+        )
         self.adapters = RegimeTemporalAdapter(d_model, K)
         self.rpe = RegimeAwareRPE(t_len, n_heads, K)
         self.attn_layers = nn.ModuleList([
@@ -182,16 +258,24 @@ class RegimeDynamicRPETransformer(nn.Module):
         self.fc = nn.Linear(d_model, 64)
         self.forced_regime = None   # diagnostic: one-hot (K,) or None
         self.use_state_loss = use_state_loss
-        if use_state_loss:
+        if use_state_loss or use_semantic_router:
             # latent state centers: typical market-dynamics profile per regime
             self.state_centers = nn.Parameter(torch.randn(K, 3) * 0.02)
 
-    def forward(self, x_flat: torch.Tensor) -> torch.Tensor:
+    def forward(self, x_flat: torch.Tensor,
+                market_descriptor: torch.Tensor = None) -> torch.Tensor:
         # x_flat: (B, T, in_dim) → h_temporal (B, 64)
         B, T, _ = x_flat.shape
         E = self.proj(x_flat)                                     # (B, T, 128)
 
-        p = self.regime_gen(E)                                    # (B, T, K)
+        if self.use_semantic_router:
+            if market_descriptor is None:
+                raise ValueError("G-SemanticRouter requires market_descriptor")
+            p = self.regime_gen(E, market_descriptor, self.state_centers)
+            self._m_t_for_loss = market_descriptor
+            self.last_m_t = market_descriptor.detach()
+        else:
+            p = self.regime_gen(E)                                # (B, T, K)
         if self.forced_regime is not None:                        # diagnostic override
             p = self.forced_regime.unsqueeze(0).unsqueeze(0).expand(B, T, -1)
         self.last_regime_p = p.detach()
@@ -211,7 +295,9 @@ class RegimeDynamicRPETransformer(nn.Module):
         alpha = F.softmax(score, dim=1)
         h = (H * alpha.unsqueeze(-1)).sum(dim=1)                  # (B, 128)
         self.last_attn = alpha.detach()
-        return self.fc(h)                                         # (B, 64)
+        h_temporal = self.fc(h)                                   # (B, 64)
+        self.last_h_temporal = h_temporal.detach()
+        return h_temporal
 
     def dynamic_loss(self, lambda_dynamic: float = 0.001,
                      lambda_balance: float = 0.001,
@@ -232,6 +318,31 @@ class RegimeDynamicRPETransformer(nn.Module):
         cos = zs_n @ zs_n.T
         mask = ~torch.eye(K, dtype=torch.bool, device=cos.device)
         l_dyn = cos[mask].mean()
+        if self.use_semantic_router:
+            descriptor = getattr(self, '_m_t_for_loss', None)
+            if descriptor is None:
+                return torch.zeros((), device=p.device)
+            distances = ((
+                descriptor.unsqueeze(2)
+                - self.state_centers.view(1, 1, K, 3)
+            ) ** 2).sum(dim=-1)
+            l_cluster = (p * distances).sum(dim=-1).mean()
+            h_cond = -(p * torch.log(p + 1e-8)).sum(dim=-1).mean()
+            p_mean = p.mean(dim=(0, 1))
+            h_marg = -(p_mean * torch.log(p_mean + 1e-8)).sum()
+            l_info_max = h_cond - h_marg
+            self.last_loss_components = {
+                'dynamic': l_dyn.detach(),
+                'cluster': l_cluster.detach(),
+                'info_max': l_info_max.detach(),
+                'conditional_entropy': h_cond.detach(),
+                'marginal_entropy': h_marg.detach(),
+            }
+            return (
+                lambda_dynamic * l_dyn
+                + self.lambda_cluster * l_cluster
+                + self.lambda_info_max * l_info_max
+            )
         p_mean = p.mean(dim=(0, 1))                               # (K,)
         l_bal = (p_mean * torch.log(p_mean * K + 1e-8)).sum()
         loss = lambda_dynamic * l_dyn + lambda_balance * l_bal
