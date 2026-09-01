@@ -31,6 +31,14 @@ def make_loss() -> nn.Module:
     return nn.MSELoss()
 
 
+def _switching_branch(model: nn.Module):
+    """Return the active S1/S1C/S2F branch without changing old interfaces."""
+    branch = getattr(model, 'switching_filter_rpe', None)
+    if branch is not None:
+        return branch
+    return getattr(model, 'switching_transformer', None)
+
+
 def train_epoch(
     model: nn.Module,
     loader: DataLoader,
@@ -131,10 +139,10 @@ def train_epoch(
         rd = getattr(model, 'regime_dynamic', None)
         if rd is not None:
             loss = loss + rd.dynamic_loss()
-        switching_branch = getattr(model, 'switching_transformer', None)
+        switching_branch = _switching_branch(model)
         if (
             switching_branch is not None
-            and not switching_branch.null_control
+            and not getattr(switching_branch, 'null_control', False)
         ):
             loss = loss + switching_branch.switch_loss()
 
@@ -304,7 +312,7 @@ def train(
     epochs_no_improve = 0
 
     for epoch in range(1, num_epochs + 1):
-        switching_branch = getattr(model, 'switching_transformer', None)
+        switching_branch = _switching_branch(model)
         current_switch_beta = None
         if switching_branch is not None:
             current_switch_beta = switching_branch.set_epoch(epoch)
@@ -374,7 +382,7 @@ def train(
     # Restore best model
     if best_model_state is not None:
         model.load_state_dict(best_model_state)
-        switching_branch = getattr(model, 'switching_transformer', None)
+        switching_branch = _switching_branch(model)
         if switching_branch is not None:
             switching_branch.set_epoch(history['best_epoch'])
         print(f"\n[Checkpoint] Restored best model from epoch {history['best_epoch']}")

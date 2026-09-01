@@ -51,6 +51,7 @@ from cmgm.graph.adaptive_graph import AdaptiveGraphLearner
 from cmgm.models.regime_dynamic import RegimeDynamicRPETransformer
 from cmgm.models.switching_transformer import (
     MarketTokenTransformerBranch,
+    SwitchingFilterRPEBranch,
     SwitchingTransformerBranch,
 )
 
@@ -701,6 +702,7 @@ class HeteroMixHopCMGM(nn.Module):
             "market_dispersion_transformer",
             "switching_transformer",
             "switching_null_control",
+            "switching_filter_rpe",
         }
         if variant not in supported_variants:
             supported = ", ".join(sorted(supported_variants))
@@ -749,7 +751,8 @@ class HeteroMixHopCMGM(nn.Module):
                                                "market_token_transformer",
                                                "market_dispersion_transformer",
                                                "switching_transformer",
-                                               "switching_null_control")
+                                               "switching_null_control",
+                                               "switching_filter_rpe")
         self.use_edge_attn   = variant in ("edge_attn", "edge_attn_static", "temporal_attn",
                                            "diff_input", "hybrid_attn", "node_level",
                                            "comm_nodes", "batch_graph", "factor_res",
@@ -770,7 +773,8 @@ class HeteroMixHopCMGM(nn.Module):
                                            "market_token_transformer",
                                            "market_dispersion_transformer",
                                            "switching_transformer",
-                                           "switching_null_control")
+                                           "switching_null_control",
+                                           "switching_filter_rpe")
         self.use_gate        = variant not in ("no_gate", "gcn_only", "lstm_only")
 
         # ── Multi-horizon output ──
@@ -1004,7 +1008,7 @@ class HeteroMixHopCMGM(nn.Module):
                              "context_calibrated", "context_balance",
                              "adapter_orthogonal", "market_token_transformer",
                              "market_dispersion_transformer", "switching_transformer",
-                             "switching_null_control"):
+                             "switching_null_control", "switching_filter_rpe"):
                 pass  # temporal branch is the transformer (no global LSTM)
             else:
                 # diff_input: concat first-order differences → 2× input size
@@ -1151,6 +1155,28 @@ class HeteroMixHopCMGM(nn.Module):
                 beta_max=5e-4,
                 warmup_epochs=20,
                 null_control=(variant == "switching_null_control"),
+            )
+
+        if variant == "switching_filter_rpe":
+            self.temporal_score = nn.Linear(LSTM_HIDDEN_DIM, 1)
+            self.switching_filter_rpe = SwitchingFilterRPEBranch(
+                feat_dim=feat_dim,
+                n_stock=n_stock,
+                n_bond=n_bond,
+                n_commodity=num_nodes - n_stock - n_bond,
+                node_dim=32,
+                d_model=128,
+                n_heads=4,
+                n_layers=2,
+                ffn_dim=256,
+                dropout=GCN_DROPOUT,
+                output_dim=LSTM_HIDDEN_DIM,
+                max_len=SEQ_LEN,
+                K=3,
+                sticky_alpha=0.5,
+                tau=1.0,
+                beta_max=5e-4,
+                warmup_epochs=20,
             )
 
         # RegimeDynamicRPETransformer (F): modular regime → dynamics →
@@ -2204,6 +2230,25 @@ class HeteroMixHopCMGM(nn.Module):
             )
         return pred
 
+    def _switching_filter_rpe_forward(
+        self,
+        x: torch.Tensor,
+        debug: bool = False,
+        forced_rpe_probabilities: torch.Tensor = None,
+    ) -> torch.Tensor:
+        """S2F temporal branch with unchanged spatial/fusion/head paths."""
+        h_spatial = self._temp_weighted_spatial(x)
+        h_temporal = self.switching_filter_rpe(
+            x, forced_rpe_probabilities=forced_rpe_probabilities
+        )
+        pred = self._market_token_predict(h_spatial, h_temporal)
+        if debug:
+            print(
+                f"  [{self.variant}] h_spatial={list(h_spatial.shape)} "
+                f"h_temporal={list(h_temporal.shape)} → gate → {list(pred.shape)}"
+            )
+        return pred
+
     def regime_diversity_loss(self, lambda_proto: float = 0.001) -> torch.Tensor:
         """
         Lightweight regime diversity regularization (prototype-based only):
@@ -2424,6 +2469,8 @@ class HeteroMixHopCMGM(nn.Module):
             return self._market_token_transformer_forward(x, debug)
         if self.variant in ("switching_transformer", "switching_null_control"):
             return self._switching_transformer_forward(x, debug)
+        if self.variant == "switching_filter_rpe":
+            return self._switching_filter_rpe_forward(x, debug)
         if self.variant in ("regime_dynamic_transformer", "regime_dynamic_semantic",
                             "semantic_router", "loss_rebalance", "routing_strength",
                             "context_calibrated", "context_balance",
@@ -2539,14 +2586,21 @@ class HeteroMixHopCMGM(nn.Module):
             "market_dispersion_transformer",
             "switching_transformer",
             "switching_null_control",
+            "switching_filter_rpe",
         ):
             self.eval()
             with torch.no_grad():
                 h_spatial = self._temp_weighted_spatial(x)
                 temporal_branch = (
-                    self.switching_transformer
-                    if self.variant in ("switching_transformer", "switching_null_control")
-                    else self.market_token_transformer
+                    self.switching_filter_rpe
+                    if self.variant == "switching_filter_rpe"
+                    else (
+                        self.switching_transformer
+                        if self.variant in (
+                            "switching_transformer", "switching_null_control"
+                        )
+                        else self.market_token_transformer
+                    )
                 )
                 h_temporal = temporal_branch(x)
                 gate = torch.sigmoid(
