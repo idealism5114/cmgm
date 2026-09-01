@@ -1,7 +1,7 @@
 """Modular components for the market-token and switching-transformer route.
 
 S0/S0D provide ordinary Transformer baselines. S1 adds causal soft switching
-state inference, while relative-position encoding remains intentionally absent.
+state inference, while S2F adds Markov filtering and regime-aware relative bias.
 """
 
 import math
@@ -154,7 +154,7 @@ class MarketAwareTemporalEncoder(nn.Module):
 
 
 class TemporalSelfAttention(nn.Module):
-    """Ordinary multi-head self-attention with no positional or regime bias."""
+    """Multi-head temporal attention with an optional additive logit bias."""
 
     def __init__(self, d_model: int = 128, n_heads: int = 4,
                  dropout: float = 0.1):
@@ -169,7 +169,8 @@ class TemporalSelfAttention(nn.Module):
         self.v = nn.Linear(self.d_model, self.d_model)
         self.out = nn.Linear(self.d_model, self.d_model)
 
-    def forward(self, x: torch.Tensor, causal: bool = False) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, causal: bool = False,
+                relative_bias: torch.Tensor = None) -> torch.Tensor:
         batch_size, time_steps, _ = x.shape
         q = self.q(x).view(
             batch_size, time_steps, self.n_heads, self.head_dim
@@ -180,7 +181,16 @@ class TemporalSelfAttention(nn.Module):
         v = self.v(x).view(
             batch_size, time_steps, self.n_heads, self.head_dim
         ).transpose(1, 2)
-        logits = q @ k.transpose(-2, -1) / math.sqrt(self.head_dim)
+        qk_logits = q @ k.transpose(-2, -1) / math.sqrt(self.head_dim)
+        logits = qk_logits
+        if relative_bias is not None:
+            expected = (batch_size, self.n_heads, time_steps, time_steps)
+            if relative_bias.shape != expected:
+                raise ValueError(
+                    f"relative_bias must have shape {expected}, "
+                    f"got {tuple(relative_bias.shape)}"
+                )
+            logits = logits + relative_bias
         if causal:
             future_mask = torch.triu(
                 torch.ones(
@@ -193,6 +203,9 @@ class TemporalSelfAttention(nn.Module):
         output = (attention @ v).transpose(1, 2).reshape(
             batch_size, time_steps, self.d_model
         )
+        self.last_qk_logits = qk_logits.detach()
+        self.last_attention_logits = logits.detach()
+        self.last_attention = attention.detach()
         return self.out(output)
 
 
@@ -212,8 +225,17 @@ class TemporalTransformerBlock(nn.Module):
         )
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x: torch.Tensor, causal: bool = False) -> torch.Tensor:
-        x = self.norm1(x + self.dropout(self.attention(x, causal=causal)))
+    def forward(self, x: torch.Tensor, causal: bool = False,
+                relative_bias: torch.Tensor = None) -> torch.Tensor:
+        x = self.norm1(
+            x + self.dropout(
+                self.attention(
+                    x,
+                    causal=causal,
+                    relative_bias=relative_bias,
+                )
+            )
+        )
         return self.norm2(x + self.dropout(self.ffn(x)))
 
 
@@ -544,6 +566,291 @@ class SwitchingTransformerBranch(nn.Module):
     @property
     def effective_beta(self) -> float:
         return 0.0 if self.null_control else self.scheduled_beta
+
+    def transition_matrix(self) -> torch.Tensor:
+        return self.regime_inference.transition_matrix()
+
+
+class MarkovFilteringRegimeInference(nn.Module):
+    """Causal discriminative Markov filter with one observation head.
+
+    At each time step the transition prior and causal observation evidence are
+    combined in log space:
+
+        prior_t = p_(t-1) A
+        evidence_t = observation_head(H_reg_t)
+        p_t proportional to prior_t * exp(evidence_t / tau)
+    """
+
+    def __init__(self, d_model: int = 128, K: int = 3,
+                 sticky_alpha: float = 0.5, tau: float = 1.0,
+                 beta_max: float = 5e-4, warmup_epochs: int = 20,
+                 eps: float = 1e-8):
+        super().__init__()
+        self.K = int(K)
+        self.sticky_alpha = float(sticky_alpha)
+        self.tau = float(tau)
+        self.beta_max = float(beta_max)
+        self.warmup_epochs = int(warmup_epochs)
+        self.eps = float(eps)
+        self.current_epoch = 1
+        self.current_beta = 0.0
+        self.transition_logits = nn.Parameter(torch.zeros(self.K, self.K))
+        self.observation_head = nn.Linear(d_model, self.K)
+        self._last_switch_loss = None
+
+    def transition_matrix(self) -> torch.Tensor:
+        learned = F.softmax(self.transition_logits, dim=-1)
+        identity = torch.eye(
+            self.K, dtype=learned.dtype, device=learned.device
+        )
+        return self.sticky_alpha * identity + (1.0 - self.sticky_alpha) * learned
+
+    def set_epoch(self, epoch: int) -> float:
+        self.current_epoch = int(epoch)
+        if self.warmup_epochs <= 1:
+            progress = 1.0
+        else:
+            progress = min(
+                max((self.current_epoch - 1) / (self.warmup_epochs - 1), 0.0),
+                1.0,
+            )
+        self.current_beta = self.beta_max * progress
+        return self.current_beta
+
+    def forward(self, evidence: torch.Tensor) -> torch.Tensor:
+        batch_size, time_steps, _ = evidence.shape
+        transition = self.transition_matrix()
+        p_prev = torch.full(
+            (batch_size, self.K),
+            1.0 / self.K,
+            dtype=evidence.dtype,
+            device=evidence.device,
+        )
+        probabilities = []
+        priors = []
+        observation_logits = []
+        switch_kls = []
+        for step in range(time_steps):
+            prior_t = p_prev @ transition
+            evidence_t = self.observation_head(evidence[:, step])
+            posterior_logits = (
+                torch.log(prior_t + self.eps) + evidence_t / self.tau
+            )
+            p_t = F.softmax(posterior_logits, dim=-1)
+            kl_t = (
+                p_t
+                * (
+                    torch.log(p_t + self.eps)
+                    - torch.log(prior_t + self.eps)
+                )
+            ).sum(dim=-1)
+            priors.append(prior_t)
+            observation_logits.append(evidence_t)
+            probabilities.append(p_t)
+            switch_kls.append(kl_t)
+            p_prev = p_t
+
+        p = torch.stack(probabilities, dim=1)
+        prior = torch.stack(priors, dim=1)
+        observation = torch.stack(observation_logits, dim=1)
+        self._last_switch_loss = torch.stack(switch_kls, dim=1).mean()
+        self.last_probabilities = p.detach()
+        self.last_priors = prior.detach()
+        self.last_observation_evidence = observation.detach()
+        self.last_switch_loss_raw = self._last_switch_loss.detach()
+        return p
+
+    def switch_loss(self) -> torch.Tensor:
+        if self._last_switch_loss is None:
+            return self.transition_logits.sum() * 0.0
+        return self.current_beta * self._last_switch_loss
+
+
+class CenteredRegimeRelativePositionBias(nn.Module):
+    """Base plus query-regime-conditioned signed relative-position bias."""
+
+    def __init__(self, max_len: int = 20, n_heads: int = 4, K: int = 3):
+        super().__init__()
+        self.max_len = int(max_len)
+        self.n_heads = int(n_heads)
+        self.K = int(K)
+        table_size = 2 * self.max_len - 1
+        self.base_rpe = nn.Parameter(
+            torch.randn(self.n_heads, table_size) * 0.02
+        )
+        self.regime_rpe = nn.Parameter(
+            torch.randn(self.K, self.n_heads, table_size) * 0.02
+        )
+
+    def centered_regime_rpe(self) -> torch.Tensor:
+        return self.regime_rpe - self.regime_rpe.mean(dim=0, keepdim=True)
+
+    def components(self, probabilities: torch.Tensor):
+        batch_size, time_steps, states = probabilities.shape
+        if states != self.K:
+            raise ValueError(f"expected K={self.K}, got {states}")
+        if time_steps > self.max_len:
+            raise ValueError(
+                f"time length {time_steps} exceeds max_len={self.max_len}"
+            )
+
+        # Select the centered 2T-1 slice from the fixed maximum-length table,
+        # then use the explicit signed convention delta=(query i)-(key j).
+        table_center = self.max_len - 1
+        active_start = table_center - (time_steps - 1)
+        active_end = table_center + time_steps
+        base_active = self.base_rpe[:, active_start:active_end]
+        regime_active = self.centered_regime_rpe()[
+            :, :, active_start:active_end
+        ]
+        positions = torch.arange(time_steps, device=probabilities.device)
+        delta = positions.unsqueeze(1) - positions.unsqueeze(0)
+        delta_index = delta + (time_steps - 1)
+        base_bias = base_active[:, delta_index].unsqueeze(0).expand(
+            batch_size, -1, -1, -1
+        )
+        state_bias = regime_active[:, :, delta_index]
+        regime_bias = torch.einsum(
+            "bik,khij->bhij", probabilities, state_bias
+        )
+        self.last_base_bias = base_bias.detach()
+        self.last_regime_bias = regime_bias.detach()
+        self.last_relative_delta = delta.detach()
+        return base_bias, regime_bias
+
+    def forward(self, probabilities: torch.Tensor) -> torch.Tensor:
+        base_bias, regime_bias = self.components(probabilities)
+        return base_bias + regime_bias
+
+
+class RegimeAwareRPEForecastTransformer(nn.Module):
+    """Ordinary full-attention forecast Transformer with centered S2F RPE."""
+
+    def __init__(self, d_model: int = 128, n_heads: int = 4,
+                 n_layers: int = 2, ffn_dim: int = 256,
+                 dropout: float = 0.1, output_dim: int = 64,
+                 max_len: int = 20, K: int = 3):
+        super().__init__()
+        # Preserve BaseTemporalTransformer construction order for common
+        # forecast weights; the RPE tables are appended afterwards.
+        self.layers = nn.ModuleList([
+            TemporalTransformerBlock(d_model, n_heads, ffn_dim, dropout)
+            for _ in range(n_layers)
+        ])
+        self.pool_score = nn.Linear(d_model, 1)
+        self.output_projection = nn.Linear(d_model, output_dim)
+        self.relative_position = CenteredRegimeRelativePositionBias(
+            max_len=max_len, n_heads=n_heads, K=K
+        )
+
+    def forward(self, tokens: torch.Tensor,
+                probabilities: torch.Tensor) -> torch.Tensor:
+        relative_bias = self.relative_position(probabilities)
+        hidden = tokens
+        for layer in self.layers:
+            hidden = layer(hidden, causal=False, relative_bias=relative_bias)
+        scores = self.pool_score(hidden).squeeze(-1)
+        attention = F.softmax(scores, dim=1)
+        pooled = (hidden * attention.unsqueeze(-1)).sum(dim=1)
+        output = self.output_projection(pooled)
+        self.last_input_tokens = tokens.detach()
+        self.last_transformer_output = hidden.detach()
+        self.last_temporal_attention = attention.detach()
+        self.last_temporal_output = output.detach()
+        return output
+
+
+class SwitchingFilterRPEBranch(nn.Module):
+    """S2F: S0D observations, Markov filtering, and RPE-only conditioning."""
+
+    def __init__(self, feat_dim: int, n_stock: int, n_bond: int,
+                 n_commodity: int, node_dim: int = 32,
+                 d_model: int = 128, n_heads: int = 4,
+                 n_layers: int = 2, ffn_dim: int = 256,
+                 dropout: float = 0.1, output_dim: int = 64,
+                 max_len: int = 20, K: int = 3,
+                 sticky_alpha: float = 0.5, tau: float = 1.0,
+                 beta_max: float = 5e-4, warmup_epochs: int = 20):
+        super().__init__()
+        self.K = int(K)
+        self.market_encoder = MarketAwareTemporalEncoder(
+            feat_dim=feat_dim,
+            n_stock=n_stock,
+            n_bond=n_bond,
+            n_commodity=n_commodity,
+            node_dim=node_dim,
+            d_model=d_model,
+            use_dispersion=True,
+        )
+        self.transformer = RegimeAwareRPEForecastTransformer(
+            d_model=d_model,
+            n_heads=n_heads,
+            n_layers=n_layers,
+            ffn_dim=ffn_dim,
+            dropout=dropout,
+            output_dim=output_dim,
+            max_len=max_len,
+            K=self.K,
+        )
+        self.regime_evidence = RegimeEvidenceTransformer(
+            d_model=d_model,
+            n_heads=n_heads,
+            ffn_dim=ffn_dim,
+            dropout=dropout,
+        )
+        self.regime_inference = MarkovFilteringRegimeInference(
+            d_model=d_model,
+            K=self.K,
+            sticky_alpha=sticky_alpha,
+            tau=tau,
+            beta_max=beta_max,
+            warmup_epochs=warmup_epochs,
+        )
+
+    def encode_market_tokens(self, x: torch.Tensor) -> torch.Tensor:
+        return self.market_encoder(x)
+
+    def infer_regimes(self, tokens: torch.Tensor) -> torch.Tensor:
+        evidence = self.regime_evidence(tokens)
+        probabilities = self.regime_inference(evidence)
+        self.last_regime_evidence = evidence.detach()
+        return probabilities
+
+    def temporal_forward(self, tokens: torch.Tensor,
+                         forced_rpe_probabilities: torch.Tensor = None
+                         ) -> torch.Tensor:
+        inferred = self.infer_regimes(tokens)
+        probabilities = inferred
+        if forced_rpe_probabilities is not None:
+            forced = forced_rpe_probabilities.to(
+                device=tokens.device, dtype=tokens.dtype
+            )
+            if forced.dim() == 1:
+                forced = forced.view(1, 1, self.K).expand(
+                    tokens.shape[0], tokens.shape[1], -1
+                )
+            probabilities = forced
+        output = self.transformer(tokens, probabilities)
+        self.last_market_tokens = tokens.detach()
+        self.last_regime_probabilities = inferred.detach()
+        self.last_rpe_probabilities = probabilities.detach()
+        self.last_h_temporal = output.detach()
+        return output
+
+    def forward(self, x: torch.Tensor,
+                forced_rpe_probabilities: torch.Tensor = None) -> torch.Tensor:
+        tokens = self.encode_market_tokens(x)
+        return self.temporal_forward(
+            tokens,
+            forced_rpe_probabilities=forced_rpe_probabilities,
+        )
+
+    def set_epoch(self, epoch: int) -> float:
+        return self.regime_inference.set_epoch(epoch)
+
+    def switch_loss(self) -> torch.Tensor:
+        return self.regime_inference.switch_loss()
 
     def transition_matrix(self) -> torch.Tensor:
         return self.regime_inference.transition_matrix()

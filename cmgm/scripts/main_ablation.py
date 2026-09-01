@@ -45,6 +45,7 @@ VARIANTS = [
     ("S0D-MarketDispersionTransformer", "market_dispersion_transformer"),
     ("S1-SwitchingTransformer", "switching_transformer"),
     ("S1C-NullSwitchControl", "switching_null_control"),
+    ("S2F-SwitchingFilterRPE", "switching_filter_rpe"),
     ("F-RegimeDynamic", "regime_dynamic_transformer"),
     ("F2-RegimeSemantic", "regime_dynamic_semantic"),
     ("G-SemanticRouter", "semantic_router"),
@@ -59,7 +60,7 @@ VARIANTS = [
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
-            "HeteroMixHop A/B/C/S0/S0D/S1/S1C and retained F/F2/G/H/I/J/K/L ablations"
+            "HeteroMixHop A/B/C/S0/S0D/S1/S1C/S2F and retained F/F2/G/H/I/J/K/L ablations"
         )
     )
     parser.add_argument("--epochs", type=int, default=NUM_EPOCHS)
@@ -72,7 +73,7 @@ def parse_args():
         "--variants",
         help=(
             "Comma-separated display or internal names; defaults to "
-            "A/B/C/S0/S0D/S1/S1C/F/F2/G/H/I/J/K/L"
+            "A/B/C/S0/S0D/S1/S1C/S2F/F/F2/G/H/I/J/K/L"
         ),
     )
     return parser.parse_args()
@@ -830,6 +831,404 @@ def _switching_transformer_diagnostics(model, loaders, device):
             )
 
 
+def _switching_filter_rpe_diagnostics(model, loaders, device):
+    """Complete filtering, RPE, gradient, and invariance diagnostics for S2F."""
+    branch = model.switching_filter_rpe
+    inference = branch.regime_inference
+    forecast = branch.transformer
+    rpe = forecast.relative_position
+    eps = inference.eps
+    test_parts = {
+        name: []
+        for name in (
+            "p", "prior", "evidence", "E", "H_reg", "H_forecast",
+            "h_temporal", "base_bias", "regime_bias", "qk",
+        )
+    }
+    dispersion_parts = {
+        name: [] for name in branch.market_encoder.MARKET_NAMES
+    }
+
+    model.eval()
+    with torch.no_grad():
+        for split_name, loader in loaders.items():
+            p_batches = []
+            prior_batches = []
+            for batch in loader:
+                x_batch = batch[0].to(device)
+                branch(x_batch)
+                p_batch = branch.last_regime_probabilities.cpu()
+                prior_batch = inference.last_priors.cpu()
+                p_batches.append(p_batch)
+                prior_batches.append(prior_batch)
+                if split_name == "test":
+                    test_parts["p"].append(p_batch)
+                    test_parts["prior"].append(prior_batch)
+                    test_parts["evidence"].append(
+                        inference.last_observation_evidence.cpu()
+                    )
+                    test_parts["E"].append(branch.last_market_tokens.cpu())
+                    test_parts["H_reg"].append(branch.last_regime_evidence.cpu())
+                    test_parts["H_forecast"].append(
+                        forecast.last_transformer_output.cpu()
+                    )
+                    test_parts["h_temporal"].append(
+                        branch.last_h_temporal.cpu()
+                    )
+                    test_parts["base_bias"].append(rpe.last_base_bias.cpu())
+                    test_parts["regime_bias"].append(rpe.last_regime_bias.cpu())
+                    test_parts["qk"].append(
+                        forecast.layers[0].attention.last_qk_logits.cpu()
+                    )
+                    for market_name in branch.market_encoder.MARKET_NAMES:
+                        dispersion_parts[market_name].append(
+                            branch.market_encoder.last_market_dispersions[
+                                market_name
+                            ].norm(dim=-1).cpu()
+                        )
+
+            probabilities = torch.cat(p_batches)
+            priors = torch.cat(prior_batches)
+            entropy = -(
+                probabilities * (probabilities + eps).log()
+            ).sum(dim=-1)
+            prior_entropy = -(priors * (priors + eps).log()).sum(dim=-1)
+            top2 = probabilities.topk(2, dim=-1).values
+            margin = top2[..., 0] - top2[..., 1]
+            occupancy = probabilities.argmax(dim=-1)
+            print(
+                f"  [S2F {split_name.upper()}] mean p="
+                f"{probabilities.mean(dim=(0, 1)).numpy().round(4)} "
+                f"entropy={entropy.mean().item():.6f} "
+                f"mean max p={probabilities.max(dim=-1).values.mean().item():.6f}"
+            )
+            print(
+                f"  [S2F {split_name.upper()}] margin mean/median="
+                f"{margin.mean().item():.6f}/{margin.median().item():.6f}"
+            )
+            print(
+                f"  [S2F {split_name.upper()} prior] mean p="
+                f"{priors.mean(dim=(0, 1)).numpy().round(4)} "
+                f"entropy={prior_entropy.mean().item():.6f} "
+                f"mean max p={priors.max(dim=-1).values.mean().item():.6f}"
+            )
+            print(f"  [S2F {split_name.upper()}] argmax occupancy")
+            for state in range(branch.K):
+                print(
+                    f"    state {state} = "
+                    f"{(occupancy == state).float().mean().item() * 100:.2f}%"
+                )
+
+    parts = {name: torch.cat(values) for name, values in test_parts.items()}
+    p = parts["p"]
+    prior = parts["prior"]
+    evidence = parts["evidence"]
+    probability_sum_error = (p.sum(dim=-1) - 1.0).abs().max()
+    print(
+        f"  [S2F probability legality] min={p.min().item():.6e} "
+        f"max probability-sum error={probability_sum_error.item():.3e}"
+    )
+    evidence_range = evidence.max(dim=-1).values - evidence.min(dim=-1).values
+    evidence_within_std = evidence.std(dim=-1, unbiased=False)
+    print(
+        f"  [S2F evidence] mean={evidence.mean().item():.6f} "
+        f"std={evidence.std(unbiased=False).item():.6f} "
+        f"min={evidence.min().item():.6f} max={evidence.max().item():.6f} "
+        f"mean abs={evidence.abs().mean().item():.6f}"
+    )
+    print(
+        f"  [S2F evidence] mean within-K range={evidence_range.mean().item():.6f} "
+        f"mean within-K std={evidence_within_std.mean().item():.6f}"
+    )
+
+    posterior_entropy = -(p * (p + eps).log()).sum(dim=-1)
+    prior_entropy = -(prior * (prior + eps).log()).sum(dim=-1)
+    posterior_kl = (
+        p * ((p + eps).log() - (prior + eps).log())
+    ).sum(dim=-1)
+    posterior_l1 = (p - prior).abs().sum(dim=-1)
+    temporal_l1 = (p[:, 1:] - p[:, :-1]).abs().sum(dim=-1)
+    top2 = p.topk(2, dim=-1).values
+    margin = top2[..., 0] - top2[..., 1]
+    print(
+        f"  [S2F prior] entropy={prior_entropy.mean().item():.6f} "
+        f"mean max p={prior.max(dim=-1).values.mean().item():.6f}"
+    )
+    print(
+        f"  [S2F posterior] entropy={posterior_entropy.mean().item():.6f} "
+        f"mean max p={p.max(dim=-1).values.mean().item():.6f} "
+        f"margin mean/median={margin.mean().item():.6f}/{margin.median().item():.6f}"
+    )
+    print(
+        f"  [S2F prior/posterior] mean KL={posterior_kl.mean().item():.6f} "
+        f"mean L1={posterior_l1.mean().item():.6f}"
+    )
+    print(
+        f"  [S2F dynamics] mean ||p_t-p_(t-1)||_1="
+        f"{temporal_l1.mean().item():.6f}"
+    )
+    for step in range(0, min(p.shape[1], 20), 2):
+        print(f"  [S2F p t={step}] {p[:, step].mean(dim=0).numpy().round(4)}")
+
+    transition = branch.transition_matrix().detach().cpu()
+    transition_entropy = -(
+        transition * (transition + eps).log()
+    ).sum(dim=-1)
+    diagonal = transition.diagonal()
+    print(f"  [S2F transition matrix]\n{transition.numpy().round(6)}")
+    print(
+        f"  [S2F transition] row sums="
+        f"{transition.sum(dim=-1).numpy().round(8)} diagonal="
+        f"{diagonal.numpy().round(6)} mean persistence={diagonal.mean().item():.6f}"
+    )
+    print(
+        f"  [S2F transition] row entropy="
+        f"{transition_entropy.numpy().round(6)} mean={transition_entropy.mean().item():.6f}"
+    )
+    initial_transition = getattr(branch, "_initial_transition_logits", None)
+    absolute_drift_value = float("nan")
+    if initial_transition is not None:
+        drift = (
+            inference.transition_logits.detach().cpu() - initial_transition
+        ).norm() / (initial_transition.norm() + eps)
+        absolute_drift = (
+            inference.transition_logits.detach().cpu() - initial_transition
+        ).norm()
+        absolute_drift_value = absolute_drift.item()
+        print(
+            f"  [S2F transition] parameter drift absolute="
+            f"{absolute_drift.item():.3e} relative={drift.item():.3e}"
+        )
+
+    base_bias = parts["base_bias"]
+    regime_bias = parts["regime_bias"]
+    qk = parts["qk"]
+    centered_tables = rpe.centered_regime_rpe().detach().cpu()
+    print(
+        f"  [S2F RPE norm] base raw={rpe.base_rpe.detach().norm().item():.6f} "
+        f"regime raw={rpe.regime_rpe.detach().norm().item():.6f} "
+        f"centered regime={centered_tables.norm().item():.6f}"
+    )
+    mean_qk = qk.abs().mean()
+    mean_base = base_bias.abs().mean()
+    mean_regime = regime_bias.abs().mean()
+    print(
+        f"  [S2F attention scale] mean |QK/sqrt(d)|={mean_qk.item():.6e} "
+        f"mean |base_rpe_bias|={mean_base.item():.6e} "
+        f"mean |regime_rpe_bias|={mean_regime.item():.6e}"
+    )
+    print(
+        f"  [S2F attention scale] base/QK="
+        f"{(mean_base / (mean_qk + eps)).item():.6e} regime/QK="
+        f"{(mean_regime / (mean_qk + eps)).item():.6e} regime/base="
+        f"{(mean_regime / (mean_base + eps)).item():.6e}"
+    )
+    uniform = torch.full(
+        (1, p.shape[1], branch.K), 1.0 / branch.K, device=device
+    )
+    _, uniform_regime_bias = rpe.components(uniform)
+    print(
+        f"  [S2F uniform-p RPE sanity] max_abs(regime_bias_uniform)="
+        f"{uniform_regime_bias.abs().max().item():.3e}"
+    )
+    state_distances = []
+    for left, right in ((0, 1), (0, 2), (1, 2)):
+        distance = (centered_tables[left] - centered_tables[right]).abs().mean()
+        state_distances.append(distance.item())
+        print(
+            f"  [S2F state RPE distance] state{left}/state{right}="
+            f"{distance.item():.6e}"
+        )
+    table_center = rpe.max_len - 1
+    for delta in (-19, -10, -5, -2, -1, 0, 1, 2, 5, 10, 19):
+        if abs(delta) >= rpe.max_len:
+            continue
+        values = centered_tables[:, :, table_center + delta].mean(dim=-1)
+        print(
+            f"  [S2F lag RPE delta={delta:+d}] state means="
+            f"{values.numpy().round(6)}"
+        )
+
+    for market_name in branch.market_encoder.MARKET_NAMES:
+        dispersion = torch.cat(dispersion_parts[market_name]).reshape(-1)
+        flat_p = p.reshape(-1, branch.K)
+        count = max(1, int(0.1 * dispersion.numel()))
+        order = dispersion.argsort()
+        low_p = flat_p[order[:count]].mean(dim=0)
+        high_p = flat_p[order[-count:]].mean(dim=0)
+        print(
+            f"  [S2F {market_name} dispersion sensitivity] high p="
+            f"{high_p.numpy().round(4)} low p={low_p.numpy().round(4)} "
+            f"L1={(high_p - low_p).abs().sum().item():.6f}"
+        )
+
+    print(
+        f"  [S2F temporal norms] E={parts['E'].norm(dim=-1).mean().item():.6f} "
+        f"H_reg={parts['H_reg'].norm(dim=-1).mean().item():.6f} "
+        f"Forecast H={parts['H_forecast'].norm(dim=-1).mean().item():.6f} "
+        f"h_temporal={parts['h_temporal'].norm(dim=-1).mean().item():.6f}"
+    )
+
+    x_batch, y_batch = next(iter(loaders["test"]))[:2]
+    x_batch = x_batch[:16].to(device)
+    y_batch = y_batch[:16].to(device)
+    model.train()
+    model.zero_grad(set_to_none=True)
+    prediction = model(x_batch)
+    return_loss = _prediction_loss(prediction, y_batch, make_loss())
+    switch_raw = inference._last_switch_loss
+    weighted_switch = branch.switch_loss()
+    total_loss = return_loss + weighted_switch
+    gradient_groups = {
+        "Regime Evidence Transformer": list(branch.regime_evidence.parameters()),
+        "observation_head": list(inference.observation_head.parameters()),
+        "transition_logits": [inference.transition_logits],
+        "base_rpe": [rpe.base_rpe],
+        "regime_rpe": [rpe.regime_rpe],
+        "Forecast Transformer": [
+            parameter
+            for name, parameter in forecast.named_parameters()
+            if not name.startswith("relative_position.")
+        ],
+    }
+    flat_parameters = [
+        parameter for parameters in gradient_groups.values()
+        for parameter in parameters
+    ]
+    prediction_gradients = torch.autograd.grad(
+        return_loss, flat_parameters, retain_graph=True, allow_unused=True
+    )
+    offset = 0
+    prediction_gradient_norms = {}
+    for name, parameters in gradient_groups.items():
+        values = prediction_gradients[offset:offset + len(parameters)]
+        offset += len(parameters)
+        gradient_norm = _aggregate_gradient_norm(parameters, values)
+        prediction_gradient_norms[name] = gradient_norm
+        print(
+            f"  [S2F prediction-only grad] {name}="
+            f"{gradient_norm:.3e}"
+        )
+    total_loss.backward()
+    for name, parameters in gradient_groups.items():
+        print(
+            f"  [S2F total-loss grad] {name}="
+            f"{_aggregate_gradient_norm(parameters):.3e}"
+        )
+    print(f"  [S2F loss] L_return={return_loss.item():.6e}")
+    print(f"  [S2F loss] L_switch_raw={switch_raw.item():.6e}")
+    print(f"  [S2F loss] beta={inference.current_beta:.6e}")
+    print(f"  [S2F loss] weighted_switch={weighted_switch.item():.6e}")
+    print(f"  [S2F loss] total={total_loss.item():.6e}")
+    print(
+        f"  [S2F loss] switch_to_return_ratio="
+        f"{abs(weighted_switch.item()) / (return_loss.item() + eps):.6e}"
+    )
+
+    model.eval()
+    forced_prediction_diffs = []
+    with torch.no_grad():
+        prediction_real = model(x_batch)
+        temporal_real = branch.last_h_temporal.clone()
+        regime_bias_real = rpe.last_regime_bias.clone()
+        for state in range(branch.K):
+            forced = torch.zeros(branch.K, device=device)
+            forced[state] = 1.0
+            prediction_forced = model._switching_filter_rpe_forward(
+                x_batch, forced_rpe_probabilities=forced
+            )
+            temporal_forced = branch.last_h_temporal
+            regime_bias_forced = rpe.last_regime_bias
+            bias_diff = (regime_bias_forced - regime_bias_real).abs()
+            temporal_diff = (temporal_forced - temporal_real).abs()
+            prediction_diff = (prediction_forced - prediction_real).abs()
+            forced_prediction_diffs.append(prediction_diff.max().item())
+            print(
+                f"  [S2F forced state {state}] relative bias mean/max diff="
+                f"{bias_diff.mean().item():.3e}/{bias_diff.max().item():.3e} "
+                f"h_temporal mean/max diff="
+                f"{temporal_diff.mean().item():.3e}/{temporal_diff.max().item():.3e} "
+                f"prediction mean/max diff="
+                f"{prediction_diff.mean().item():.3e}/{prediction_diff.max().item():.3e}"
+            )
+
+        split = min(11, x_batch.shape[1])
+        original_tokens = branch.encode_market_tokens(x_batch)
+        original_p = branch.infer_regimes(original_tokens)
+        original_prior = inference.last_priors.clone()
+        perturbed = x_batch.clone()
+        perturbed[:, split:] = torch.randn_like(perturbed[:, split:])
+        perturbed_tokens = branch.encode_market_tokens(perturbed)
+        perturbed_p = branch.infer_regimes(perturbed_tokens)
+        perturbed_prior = inference.last_priors
+        print(
+            f"  [S2F causality] max p diff through t=10="
+            f"{(original_p[:, :split] - perturbed_p[:, :split]).abs().max().item():.3e} "
+            f"max prior diff="
+            f"{(original_prior[:, :split] - perturbed_prior[:, :split]).abs().max().item():.3e}"
+        )
+
+        tokens_batch = branch.encode_market_tokens(x_batch)
+        temporal_batch = branch.temporal_forward(tokens_batch)
+        p_batch = branch.last_regime_probabilities.clone()
+        prior_batch = inference.last_priors.clone()
+        tokens_single = branch.encode_market_tokens(x_batch[:1])
+        temporal_single = branch.temporal_forward(tokens_single)
+        p_single = branch.last_regime_probabilities.clone()
+        prior_single = inference.last_priors.clone()
+        print(
+            f"  [S2F batch independence] E="
+            f"{(tokens_batch[:1] - tokens_single).abs().max().item():.3e} "
+            f"p={(p_batch[:1] - p_single).abs().max().item():.3e} "
+            f"prior={(prior_batch[:1] - prior_single).abs().max().item():.3e} "
+            f"h_temporal={(temporal_batch[:1] - temporal_single).abs().max().item():.3e}"
+        )
+
+        tokens_reference = branch.encode_market_tokens(x_batch)
+        temporal_reference = branch.temporal_forward(tokens_reference)
+        p_reference = branch.last_regime_probabilities.clone()
+        offsets = {
+            "stock": (0, branch.market_encoder.market_sizes["stock"]),
+            "bond": (
+                branch.market_encoder.market_sizes["stock"],
+                branch.market_encoder.market_sizes["stock"]
+                + branch.market_encoder.market_sizes["bond"],
+            ),
+            "commodity": (
+                branch.market_encoder.market_sizes["stock"]
+                + branch.market_encoder.market_sizes["bond"],
+                sum(branch.market_encoder.market_sizes.values()),
+            ),
+        }
+        for market_name, (start, end) in offsets.items():
+            permuted = x_batch.clone()
+            order = torch.randperm(end - start, device=device)
+            permuted[:, :, start:end] = x_batch[:, :, start:end].index_select(
+                2, order
+            )
+            permuted_tokens = branch.encode_market_tokens(permuted)
+            permuted_temporal = branch.temporal_forward(permuted_tokens)
+            permuted_p = branch.last_regime_probabilities
+            print(
+                f"  [S2F {market_name} permutation] E="
+                f"{(permuted_tokens - tokens_reference).abs().max().item():.3e} "
+                f"p={(permuted_p - p_reference).abs().max().item():.3e} "
+                f"h_temporal="
+                f"{(permuted_temporal - temporal_reference).abs().max().item():.3e}"
+            )
+
+    return {
+        "posterior_entropy": posterior_entropy.mean().item(),
+        "mean_margin": margin.mean().item(),
+        "temporal_l1": temporal_l1.mean().item(),
+        "transition_drift": absolute_drift_value,
+        "prediction_gradient_norms": prediction_gradient_norms,
+        "mean_state_rpe_distance": float(np.mean(state_distances)),
+        "uniform_regime_bias_max": uniform_regime_bias.abs().max().item(),
+        "max_forced_prediction_diff": max(forced_prediction_diffs),
+    }
+
+
 def _print_split_router_diagnostics(model, loaders, device, label):
     rd = model.regime_dynamic
     mean_probabilities = {}
@@ -1258,7 +1657,9 @@ def print_diagnostics(model, variant, loaders, device):
         f"max={alpha.max().item():.4f}"
     )
     if variant in ("switching_transformer", "switching_null_control"):
-        _switching_transformer_diagnostics(model, loaders, device)
+        return _switching_transformer_diagnostics(model, loaders, device)
+    elif variant == "switching_filter_rpe":
+        return _switching_filter_rpe_diagnostics(model, loaders, device)
     elif variant in ("market_token_transformer", "market_dispersion_transformer"):
         _market_token_diagnostics(model, test_loader, device)
     elif variant in (
@@ -1366,6 +1767,11 @@ def run_variant(name, variant, args, device, data):
         model.switching_transformer._initial_parameter_groups = (
             _snapshot_switching_parameter_groups(model.switching_transformer)
         )
+    if variant == "switching_filter_rpe":
+        model.switching_filter_rpe._initial_transition_logits = (
+            model.switching_filter_rpe.regime_inference.transition_logits
+            .detach().cpu().clone()
+        )
     parameter_count = sum(parameter.numel() for parameter in model.parameters())
     print(f"\n{name} ({variant}) — {parameter_count:,} parameters")
     if variant in ("market_token_transformer", "market_dispersion_transformer"):
@@ -1427,6 +1833,44 @@ def run_variant(name, variant, args, device, data):
             f"posterior heads={posterior_params:,}; transition={transition_params:,}; "
             f"regime embeddings={embedding_params:,}"
         )
+    elif variant == "switching_filter_rpe":
+        branch = model.switching_filter_rpe
+        evidence_params = sum(
+            parameter.numel() for parameter in branch.regime_evidence.parameters()
+        )
+        observation_params = sum(
+            parameter.numel()
+            for parameter in branch.regime_inference.observation_head.parameters()
+        )
+        transition_params = branch.regime_inference.transition_logits.numel()
+        base_rpe_params = branch.transformer.relative_position.base_rpe.numel()
+        regime_rpe_params = branch.transformer.relative_position.regime_rpe.numel()
+        s2f_increase = (
+            evidence_params + observation_params + transition_params
+            + base_rpe_params + regime_rpe_params
+        )
+        s0d_params = parameter_count - s2f_increase
+        s1_posterior_params = 3 * (128 * 3 + 3)
+        s1_embedding_params = 3 * 128
+        s1_params = (
+            s0d_params + evidence_params + s1_posterior_params
+            + transition_params + s1_embedding_params
+        )
+        print(
+            f"  S0D params={s0d_params:,}; S1 params={s1_params:,}; "
+            f"S2F params={parameter_count:,}"
+        )
+        print(
+            f"  S2F added params: evidence Transformer={evidence_params:,}; "
+            f"observation head={observation_params:,}; "
+            f"transition={transition_params:,}; base RPE={base_rpe_params:,}; "
+            f"regime RPE={regime_rpe_params:,}"
+        )
+        print(
+            f"  S2F-S1 net change={parameter_count - s1_params:+,}; "
+            f"removed posterior heads={s1_posterior_params:,} and "
+            f"regime embeddings={s1_embedding_params:,}"
+        )
 
     started = time.time()
     loaders = (
@@ -1452,7 +1896,7 @@ def run_variant(name, variant, args, device, data):
     normalized, original, target = evaluate_primary_horizon(
         model, loaders["test"], data, device
     )
-    print_diagnostics(model, variant, loaders, device)
+    diagnostics = print_diagnostics(model, variant, loaders, device)
 
     zero_metrics = compute_metrics(np.zeros_like(target), target)
     versus_zero = (normalized["MAE"] - zero_metrics["MAE"]) / zero_metrics["MAE"] * 100
@@ -1472,6 +1916,7 @@ def run_variant(name, variant, args, device, data):
         "vs_zero_pct": versus_zero,
         "mn": normalized,
         "mo": original,
+        "diagnostics": diagnostics,
     }
 
 
@@ -1549,6 +1994,81 @@ def _print_s1c_control_comparison(results):
     print(f"  [{case}] {conclusion}")
 
 
+def _print_s2f_conclusion(results):
+    result = next(
+        (item for item in results if item["variant"] == "S2F-SwitchingFilterRPE"),
+        None,
+    )
+    if result is None or not result.get("diagnostics"):
+        return
+    diagnostics = result["diagnostics"]
+    gradients = diagnostics["prediction_gradient_norms"]
+    required_gradient_names = (
+        "Regime Evidence Transformer",
+        "observation_head",
+        "transition_logits",
+        "regime_rpe",
+    )
+    connected = all(gradients[name] > 0.0 for name in required_gradient_names)
+    near_uniform = (
+        abs(diagnostics["posterior_entropy"] - np.log(3.0)) < 1e-3
+        and diagnostics["mean_margin"] < 1e-3
+    )
+    dynamic = (
+        diagnostics["temporal_l1"] > 1e-3
+        and diagnostics["transition_drift"] > 0.0
+    )
+    distinct_rpe = (
+        diagnostics["mean_state_rpe_distance"] > 1e-8
+        and diagnostics["max_forced_prediction_diff"] > 0.0
+        and diagnostics["uniform_regime_bias_max"] < 1e-6
+    )
+    extreme = (
+        diagnostics["posterior_entropy"] < 0.1
+        or diagnostics["temporal_l1"] > 0.75
+    )
+    improves = result["MAE"] < 0.023073
+    near_s0d = abs(result["MAE"] - 0.023073) <= 2e-4
+
+    if extreme:
+        case = "Case E"
+        conclusion = (
+            "The posterior is extremely sharp or changes unusually fast; "
+            "report prior/evidence/posterior and loss scale without retuning."
+        )
+    elif improves and near_uniform:
+        case = "Case B"
+        conclusion = (
+            "Prediction improves while filtering remains effectively uniform; "
+            "the gain must not be attributed to regime conditioning."
+        )
+    elif improves and dynamic and connected and distinct_rpe:
+        case = "Case A"
+        conclusion = (
+            "Filtering is dynamic, prediction-connected, and RPE-distinct while "
+            "outperforming S0D."
+        )
+    elif dynamic and connected and distinct_rpe and near_s0d:
+        case = "Case C"
+        conclusion = (
+            "The switching mechanism is identifiable and prediction-connected, "
+            "but its forecast accuracy remains near S0D."
+        )
+    elif near_uniform and connected:
+        case = "Case D"
+        conclusion = (
+            "The regime path receives prediction gradients but the posterior "
+            "still collapses near uniform; observation sufficiency is the next question."
+        )
+    else:
+        case = "Mixed"
+        conclusion = (
+            "The run does not cleanly satisfy one predefined case; interpret the "
+            "printed filtering, gradient, RPE, and prediction diagnostics jointly."
+        )
+    print(f"\nS2F structural conclusion: [{case}] {conclusion}")
+
+
 def main():
     args = parse_args()
     variants = select_variants(args.variants)
@@ -1580,6 +2100,7 @@ def main():
         )
 
     _print_s1c_control_comparison(results)
+    _print_s2f_conclusion(results)
 
     ExperimentLogger().log_run(
         {

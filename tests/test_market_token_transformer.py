@@ -4,9 +4,12 @@ from torch.utils.data import DataLoader, TensorDataset
 from cmgm.models.hetero_mixhop_model import HeteroMixHopCMGM
 from cmgm.models.switching_transformer import (
     BaseTemporalTransformer,
+    CenteredRegimeRelativePositionBias,
+    MarkovFilteringRegimeInference,
     MarketAwareTemporalEncoder,
     MarketTokenTransformerBranch,
     RegimeEvidenceTransformer,
+    SwitchingFilterRPEBranch,
     SwitchingRegimeInference,
     SwitchingTransformerBranch,
 )
@@ -459,6 +462,214 @@ def test_s1c_train_epoch_keeps_all_switching_parameters_frozen():
         torch.testing.assert_close(
             before, after.detach(), rtol=0.0, atol=0.0
         )
+
+
+def test_s2f_markov_filter_matches_log_prior_plus_evidence_formula():
+    torch.manual_seed(1901)
+    filtering = MarkovFilteringRegimeInference(
+        d_model=8, K=3, sticky_alpha=0.5, tau=1.0
+    )
+    evidence = torch.randn(2, 6, 8)
+    probabilities = filtering(evidence)
+    transition = filtering.transition_matrix()
+
+    assert not hasattr(filtering, "posterior_heads")
+    assert probabilities.min() >= 0
+    assert (probabilities.sum(dim=-1) - 1).abs().max() < 1e-6
+    torch.testing.assert_close(
+        transition.diagonal(), torch.full((3,), 2.0 / 3.0),
+        atol=1e-6, rtol=1e-6,
+    )
+    previous = torch.full((2, 3), 1.0 / 3.0)
+    expected_probabilities = []
+    expected_priors = []
+    for step in range(evidence.shape[1]):
+        prior = previous @ transition
+        observation = filtering.observation_head(evidence[:, step])
+        posterior = torch.softmax(torch.log(prior + filtering.eps) + observation, -1)
+        expected_priors.append(prior)
+        expected_probabilities.append(posterior)
+        previous = posterior
+    torch.testing.assert_close(
+        filtering.last_priors, torch.stack(expected_priors, dim=1)
+    )
+    torch.testing.assert_close(
+        probabilities, torch.stack(expected_probabilities, dim=1)
+    )
+
+
+def test_s2f_centered_regime_rpe_uniform_sanity_and_signed_delta():
+    torch.manual_seed(1902)
+    rpe = CenteredRegimeRelativePositionBias(max_len=7, n_heads=2, K=3)
+    uniform = torch.full((2, 7, 3), 1.0 / 3.0)
+    base_bias, regime_bias = rpe.components(uniform)
+
+    assert rpe.base_rpe.shape == (2, 13)
+    assert rpe.regime_rpe.shape == (3, 2, 13)
+    assert base_bias.shape == (2, 2, 7, 7)
+    assert regime_bias.shape == (2, 2, 7, 7)
+    assert regime_bias.abs().max() < 1e-6
+    expected_delta = torch.arange(7).unsqueeze(1) - torch.arange(7).unsqueeze(0)
+    torch.testing.assert_close(rpe.last_relative_delta, expected_delta)
+    centered = rpe.centered_regime_rpe()
+    assert centered.mean(dim=0).abs().max() < 1e-7
+
+
+def test_s2f_prediction_path_reaches_filter_transition_and_regime_rpe():
+    torch.manual_seed(1903)
+    branch = SwitchingFilterRPEBranch(
+        5, 4, 3, 2, d_model=16, n_heads=4, n_layers=2,
+        ffn_dim=32, output_dim=8, dropout=0.0, max_len=7,
+    )
+    output = branch(torch.randn(3, 7, 9, 5))
+    return_loss = output.square().mean()
+    groups = {
+        "evidence": list(branch.regime_evidence.parameters()),
+        "observation": list(branch.regime_inference.observation_head.parameters()),
+        "transition": [branch.regime_inference.transition_logits],
+        "base_rpe": [branch.transformer.relative_position.base_rpe],
+        "regime_rpe": [branch.transformer.relative_position.regime_rpe],
+        "forecast": list(branch.transformer.layers.parameters()),
+    }
+    gradients = torch.autograd.grad(
+        return_loss,
+        [parameter for values in groups.values() for parameter in values],
+        allow_unused=True,
+    )
+    offset = 0
+    for values in groups.values():
+        group_gradients = gradients[offset:offset + len(values)]
+        offset += len(values)
+        assert any(
+            gradient is not None and gradient.abs().sum() > 0
+            for gradient in group_gradients
+        )
+    assert not hasattr(branch, "regime_embeddings")
+    assert not hasattr(branch.regime_inference, "posterior_heads")
+
+
+def test_s2f_forced_states_change_only_rpe_conditioned_forecast():
+    torch.manual_seed(1904)
+    branch = SwitchingFilterRPEBranch(
+        5, 4, 3, 2, d_model=16, n_heads=4, n_layers=2,
+        ffn_dim=32, output_dim=8, dropout=0.0, max_len=7,
+    ).eval()
+    x = torch.randn(2, 7, 9, 5)
+    state0 = torch.tensor([1.0, 0.0, 0.0])
+    state2 = torch.tensor([0.0, 0.0, 1.0])
+    output0 = branch(x, forced_rpe_probabilities=state0)
+    p0 = branch.last_regime_probabilities.clone()
+    bias0 = branch.transformer.relative_position.last_regime_bias.clone()
+    output2 = branch(x, forced_rpe_probabilities=state2)
+    p2 = branch.last_regime_probabilities.clone()
+    bias2 = branch.transformer.relative_position.last_regime_bias.clone()
+
+    torch.testing.assert_close(p0, p2, rtol=0.0, atol=0.0)
+    assert (bias0 - bias2).abs().max() > 0
+    assert (output0 - output2).abs().max() > 0
+
+
+def test_s2f_causality_batch_independence_and_market_permutation():
+    torch.manual_seed(1905)
+    branch = SwitchingFilterRPEBranch(
+        5, 4, 3, 2, d_model=16, n_heads=4, n_layers=2,
+        ffn_dim=32, output_dim=8, dropout=0.0, max_len=12,
+    ).eval()
+    x = torch.randn(3, 12, 9, 5)
+    tokens = branch.encode_market_tokens(x)
+    output = branch.temporal_forward(tokens)
+    probabilities = branch.last_regime_probabilities.clone()
+    priors = branch.regime_inference.last_priors.clone()
+
+    perturbed = x.clone()
+    perturbed[:, 7:] = torch.randn_like(perturbed[:, 7:])
+    branch(perturbed)
+    torch.testing.assert_close(
+        probabilities[:, :7], branch.last_regime_probabilities[:, :7],
+        atol=1e-6, rtol=1e-6,
+    )
+    torch.testing.assert_close(
+        priors[:, :7], branch.regime_inference.last_priors[:, :7],
+        atol=1e-6, rtol=1e-6,
+    )
+
+    single_tokens = branch.encode_market_tokens(x[:1])
+    single_output = branch.temporal_forward(single_tokens)
+    single_p = branch.last_regime_probabilities.clone()
+    single_prior = branch.regime_inference.last_priors.clone()
+    torch.testing.assert_close(tokens[:1], single_tokens, atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(output[:1], single_output, atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(probabilities[:1], single_p, atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(priors[:1], single_prior, atol=1e-6, rtol=1e-6)
+
+    for start, end in ((0, 4), (4, 7), (7, 9)):
+        permuted = x.clone()
+        order = torch.arange(end - start - 1, -1, -1)
+        permuted[:, :, start:end] = x[:, :, start:end].index_select(2, order)
+        permuted_tokens = branch.encode_market_tokens(permuted)
+        permuted_output = branch.temporal_forward(permuted_tokens)
+        torch.testing.assert_close(permuted_tokens, tokens, atol=1e-6, rtol=1e-6)
+        torch.testing.assert_close(
+            branch.last_regime_probabilities, probabilities, atol=1e-6, rtol=1e-6
+        )
+        torch.testing.assert_close(permuted_output, output, atol=1e-6, rtol=1e-6)
+
+
+def test_s2f_full_model_registration_and_switch_loss_training_path():
+    torch.manual_seed(1906)
+    model = HeteroMixHopCMGM(
+        num_nodes=6,
+        n_commodities=2,
+        n_stock=2,
+        n_bond=2,
+        feat_dim=5,
+        variant="switching_filter_rpe",
+    )
+    branch = model.switching_filter_rpe
+    branch.set_epoch(20)
+    prediction = model(torch.randn(2, 7, 6, 5))
+    total_loss = prediction.square().mean() + branch.switch_loss()
+    total_loss.backward()
+
+    assert prediction.shape == (2, model.n_horizons, 2)
+    assert branch.regime_inference._last_switch_loss.item() >= 0
+    assert branch.regime_inference.transition_logits.grad is not None
+    assert branch.regime_inference.transition_logits.grad.abs().sum() > 0
+
+
+def test_s2f_reuses_s0d_encoder_and_has_no_s1_conditioning_mechanisms():
+    common = dict(
+        num_nodes=6,
+        n_commodities=2,
+        n_stock=2,
+        n_bond=2,
+        feat_dim=5,
+    )
+    torch.manual_seed(1907)
+    s0d = HeteroMixHopCMGM(
+        variant="market_dispersion_transformer", **common
+    )
+    torch.manual_seed(1907)
+    s2f = HeteroMixHopCMGM(variant="switching_filter_rpe", **common)
+    s0d_encoder = s0d.market_token_transformer.market_encoder.state_dict()
+    s2f_encoder = s2f.switching_filter_rpe.market_encoder.state_dict()
+    assert s0d_encoder.keys() == s2f_encoder.keys()
+    for name in s0d_encoder:
+        torch.testing.assert_close(
+            s0d_encoder[name], s2f_encoder[name], rtol=0.0, atol=0.0
+        )
+
+    branch = s2f.switching_filter_rpe
+    x = torch.randn(2, 7, 6, 5)
+    branch(x)
+    torch.testing.assert_close(
+        branch.last_market_tokens,
+        branch.transformer.last_input_tokens,
+        rtol=0.0,
+        atol=0.0,
+    )
+    assert not hasattr(branch, "regime_embeddings")
+    assert not hasattr(branch.regime_inference, "posterior_heads")
 
 
 def test_regime_evidence_transformer_is_causal():
