@@ -303,3 +303,80 @@ def test_i_forced_raw_and_downstream_overrides_are_distinct():
     model.forced_regime_use = one_hot
     model(x, descriptor)
     torch.testing.assert_close(model.last_regime_p_use[0, 0], one_hot)
+
+
+def test_j_differs_from_i_only_by_fixed_context_gamma():
+    common = dict(
+        in_dim=6,
+        d_model=8,
+        n_heads=2,
+        n_layers=1,
+        ffn_dim=16,
+        t_len=20,
+        K=3,
+        D_regime=4,
+        use_semantic_router=True,
+        lambda_cluster=0.0005,
+        routing_strength=0.25,
+    )
+    torch.manual_seed(9)
+    model_i = RegimeDynamicRPETransformer(**common, context_gamma=5.0)
+    torch.manual_seed(9)
+    model_j = RegimeDynamicRPETransformer(**common, context_gamma=1.0)
+    model_i.eval()
+    model_j.eval()
+
+    assert model_i.state_dict().keys() == model_j.state_dict().keys()
+    for name, tensor_i in model_i.state_dict().items():
+        torch.testing.assert_close(tensor_i, model_j.state_dict()[name])
+    assert model_i.routing_strength == model_j.routing_strength == 0.25
+    assert model_i.lambda_cluster == model_j.lambda_cluster == 0.0005
+    assert model_i.lambda_info_max == model_j.lambda_info_max == 0.001
+    assert model_i.context_gamma == model_i.regime_gen.gamma == 5.0
+    assert model_j.context_gamma == model_j.regime_gen.gamma == 1.0
+
+    x = torch.randn(3, 20, 6)
+    descriptor = torch.randn(3, 20, 3)
+    model_i(x, descriptor)
+    model_j(x, descriptor)
+    torch.testing.assert_close(
+        model_j.regime_gen.last_context_score,
+        model_i.regime_gen.last_context_score / 5.0,
+    )
+    torch.testing.assert_close(
+        model_j.regime_gen.last_semantic_score,
+        model_i.regime_gen.last_semantic_score,
+    )
+    expected_use = 0.75 * torch.full_like(model_j.last_regime_p, 1.0 / 3.0)
+    expected_use = expected_use + 0.25 * model_j.last_regime_p
+    torch.testing.assert_close(model_j.last_regime_p_use, expected_use)
+
+
+def test_j_variant_wires_the_same_parameters_and_i_configuration():
+    common = dict(
+        num_nodes=4,
+        n_commodities=2,
+        n_stock=1,
+        n_bond=1,
+        feat_dim=21,
+    )
+    torch.manual_seed(10)
+    model_i = HeteroMixHopCMGM(variant="routing_strength", **common)
+    torch.manual_seed(10)
+    model_j = HeteroMixHopCMGM(variant="context_calibrated", **common)
+
+    assert model_i.state_dict().keys() == model_j.state_dict().keys()
+    for name, tensor_i in model_i.state_dict().items():
+        torch.testing.assert_close(tensor_i, model_j.state_dict()[name])
+    assert sum(p.numel() for p in model_i.parameters()) == sum(
+        p.numel() for p in model_j.parameters()
+    )
+    rd_i = model_i.regime_dynamic
+    rd_j = model_j.regime_dynamic
+    assert rd_i.routing_strength == rd_j.routing_strength == 0.25
+    assert rd_i.lambda_cluster == rd_j.lambda_cluster == 0.0005
+    assert rd_i.lambda_info_max == rd_j.lambda_info_max == 0.001
+    assert rd_i.regime_gen.tau_m == rd_j.regime_gen.tau_m == 1.0
+    assert rd_i.regime_gen.lambda_sem == rd_j.regime_gen.lambda_sem == 1.0
+    assert rd_i.regime_gen.gamma == 5.0
+    assert rd_j.regime_gen.gamma == 1.0

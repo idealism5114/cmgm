@@ -240,17 +240,19 @@ class RegimeDynamicRPETransformer(nn.Module):
                  use_state_loss: bool = False,
                  use_semantic_router: bool = False,
                  lambda_cluster: float = 0.005,
-                 routing_strength: float = 1.0):
+                 routing_strength: float = 1.0,
+                 context_gamma: float = 5.0):
         super().__init__()
         self.proj = nn.Linear(in_dim, d_model)
         self.use_semantic_router = use_semantic_router
         self.lambda_cluster = float(lambda_cluster)
         self.lambda_info_max = 0.001
         self.routing_strength = float(routing_strength)
+        self.context_gamma = float(context_gamma)
         if not 0.0 <= self.routing_strength <= 1.0:
             raise ValueError("routing_strength must be in [0, 1]")
         self.regime_gen = (
-            SemanticRegimeRouter(d_model, K, D_regime)
+            SemanticRegimeRouter(d_model, K, D_regime, gamma=self.context_gamma)
             if use_semantic_router
             else SoftRegimeGeneratorV2(d_model, K, D_regime)
         )
