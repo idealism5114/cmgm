@@ -122,3 +122,119 @@ def test_market_encoder_has_fewer_parameters_than_real_flat_projection():
     market_parameters = sum(parameter.numel() for parameter in encoder.parameters())
     flat_projection_parameters = 284 * 21 * 128 + 128
     assert market_parameters < flat_projection_parameters
+
+
+def test_s0d_hidden_dispersion_matches_population_std_and_shapes():
+    torch.manual_seed(14)
+    encoder = MarketAwareTemporalEncoder(
+        feat_dim=5,
+        n_stock=4,
+        n_bond=3,
+        n_commodity=2,
+        use_dispersion=True,
+    ).eval()
+    tokens = encoder(torch.randn(2, 7, 9, 5))
+
+    assert encoder.last_market_concat.shape == (2, 7, 192)
+    assert tokens.shape == (2, 7, 128)
+    for name in encoder.MARKET_NAMES:
+        encoded = encoder.last_node_encodings[name]
+        expected = encoded.std(dim=2, unbiased=False)
+        dispersion = encoder.last_market_dispersions[name]
+        assert dispersion.shape == (2, 7, 32)
+        assert encoder.last_market_tokens[name].shape == (2, 7, 32)
+        torch.testing.assert_close(dispersion, expected)
+
+
+def test_s0_and_s0d_differ_only_in_daily_projection_input_width():
+    s0 = MarketTokenTransformerBranch(5, 4, 3, 2, use_dispersion=False)
+    s0d = MarketTokenTransformerBranch(5, 4, 3, 2, use_dispersion=True)
+    shapes_s0 = {name: tuple(value.shape) for name, value in s0.state_dict().items()}
+    shapes_s0d = {name: tuple(value.shape) for name, value in s0d.state_dict().items()}
+
+    assert shapes_s0.keys() == shapes_s0d.keys()
+    differing_shapes = {
+        name for name in shapes_s0 if shapes_s0[name] != shapes_s0d[name]
+    }
+    assert differing_shapes == {"market_encoder.daily_projection.0.weight"}
+    assert shapes_s0["market_encoder.daily_projection.0.weight"] == (128, 96)
+    assert shapes_s0d["market_encoder.daily_projection.0.weight"] == (128, 192)
+    assert (
+        sum(parameter.numel() for parameter in s0d.parameters())
+        - sum(parameter.numel() for parameter in s0.parameters())
+        == 96 * 128
+    )
+
+
+def test_s0d_zero_component_and_all_dispersion_diagnostics_are_inference_only():
+    torch.manual_seed(15)
+    branch = MarketTokenTransformerBranch(
+        5, 4, 3, 2, use_dispersion=True
+    ).eval()
+    x = torch.randn(2, 7, 9, 5)
+    reference = branch.encode_market_tokens(x)
+    zero_stock_level = branch.encode_market_tokens(
+        x, zero_component="stock_level"
+    )
+    zero_stock_dispersion = branch.encode_market_tokens(
+        x, zero_component="stock_dispersion"
+    )
+    zero_all_dispersion = branch.encode_market_tokens(
+        x, zero_component="all_dispersion"
+    )
+
+    assert (reference - zero_stock_level).abs().max() > 0
+    assert (reference - zero_stock_dispersion).abs().max() > 0
+    assert (reference - zero_all_dispersion).abs().max() > 0
+
+
+def test_s0d_is_permutation_invariant_and_batch_independent():
+    torch.manual_seed(16)
+    branch = MarketTokenTransformerBranch(
+        5, 4, 3, 2, use_dispersion=True
+    ).eval()
+    x = torch.randn(3, 8, 9, 5)
+    reference_tokens = branch.encode_market_tokens(x)
+    reference_output = branch.temporal_forward(reference_tokens)
+
+    for start, end in ((0, 4), (4, 7), (7, 9)):
+        permuted = x.clone()
+        permutation = torch.arange(end - start - 1, -1, -1)
+        permuted[:, :, start:end] = x[:, :, start:end].index_select(2, permutation)
+        tokens = branch.encode_market_tokens(permuted)
+        output = branch.temporal_forward(tokens)
+        torch.testing.assert_close(tokens, reference_tokens, atol=1e-6, rtol=1e-6)
+        torch.testing.assert_close(output, reference_output, atol=1e-6, rtol=1e-6)
+
+    single_tokens = branch.encode_market_tokens(x[:1])
+    single_output = branch.temporal_forward(single_tokens)
+    torch.testing.assert_close(
+        reference_tokens[:1], single_tokens, atol=1e-6, rtol=1e-6
+    )
+    torch.testing.assert_close(
+        reference_output[:1], single_output, atol=1e-6, rtol=1e-6
+    )
+
+
+def test_s0d_full_model_forward_and_dispersion_path_gradient():
+    torch.manual_seed(17)
+    model = HeteroMixHopCMGM(
+        num_nodes=6,
+        n_commodities=2,
+        n_stock=2,
+        n_bond=2,
+        feat_dim=5,
+        variant="market_dispersion_transformer",
+    )
+    prediction = model(torch.randn(2, 7, 6, 5))
+    prediction.square().mean().backward()
+
+    assert prediction.shape == (2, model.n_horizons, 2)
+    assert model.market_token_transformer.market_encoder.use_dispersion
+    projection_grad = (
+        model.market_token_transformer.market_encoder.daily_projection[0].weight.grad
+    )
+    assert projection_grad is not None
+    assert torch.isfinite(projection_grad).all()
+    assert projection_grad[:, 32:64].abs().sum() > 0
+    assert not hasattr(model, "regime_dynamic")
