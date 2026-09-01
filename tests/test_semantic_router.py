@@ -380,3 +380,80 @@ def test_j_variant_wires_the_same_parameters_and_i_configuration():
     assert rd_i.regime_gen.lambda_sem == rd_j.regime_gen.lambda_sem == 1.0
     assert rd_i.regime_gen.gamma == 5.0
     assert rd_j.regime_gen.gamma == 1.0
+
+
+def test_k_differs_from_j_only_by_fixed_context_gamma():
+    common = dict(
+        in_dim=6,
+        d_model=8,
+        n_heads=2,
+        n_layers=1,
+        ffn_dim=16,
+        t_len=20,
+        K=3,
+        D_regime=4,
+        use_semantic_router=True,
+        lambda_cluster=0.0005,
+        routing_strength=0.25,
+    )
+    torch.manual_seed(11)
+    model_j = RegimeDynamicRPETransformer(**common, context_gamma=1.0)
+    torch.manual_seed(11)
+    model_k = RegimeDynamicRPETransformer(**common, context_gamma=2.0)
+    model_j.eval()
+    model_k.eval()
+
+    assert model_j.state_dict().keys() == model_k.state_dict().keys()
+    for name, tensor_j in model_j.state_dict().items():
+        torch.testing.assert_close(tensor_j, model_k.state_dict()[name])
+    assert model_j.routing_strength == model_k.routing_strength == 0.25
+    assert model_j.lambda_cluster == model_k.lambda_cluster == 0.0005
+    assert model_j.lambda_info_max == model_k.lambda_info_max == 0.001
+    assert model_j.context_gamma == model_j.regime_gen.gamma == 1.0
+    assert model_k.context_gamma == model_k.regime_gen.gamma == 2.0
+
+    x = torch.randn(3, 20, 6)
+    descriptor = torch.randn(3, 20, 3)
+    model_j(x, descriptor)
+    model_k(x, descriptor)
+    torch.testing.assert_close(
+        model_k.regime_gen.last_context_score,
+        2.0 * model_j.regime_gen.last_context_score,
+    )
+    torch.testing.assert_close(
+        model_k.regime_gen.last_semantic_score,
+        model_j.regime_gen.last_semantic_score,
+    )
+    expected_use = 0.75 * torch.full_like(model_k.last_regime_p, 1.0 / 3.0)
+    expected_use = expected_use + 0.25 * model_k.last_regime_p
+    torch.testing.assert_close(model_k.last_regime_p_use, expected_use)
+
+
+def test_k_variant_matches_j_parameters_and_all_non_gamma_configuration():
+    common = dict(
+        num_nodes=4,
+        n_commodities=2,
+        n_stock=1,
+        n_bond=1,
+        feat_dim=21,
+    )
+    torch.manual_seed(12)
+    model_j = HeteroMixHopCMGM(variant="context_calibrated", **common)
+    torch.manual_seed(12)
+    model_k = HeteroMixHopCMGM(variant="context_balance", **common)
+
+    assert model_j.state_dict().keys() == model_k.state_dict().keys()
+    for name, tensor_j in model_j.state_dict().items():
+        torch.testing.assert_close(tensor_j, model_k.state_dict()[name])
+    assert sum(p.numel() for p in model_j.parameters()) == sum(
+        p.numel() for p in model_k.parameters()
+    )
+    rd_j = model_j.regime_dynamic
+    rd_k = model_k.regime_dynamic
+    assert rd_j.routing_strength == rd_k.routing_strength == 0.25
+    assert rd_j.lambda_cluster == rd_k.lambda_cluster == 0.0005
+    assert rd_j.lambda_info_max == rd_k.lambda_info_max == 0.001
+    assert rd_j.regime_gen.tau_m == rd_k.regime_gen.tau_m == 1.0
+    assert rd_j.regime_gen.lambda_sem == rd_k.regime_gen.lambda_sem == 1.0
+    assert rd_j.regime_gen.gamma == 1.0
+    assert rd_k.regime_gen.gamma == 2.0

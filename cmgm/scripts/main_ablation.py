@@ -1,4 +1,4 @@
-"""Run the retained A/F/F2/G/H/I ablations and J-ContextCalibrated.
+"""Run the retained A/F/F2/G/H/I/J ablations and K-ContextBalance.
 
 Usage:
     python -m cmgm.scripts.main_ablation
@@ -45,11 +45,12 @@ VARIANTS = [
     ("H-LossRebalance", "loss_rebalance"),
     ("I-RoutingStrength", "routing_strength"),
     ("J-ContextCalibrated", "context_calibrated"),
+    ("K-ContextBalance", "context_balance"),
 ]
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="HeteroMixHop A/F/F2/G/H/I/J ablations")
+    parser = argparse.ArgumentParser(description="HeteroMixHop A/F/F2/G/H/I/J/K ablations")
     parser.add_argument("--epochs", type=int, default=NUM_EPOCHS)
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
     parser.add_argument("--seq-len", type=int, default=SEQ_LEN)
@@ -58,7 +59,7 @@ def parse_args():
     parser.add_argument("--no-cuda", action="store_true")
     parser.add_argument(
         "--variants",
-        help="Comma-separated display or internal names; defaults to A/F/F2/G/H/I/J",
+        help="Comma-separated display or internal names; defaults to A/F/F2/G/H/I/J/K",
     )
     return parser.parse_args()
 
@@ -307,7 +308,7 @@ def _semantic_router_diagnostics(model, test_loader, device, label, all_loaders=
             f"  [{label} router score] mean absolute {name}_score="
             f"{np.abs(scores[name]).mean():.6f}"
         )
-    if label in ("I", "J"):
+    if label in ("I", "J", "K"):
         print(f"  [{label} context calibration] gamma={router.gamma:.1f}")
         within_ranges = {}
         for name in ("context", "semantic", "transition", "final"):
@@ -339,7 +340,7 @@ def _semantic_router_diagnostics(model, test_loader, device, label, all_loaders=
     entropy = -(p * np.log(p + 1e-9)).sum(axis=-1)
     transition = np.abs(np.diff(p, axis=1)).sum(axis=-1)
     probability_label = (
-        f"{label} p_raw" if label in ("I", "J") else f"{label} p"
+        f"{label} p_raw" if label in ("I", "J", "K") else f"{label} p"
     )
     print(
         f"  [{probability_label}] mean={np.round(p.mean(axis=(0, 1)), 4)} "
@@ -352,7 +353,7 @@ def _semantic_router_diagnostics(model, test_loader, device, label, all_loaders=
     for step in range(0, min(p.shape[1], 20), 2):
         print(f"  [{probability_label} t={step}] {np.round(p[:, step].mean(axis=0), 4)}")
 
-    if label in ("I", "J"):
+    if label in ("I", "J", "K"):
         entropy_use = -(p_use * np.log(p_use + 1e-9)).sum(axis=-1)
         print(
             f"  [{label} p_use] mean={np.round(p_use.mean(axis=(0, 1)), 4)} "
@@ -385,15 +386,15 @@ def _semantic_router_diagnostics(model, test_loader, device, label, all_loaders=
     for state in range(p.shape[-1]):
         print(f"    state {state} = {(last_hard_state == state).mean() * 100:.2f}%")
 
-    event_label = f"{label} p_raw" if label in ("I", "J") else label
+    event_label = f"{label} p_raw" if label in ("I", "J", "K") else label
     _event_test(event_label, "volatility", m_last[:, 1], p_last)
     _event_test(event_label, "abs_return", m_last[:, 0], p_last)
-    if label in ("I", "J"):
+    if label in ("I", "J", "K"):
         p_use_last = p_use[:, -1]
         _event_test(f"{label} p_use", "volatility", m_last[:, 1], p_use_last)
         _event_test(f"{label} p_use", "abs_return", m_last[:, 0], p_use_last)
 
-    if label in ("I", "J") and all_loaders is not None:
+    if label in ("I", "J", "K") and all_loaders is not None:
         _print_split_router_diagnostics(model, all_loaders, device, label)
 
     centers = rd.state_centers.detach().cpu().numpy()
@@ -492,7 +493,7 @@ def _semantic_router_diagnostics(model, test_loader, device, label, all_loaders=
         norm = parameter.grad.norm().item() if parameter.grad is not None else float("nan")
         print(f"  [{label} grad] {name}={norm:.3e}")
 
-    if label in ("I", "J"):
+    if label in ("I", "J", "K"):
         print(f"  [{label} temporal norm] E={rd.last_E.norm(dim=-1).mean().item():.6e}")
         for state in range(rd.last_zs.shape[0]):
             value = rd.last_zs[state].norm(dim=-1).mean().item()
@@ -517,7 +518,7 @@ def _semantic_router_diagnostics(model, test_loader, device, label, all_loaders=
         for state in range(3):
             forced = torch.zeros(3, device=device)
             forced[state] = 1.0
-            if label in ("I", "J"):
+            if label in ("I", "J", "K"):
                 rd.forced_regime_use = forced
             else:
                 rd.forced_regime = forced
@@ -525,7 +526,7 @@ def _semantic_router_diagnostics(model, test_loader, device, label, all_loaders=
             temporal_forced = rd.last_h_temporal
             forced_label = (
                 "forced downstream p_use"
-                if label in ("I", "J")
+                if label in ("I", "J", "K")
                 else "forced state"
             )
             print(
@@ -536,7 +537,7 @@ def _semantic_router_diagnostics(model, test_loader, device, label, all_loaders=
         rd.forced_regime = None
         rd.forced_regime_use = None
 
-        if label in ("I", "J"):
+        if label in ("I", "J", "K"):
             for state in range(3):
                 forced = torch.zeros(3, device=device)
                 forced[state] = 1.0
@@ -585,7 +586,7 @@ def _semantic_router_diagnostics(model, test_loader, device, label, all_loaders=
             p_use_original[:, :split] - p_use_perturbed[:, :split]
         ).abs().max().item()
     print(f"  [{label} causality] max p_raw diff before t=10={causal_diff:.3e}")
-    if label in ("I", "J"):
+    if label in ("I", "J", "K"):
         print(f"  [{label} causality] max p_use diff before t=10={causal_use_diff:.3e}")
     print("  [RPE delta] implementation uses query index i minus key index j")
 
@@ -606,13 +607,15 @@ def print_diagnostics(model, variant, loaders, device):
         f"max={alpha.max().item():.4f}"
     )
     if variant in (
-        "semantic_router", "loss_rebalance", "routing_strength", "context_calibrated"
+        "semantic_router", "loss_rebalance", "routing_strength", "context_calibrated",
+        "context_balance"
     ):
         labels = {
             "semantic_router": "G",
             "loss_rebalance": "H",
             "routing_strength": "I",
             "context_calibrated": "J",
+            "context_balance": "K",
         }
         label = labels[variant]
         _semantic_router_diagnostics(
@@ -622,7 +625,9 @@ def print_diagnostics(model, variant, loaders, device):
             label,
             all_loaders=(
                 loaders
-                if variant in ("routing_strength", "context_calibrated")
+                if variant in (
+                    "routing_strength", "context_calibrated", "context_balance"
+                )
                 else None
             ),
         )
@@ -659,7 +664,7 @@ def run_variant(name, variant, args, device, data):
         data["semantic_loaders"]
         if variant in (
             "semantic_router", "loss_rebalance", "routing_strength",
-            "context_calibrated"
+            "context_calibrated", "context_balance"
         )
         else data["loaders"]
     )
