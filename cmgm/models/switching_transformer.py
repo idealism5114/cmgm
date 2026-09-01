@@ -18,7 +18,7 @@ class MarketAwareTemporalEncoder(nn.Module):
 
     def __init__(self, feat_dim: int, n_stock: int, n_bond: int,
                  n_commodity: int, node_dim: int = 32,
-                 d_model: int = 128):
+                 d_model: int = 128, use_dispersion: bool = False):
         super().__init__()
         market_sizes = {
             "stock": int(n_stock),
@@ -30,6 +30,7 @@ class MarketAwareTemporalEncoder(nn.Module):
         self.feat_dim = int(feat_dim)
         self.node_dim = int(node_dim)
         self.d_model = int(d_model)
+        self.use_dispersion = bool(use_dispersion)
         self.market_sizes = market_sizes
         self.stock_encoder = self._make_node_encoder()
         self.bond_encoder = self._make_node_encoder()
@@ -37,8 +38,9 @@ class MarketAwareTemporalEncoder(nn.Module):
         self.stock_attention_score = nn.Linear(self.node_dim, 1)
         self.bond_attention_score = nn.Linear(self.node_dim, 1)
         self.commodity_attention_score = nn.Linear(self.node_dim, 1)
+        market_width = self.node_dim * (2 if self.use_dispersion else 1)
         self.daily_projection = nn.Sequential(
-            nn.Linear(self.node_dim * len(self.MARKET_NAMES), self.d_model),
+            nn.Linear(market_width * len(self.MARKET_NAMES), self.d_model),
             nn.LayerNorm(self.d_model),
         )
 
@@ -76,27 +78,62 @@ class MarketAwareTemporalEncoder(nn.Module):
             "commodity": x[:, :, bond_end:, :],
         }
 
-    def forward(self, x: torch.Tensor, zero_market: str = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, zero_market: str = None,
+                zero_component: str = None) -> torch.Tensor:
         if zero_market is not None and zero_market not in self.MARKET_NAMES:
             raise ValueError(f"zero_market must be one of {self.MARKET_NAMES}")
+        valid_components = {
+            f"{name}_{component}"
+            for name in self.MARKET_NAMES
+            for component in ("level", "dispersion")
+        } | {"all_dispersion"}
+        if zero_component is not None and zero_component not in valid_components:
+            raise ValueError(
+                f"zero_component must be one of {sorted(valid_components)}"
+            )
+        if zero_component is not None and not self.use_dispersion:
+            raise ValueError("zero_component diagnostics require use_dispersion=True")
         market_inputs = self._split_markets(x)
         node_encodings = {}
         attentions = {}
         market_tokens = {}
+        market_dispersions = {}
+        market_representations = {}
         for name, (node_encoder, attention_score) in self._market_modules().items():
             encoded = node_encoder(market_inputs[name])            # (B,T,N_m,32)
             logits = attention_score(encoded)                      # (B,T,N_m,1)
             attention = F.softmax(logits, dim=2)                   # node dimension
-            token = (attention * encoded).sum(dim=2)               # (B,T,32)
+            token = (attention * encoded).sum(dim=2)               # level: (B,T,32)
+            dispersion = (
+                encoded.std(dim=2, unbiased=False)                 # (B,T,32)
+                if self.use_dispersion
+                else None
+            )
             if zero_market == name:
                 token = torch.zeros_like(token)
+                if dispersion is not None:
+                    dispersion = torch.zeros_like(dispersion)
+            if zero_component == f"{name}_level":
+                token = torch.zeros_like(token)
+            if (
+                zero_component == f"{name}_dispersion"
+                or zero_component == "all_dispersion"
+            ):
+                dispersion = torch.zeros_like(dispersion)
             node_encodings[name] = encoded
             attentions[name] = attention.squeeze(-1)
             market_tokens[name] = token
+            if dispersion is not None:
+                market_dispersions[name] = dispersion
+            market_representations[name] = (
+                torch.cat([token, dispersion], dim=-1)
+                if self.use_dispersion
+                else token
+            )
 
         concatenated = torch.cat(
-            [market_tokens[name] for name in self.MARKET_NAMES], dim=-1
-        )                                                           # (B,T,96)
+            [market_representations[name] for name in self.MARKET_NAMES], dim=-1
+        )                                                   # S0: (B,T,96); S0D: (B,T,192)
         daily_tokens = self.daily_projection(concatenated)          # (B,T,128)
 
         self.last_node_encodings = {
@@ -108,6 +145,10 @@ class MarketAwareTemporalEncoder(nn.Module):
         self.last_market_tokens = {
             name: value.detach() for name, value in market_tokens.items()
         }
+        self.last_market_dispersions = {
+            name: value.detach() for name, value in market_dispersions.items()
+        }
+        self.last_market_concat = concatenated.detach()
         self.last_daily_tokens = daily_tokens.detach()
         return daily_tokens
 
@@ -203,7 +244,8 @@ class MarketTokenTransformerBranch(nn.Module):
                  n_commodity: int, node_dim: int = 32,
                  d_model: int = 128, n_heads: int = 4,
                  n_layers: int = 2, ffn_dim: int = 256,
-                 dropout: float = 0.1, output_dim: int = 64):
+                 dropout: float = 0.1, output_dim: int = 64,
+                 use_dispersion: bool = False):
         super().__init__()
         self.market_encoder = MarketAwareTemporalEncoder(
             feat_dim=feat_dim,
@@ -212,6 +254,7 @@ class MarketTokenTransformerBranch(nn.Module):
             n_commodity=n_commodity,
             node_dim=node_dim,
             d_model=d_model,
+            use_dispersion=use_dispersion,
         )
         self.transformer = BaseTemporalTransformer(
             d_model=d_model,
@@ -223,12 +266,22 @@ class MarketTokenTransformerBranch(nn.Module):
         )
 
     def encode_market_tokens(self, x: torch.Tensor,
-                             zero_market: str = None) -> torch.Tensor:
-        return self.market_encoder(x, zero_market=zero_market)
+                             zero_market: str = None,
+                             zero_component: str = None) -> torch.Tensor:
+        return self.market_encoder(
+            x,
+            zero_market=zero_market,
+            zero_component=zero_component,
+        )
 
     def temporal_forward(self, tokens: torch.Tensor) -> torch.Tensor:
         return self.transformer(tokens)
 
-    def forward(self, x: torch.Tensor, zero_market: str = None) -> torch.Tensor:
-        tokens = self.encode_market_tokens(x, zero_market=zero_market)
+    def forward(self, x: torch.Tensor, zero_market: str = None,
+                zero_component: str = None) -> torch.Tensor:
+        tokens = self.encode_market_tokens(
+            x,
+            zero_market=zero_market,
+            zero_component=zero_component,
+        )
         return self.temporal_forward(tokens)

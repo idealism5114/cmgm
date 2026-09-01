@@ -695,6 +695,7 @@ class HeteroMixHopCMGM(nn.Module):
             "transformer_temporal",
             "transformer_rpe",
             "market_token_transformer",
+            "market_dispersion_transformer",
         }
         if variant not in supported_variants:
             supported = ", ".join(sorted(supported_variants))
@@ -740,7 +741,8 @@ class HeteroMixHopCMGM(nn.Module):
                                                "semantic_router", "loss_rebalance",
                                                "routing_strength", "context_calibrated",
                                                "context_balance", "adapter_orthogonal",
-                                               "market_token_transformer")
+                                               "market_token_transformer",
+                                               "market_dispersion_transformer")
         self.use_edge_attn   = variant in ("edge_attn", "edge_attn_static", "temporal_attn",
                                            "diff_input", "hybrid_attn", "node_level",
                                            "comm_nodes", "batch_graph", "factor_res",
@@ -758,7 +760,8 @@ class HeteroMixHopCMGM(nn.Module):
                                            "semantic_router", "loss_rebalance",
                                            "routing_strength", "context_calibrated",
                                            "context_balance", "adapter_orthogonal",
-                                           "market_token_transformer")
+                                           "market_token_transformer",
+                                           "market_dispersion_transformer")
         self.use_gate        = variant not in ("no_gate", "gcn_only", "lstm_only")
 
         # ── Multi-horizon output ──
@@ -990,7 +993,8 @@ class HeteroMixHopCMGM(nn.Module):
                              "regime_dynamic_transformer", "regime_dynamic_semantic",
                              "semantic_router", "loss_rebalance", "routing_strength",
                              "context_calibrated", "context_balance",
-                             "adapter_orthogonal", "market_token_transformer"):
+                             "adapter_orthogonal", "market_token_transformer",
+                             "market_dispersion_transformer"):
                 pass  # temporal branch is the transformer (no global LSTM)
             else:
                 # diff_input: concat first-order differences → 2× input size
@@ -1099,9 +1103,9 @@ class HeteroMixHopCMGM(nn.Module):
                                                   "regime_rpe_transformer2")),
             )
 
-        # S0: only the temporal input construction changes.  The spatial
+        # S0/S0D: only temporal input construction changes.  The spatial
         # TempWeighted path, gated fusion, and prediction head remain shared.
-        if variant == "market_token_transformer":
+        if variant in ("market_token_transformer", "market_dispersion_transformer"):
             self.temporal_score = nn.Linear(LSTM_HIDDEN_DIM, 1)
             self.market_token_transformer = MarketTokenTransformerBranch(
                 feat_dim=feat_dim,
@@ -1115,6 +1119,7 @@ class HeteroMixHopCMGM(nn.Module):
                 ffn_dim=256,
                 dropout=GCN_DROPOUT,
                 output_dim=LSTM_HIDDEN_DIM,
+                use_dispersion=(variant == "market_dispersion_transformer"),
             )
 
         # RegimeDynamicRPETransformer (F): modular regime → dynamics →
@@ -2132,11 +2137,14 @@ class HeteroMixHopCMGM(nn.Module):
         x: torch.Tensor,
         debug: bool = False,
         zero_market: str = None,
+        zero_component: str = None,
     ) -> torch.Tensor:
-        """S0 temporal replacement with the exact TempWeighted spatial path."""
+        """S0/S0D temporal replacement with the exact TempWeighted spatial path."""
         h_spatial = self._temp_weighted_spatial(x)
         h_temporal = self.market_token_transformer(
-            x, zero_market=zero_market
+            x,
+            zero_market=zero_market,
+            zero_component=zero_component,
         )
         pred = self._market_token_predict(h_spatial, h_temporal)
         if debug:
@@ -2362,7 +2370,7 @@ class HeteroMixHopCMGM(nn.Module):
                             "transformer_regime", "regime_rpe_transformer",
                             "transformer_regime2", "regime_rpe_transformer2"):
             return self._transformer_temporal_forward(x, debug)
-        if self.variant == "market_token_transformer":
+        if self.variant in ("market_token_transformer", "market_dispersion_transformer"):
             return self._market_token_transformer_forward(x, debug)
         if self.variant in ("regime_dynamic_transformer", "regime_dynamic_semantic",
                             "semantic_router", "loss_rebalance", "routing_strength",
@@ -2474,7 +2482,7 @@ class HeteroMixHopCMGM(nn.Module):
 
     def get_gate_stats(self, x, edge_index=None, edge_weight=None):
         """Return gating statistics (only meaningful for gate variants)."""
-        if self.variant == "market_token_transformer":
+        if self.variant in ("market_token_transformer", "market_dispersion_transformer"):
             self.eval()
             with torch.no_grad():
                 h_spatial = self._temp_weighted_spatial(x)
