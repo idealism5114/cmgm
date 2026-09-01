@@ -457,3 +457,89 @@ def test_k_variant_matches_j_parameters_and_all_non_gamma_configuration():
     assert rd_j.regime_gen.lambda_sem == rd_k.regime_gen.lambda_sem == 1.0
     assert rd_j.regime_gen.gamma == 1.0
     assert rd_k.regime_gen.gamma == 2.0
+
+
+def test_l_differs_from_k_only_by_cosine_squared_diversity_objective():
+    common = dict(
+        in_dim=6,
+        d_model=8,
+        n_heads=2,
+        n_layers=1,
+        ffn_dim=16,
+        t_len=20,
+        K=3,
+        D_regime=4,
+        use_semantic_router=True,
+        lambda_cluster=0.0005,
+        routing_strength=0.25,
+        context_gamma=2.0,
+    )
+    torch.manual_seed(13)
+    model_k = RegimeDynamicRPETransformer(**common, orthogonal_dynamic=False)
+    torch.manual_seed(13)
+    model_l = RegimeDynamicRPETransformer(**common, orthogonal_dynamic=True)
+    model_k.eval()
+    model_l.eval()
+
+    assert model_k.state_dict().keys() == model_l.state_dict().keys()
+    for name, tensor_k in model_k.state_dict().items():
+        torch.testing.assert_close(tensor_k, model_l.state_dict()[name])
+    assert not model_k.orthogonal_dynamic
+    assert model_l.orthogonal_dynamic
+
+    x = torch.randn(3, 20, 6)
+    descriptor = torch.randn(3, 20, 3)
+    prediction_k = model_k(x, descriptor)
+    prediction_l = model_l(x, descriptor)
+    torch.testing.assert_close(prediction_k, prediction_l)
+    torch.testing.assert_close(model_k.last_regime_p, model_l.last_regime_p)
+    torch.testing.assert_close(model_k.last_regime_p_use, model_l.last_regime_p_use)
+
+    loss_k = model_k.dynamic_loss()
+    loss_l = model_l.dynamic_loss()
+    components_k = model_k.last_loss_components
+    components_l = model_l.last_loss_components
+    for component in ("cluster", "info_max", "pairwise_cosine", "pairwise_cosine_sq"):
+        torch.testing.assert_close(components_k[component], components_l[component])
+    torch.testing.assert_close(
+        components_k["dynamic"], components_k["pairwise_cosine"]
+    )
+    torch.testing.assert_close(
+        components_l["dynamic"], components_l["pairwise_cosine_sq"]
+    )
+    torch.testing.assert_close(
+        loss_l - loss_k,
+        torch.tensor(0.001)
+        * (components_l["pairwise_cosine_sq"] - components_k["pairwise_cosine"]),
+    )
+
+
+def test_l_variant_matches_k_parameters_and_all_non_loss_configuration():
+    common = dict(
+        num_nodes=4,
+        n_commodities=2,
+        n_stock=1,
+        n_bond=1,
+        feat_dim=21,
+    )
+    torch.manual_seed(14)
+    model_k = HeteroMixHopCMGM(variant="context_balance", **common)
+    torch.manual_seed(14)
+    model_l = HeteroMixHopCMGM(variant="adapter_orthogonal", **common)
+
+    assert model_k.state_dict().keys() == model_l.state_dict().keys()
+    for name, tensor_k in model_k.state_dict().items():
+        torch.testing.assert_close(tensor_k, model_l.state_dict()[name])
+    assert sum(p.numel() for p in model_k.parameters()) == sum(
+        p.numel() for p in model_l.parameters()
+    )
+    rd_k = model_k.regime_dynamic
+    rd_l = model_l.regime_dynamic
+    assert rd_k.routing_strength == rd_l.routing_strength == 0.25
+    assert rd_k.lambda_cluster == rd_l.lambda_cluster == 0.0005
+    assert rd_k.lambda_info_max == rd_l.lambda_info_max == 0.001
+    assert rd_k.regime_gen.gamma == rd_l.regime_gen.gamma == 2.0
+    assert rd_k.regime_gen.tau_m == rd_l.regime_gen.tau_m == 1.0
+    assert rd_k.regime_gen.lambda_sem == rd_l.regime_gen.lambda_sem == 1.0
+    assert not rd_k.orthogonal_dynamic
+    assert rd_l.orthogonal_dynamic
