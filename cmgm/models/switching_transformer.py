@@ -411,7 +411,7 @@ class MarketTokenTransformerBranch(nn.Module):
 
 
 class SwitchingTransformerBranch(nn.Module):
-    """S1: S0D observations plus causal soft switching-state conditioning."""
+    """S1/S1C causal switching branch with an optional strict null control."""
 
     def __init__(self, feat_dim: int, n_stock: int, n_bond: int,
                  n_commodity: int, node_dim: int = 32,
@@ -419,9 +419,11 @@ class SwitchingTransformerBranch(nn.Module):
                  n_layers: int = 2, ffn_dim: int = 256,
                  dropout: float = 0.1, output_dim: int = 64,
                  K: int = 3, sticky_alpha: float = 0.5,
-                 beta_max: float = 5e-4, warmup_epochs: int = 20):
+                 beta_max: float = 5e-4, warmup_epochs: int = 20,
+                 null_control: bool = False):
         super().__init__()
         self.K = int(K)
+        self.null_control = bool(null_control)
 
         # Keep these first two constructions identical and in the same order
         # as S0D so shared tensors initialize identically under the same seed.
@@ -477,9 +479,22 @@ class SwitchingTransformerBranch(nn.Module):
     def condition_tokens(self, tokens: torch.Tensor,
                          probabilities: torch.Tensor) -> torch.Tensor:
         centered = self.centered_regime_embeddings()
-        intervention = torch.einsum("btk,kd->btd", probabilities, centered)
-        conditioned = tokens + intervention
-        self.last_regime_intervention = intervention.detach()
+        real_intervention = torch.einsum(
+            "btk,kd->btd", probabilities, centered
+        )
+        effective_intervention = (
+            torch.zeros_like(real_intervention)
+            if self.null_control
+            else real_intervention
+        )
+        conditioned = tokens + effective_intervention
+        self.last_regime_intervention_real = real_intervention.detach()
+        self.last_regime_intervention_effective = (
+            effective_intervention.detach()
+        )
+        # Backward-compatible S1 diagnostic name: this is the intervention
+        # actually read by the forecast Transformer.
+        self.last_regime_intervention = effective_intervention.detach()
         self.last_conditioned_tokens = conditioned.detach()
         return conditioned
 
@@ -515,7 +530,20 @@ class SwitchingTransformerBranch(nn.Module):
         return self.regime_inference.set_epoch(epoch)
 
     def switch_loss(self) -> torch.Tensor:
+        if self.null_control:
+            # Deliberately independent of every switching parameter.  This
+            # leaves their gradients as None, so Adam weight decay cannot
+            # create parameter drift in the null-control branch.
+            return self.regime_inference.transition_logits.new_zeros(())
         return self.regime_inference.switch_loss()
+
+    @property
+    def scheduled_beta(self) -> float:
+        return self.regime_inference.current_beta
+
+    @property
+    def effective_beta(self) -> float:
+        return 0.0 if self.null_control else self.scheduled_beta
 
     def transition_matrix(self) -> torch.Tensor:
         return self.regime_inference.transition_matrix()
