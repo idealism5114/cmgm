@@ -131,6 +131,9 @@ def train_epoch(
         rd = getattr(model, 'regime_dynamic', None)
         if rd is not None:
             loss = loss + rd.dynamic_loss()
+        switching_branch = getattr(model, 'switching_transformer', None)
+        if switching_branch is not None:
+            loss = loss + switching_branch.switch_loss()
 
         # Backward pass
         loss.backward()
@@ -290,6 +293,7 @@ def train(
         'val_loss': [],
         'best_epoch': 0,
         'lr_history': [],
+        'switch_beta': [],
     }
 
     best_val_loss = float('inf')
@@ -297,6 +301,11 @@ def train(
     epochs_no_improve = 0
 
     for epoch in range(1, num_epochs + 1):
+        switching_branch = getattr(model, 'switching_transformer', None)
+        current_switch_beta = None
+        if switching_branch is not None:
+            current_switch_beta = switching_branch.set_epoch(epoch)
+
         # Train for one epoch
         train_loss = train_epoch(
             model, train_loader, edge_index, edge_weight,
@@ -317,6 +326,7 @@ def train(
         history['train_loss'].append(train_loss)
         history['val_loss'].append(val_loss)
         history['lr_history'].append(current_lr)
+        history['switch_beta'].append(current_switch_beta)
 
         # Print progress
         print(f"  Epoch {epoch:3d}/{num_epochs} | "
@@ -361,6 +371,9 @@ def train(
     # Restore best model
     if best_model_state is not None:
         model.load_state_dict(best_model_state)
+        switching_branch = getattr(model, 'switching_transformer', None)
+        if switching_branch is not None:
+            switching_branch.set_epoch(history['best_epoch'])
         print(f"\n[Checkpoint] Restored best model from epoch {history['best_epoch']}")
 
     # Save checkpoint if path provided

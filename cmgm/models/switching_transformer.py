@@ -1,7 +1,7 @@
-"""Modular temporal components for the new switching-transformer route.
+"""Modular components for the market-token and switching-transformer route.
 
-S0 contains market-aware input tokenization and an ordinary Transformer only.
-Switching-state inference and relative-position bias are intentionally absent.
+S0/S0D provide ordinary Transformer baselines. S1 adds causal soft switching
+state inference, while relative-position encoding remains intentionally absent.
 """
 
 import math
@@ -169,7 +169,7 @@ class TemporalSelfAttention(nn.Module):
         self.v = nn.Linear(self.d_model, self.d_model)
         self.out = nn.Linear(self.d_model, self.d_model)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, causal: bool = False) -> torch.Tensor:
         batch_size, time_steps, _ = x.shape
         q = self.q(x).view(
             batch_size, time_steps, self.n_heads, self.head_dim
@@ -181,6 +181,14 @@ class TemporalSelfAttention(nn.Module):
             batch_size, time_steps, self.n_heads, self.head_dim
         ).transpose(1, 2)
         logits = q @ k.transpose(-2, -1) / math.sqrt(self.head_dim)
+        if causal:
+            future_mask = torch.triu(
+                torch.ones(
+                    time_steps, time_steps, dtype=torch.bool, device=x.device
+                ),
+                diagonal=1,
+            )
+            logits = logits.masked_fill(future_mask, float("-inf"))
         attention = F.softmax(logits, dim=-1)
         output = (attention @ v).transpose(1, 2).reshape(
             batch_size, time_steps, self.d_model
@@ -204,8 +212,8 @@ class TemporalTransformerBlock(nn.Module):
         )
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.norm1(x + self.dropout(self.attention(x)))
+    def forward(self, x: torch.Tensor, causal: bool = False) -> torch.Tensor:
+        x = self.norm1(x + self.dropout(self.attention(x, causal=causal)))
         return self.norm2(x + self.dropout(self.ffn(x)))
 
 
@@ -237,8 +245,123 @@ class BaseTemporalTransformer(nn.Module):
         return output
 
 
+class RegimeEvidenceTransformer(nn.Module):
+    """One-layer causal Transformer that extracts historical regime evidence."""
+
+    def __init__(self, d_model: int = 128, n_heads: int = 4,
+                 ffn_dim: int = 256, dropout: float = 0.1):
+        super().__init__()
+        self.block = TemporalTransformerBlock(
+            d_model=d_model,
+            n_heads=n_heads,
+            ffn_dim=ffn_dim,
+            dropout=dropout,
+        )
+
+    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
+        return self.block(tokens, causal=True)
+
+
+class SwitchingRegimeInference(nn.Module):
+    """Previous-state-conditioned differentiable switching recursion."""
+
+    def __init__(self, d_model: int = 128, K: int = 3,
+                 sticky_alpha: float = 0.5, beta_max: float = 5e-4,
+                 warmup_epochs: int = 20, eps: float = 1e-8):
+        super().__init__()
+        self.K = int(K)
+        self.sticky_alpha = float(sticky_alpha)
+        self.beta_max = float(beta_max)
+        self.warmup_epochs = int(warmup_epochs)
+        self.eps = float(eps)
+        self.current_epoch = 1
+        self.current_beta = 0.0
+        self.transition_logits = nn.Parameter(torch.zeros(self.K, self.K))
+        self.posterior_heads = nn.ModuleList([
+            nn.Linear(d_model, self.K) for _ in range(self.K)
+        ])
+        self._last_switch_loss = None
+
+    def transition_matrix(self) -> torch.Tensor:
+        learned = F.softmax(self.transition_logits, dim=-1)
+        identity = torch.eye(
+            self.K,
+            dtype=learned.dtype,
+            device=learned.device,
+        )
+        return self.sticky_alpha * identity + (1.0 - self.sticky_alpha) * learned
+
+    def set_epoch(self, epoch: int) -> float:
+        self.current_epoch = int(epoch)
+        if self.warmup_epochs <= 1:
+            progress = 1.0
+        else:
+            progress = min(
+                max(
+                    (self.current_epoch - 1) / (self.warmup_epochs - 1),
+                    0.0,
+                ),
+                1.0,
+            )
+        self.current_beta = self.beta_max * progress
+        return self.current_beta
+
+    def forward(self, evidence: torch.Tensor) -> torch.Tensor:
+        batch_size, time_steps, _ = evidence.shape
+        transition = self.transition_matrix()
+        p_prev = torch.full(
+            (batch_size, self.K),
+            1.0 / self.K,
+            dtype=evidence.dtype,
+            device=evidence.device,
+        )
+        probabilities = []
+        priors = []
+        previous_probabilities = []
+        posterior_outputs = []
+        weighted_kls = []
+        for step in range(time_steps):
+            prior = p_prev @ transition
+            q_all = torch.stack(
+                [F.softmax(head(evidence[:, step]), dim=-1)
+                 for head in self.posterior_heads],
+                dim=1,
+            )                                                   # (B,K_prev,K_next)
+            p_t = torch.einsum("bi,bik->bk", p_prev, q_all)
+            head_kl = (
+                q_all
+                * (
+                    torch.log(q_all + self.eps)
+                    - torch.log(transition.unsqueeze(0) + self.eps)
+                )
+            ).sum(dim=-1)                                      # (B,K_prev)
+            weighted_kls.append((p_prev * head_kl).sum(dim=-1))
+            previous_probabilities.append(p_prev)
+            priors.append(prior)
+            posterior_outputs.append(q_all)
+            probabilities.append(p_t)
+            p_prev = p_t
+
+        p = torch.stack(probabilities, dim=1)
+        prior = torch.stack(priors, dim=1)
+        previous = torch.stack(previous_probabilities, dim=1)
+        q = torch.stack(posterior_outputs, dim=1)
+        self._last_switch_loss = torch.stack(weighted_kls, dim=1).mean()
+        self.last_probabilities = p.detach()
+        self.last_priors = prior.detach()
+        self.last_previous_probabilities = previous.detach()
+        self.last_posterior_heads = q.detach()
+        self.last_switch_loss_raw = self._last_switch_loss.detach()
+        return p
+
+    def switch_loss(self) -> torch.Tensor:
+        if self._last_switch_loss is None:
+            return self.transition_logits.sum() * 0.0
+        return self.current_beta * self._last_switch_loss
+
+
 class MarketTokenTransformerBranch(nn.Module):
-    """S0 temporal branch: market-aware tokens followed by a plain Transformer."""
+    """S0/S0D market-aware tokens followed by a plain Transformer."""
 
     def __init__(self, feat_dim: int, n_stock: int, n_bond: int,
                  n_commodity: int, node_dim: int = 32,
@@ -285,3 +408,114 @@ class MarketTokenTransformerBranch(nn.Module):
             zero_component=zero_component,
         )
         return self.temporal_forward(tokens)
+
+
+class SwitchingTransformerBranch(nn.Module):
+    """S1: S0D observations plus causal soft switching-state conditioning."""
+
+    def __init__(self, feat_dim: int, n_stock: int, n_bond: int,
+                 n_commodity: int, node_dim: int = 32,
+                 d_model: int = 128, n_heads: int = 4,
+                 n_layers: int = 2, ffn_dim: int = 256,
+                 dropout: float = 0.1, output_dim: int = 64,
+                 K: int = 3, sticky_alpha: float = 0.5,
+                 beta_max: float = 5e-4, warmup_epochs: int = 20):
+        super().__init__()
+        self.K = int(K)
+
+        # Keep these first two constructions identical and in the same order
+        # as S0D so shared tensors initialize identically under the same seed.
+        self.market_encoder = MarketAwareTemporalEncoder(
+            feat_dim=feat_dim,
+            n_stock=n_stock,
+            n_bond=n_bond,
+            n_commodity=n_commodity,
+            node_dim=node_dim,
+            d_model=d_model,
+            use_dispersion=True,
+        )
+        self.transformer = BaseTemporalTransformer(
+            d_model=d_model,
+            n_heads=n_heads,
+            n_layers=n_layers,
+            ffn_dim=ffn_dim,
+            dropout=dropout,
+            output_dim=output_dim,
+        )
+
+        self.regime_evidence = RegimeEvidenceTransformer(
+            d_model=d_model,
+            n_heads=n_heads,
+            ffn_dim=ffn_dim,
+            dropout=dropout,
+        )
+        self.regime_inference = SwitchingRegimeInference(
+            d_model=d_model,
+            K=self.K,
+            sticky_alpha=sticky_alpha,
+            beta_max=beta_max,
+            warmup_epochs=warmup_epochs,
+        )
+        self.regime_embeddings = nn.Parameter(
+            torch.randn(self.K, d_model) * 0.02
+        )
+
+    def encode_market_tokens(self, x: torch.Tensor) -> torch.Tensor:
+        return self.market_encoder(x)
+
+    def infer_regimes(self, tokens: torch.Tensor) -> torch.Tensor:
+        evidence = self.regime_evidence(tokens)
+        probabilities = self.regime_inference(evidence)
+        self.last_regime_evidence = evidence.detach()
+        return probabilities
+
+    def centered_regime_embeddings(self) -> torch.Tensor:
+        return self.regime_embeddings - self.regime_embeddings.mean(
+            dim=0, keepdim=True
+        )
+
+    def condition_tokens(self, tokens: torch.Tensor,
+                         probabilities: torch.Tensor) -> torch.Tensor:
+        centered = self.centered_regime_embeddings()
+        intervention = torch.einsum("btk,kd->btd", probabilities, centered)
+        conditioned = tokens + intervention
+        self.last_regime_intervention = intervention.detach()
+        self.last_conditioned_tokens = conditioned.detach()
+        return conditioned
+
+    def temporal_forward(self, tokens: torch.Tensor,
+                         forced_probabilities: torch.Tensor = None) -> torch.Tensor:
+        inferred = self.infer_regimes(tokens)
+        probabilities = inferred
+        if forced_probabilities is not None:
+            forced = forced_probabilities.to(
+                device=tokens.device, dtype=tokens.dtype
+            )
+            if forced.dim() == 1:
+                forced = forced.view(1, 1, self.K).expand(
+                    tokens.shape[0], tokens.shape[1], -1
+                )
+            probabilities = forced
+        conditioned = self.condition_tokens(tokens, probabilities)
+        output = self.transformer(conditioned)
+        self.last_market_tokens = tokens.detach()
+        self.last_regime_probabilities = inferred.detach()
+        self.last_conditioning_probabilities = probabilities.detach()
+        self.last_h_temporal = output.detach()
+        return output
+
+    def forward(self, x: torch.Tensor,
+                forced_probabilities: torch.Tensor = None) -> torch.Tensor:
+        tokens = self.encode_market_tokens(x)
+        return self.temporal_forward(
+            tokens, forced_probabilities=forced_probabilities
+        )
+
+    def set_epoch(self, epoch: int) -> float:
+        return self.regime_inference.set_epoch(epoch)
+
+    def switch_loss(self) -> torch.Tensor:
+        return self.regime_inference.switch_loss()
+
+    def transition_matrix(self) -> torch.Tensor:
+        return self.regime_inference.transition_matrix()

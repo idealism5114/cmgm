@@ -43,6 +43,7 @@ VARIANTS = [
     ("C-TransformerRPE", "transformer_rpe"),
     ("S0-MarketTokenTransformer", "market_token_transformer"),
     ("S0D-MarketDispersionTransformer", "market_dispersion_transformer"),
+    ("S1-SwitchingTransformer", "switching_transformer"),
     ("F-RegimeDynamic", "regime_dynamic_transformer"),
     ("F2-RegimeSemantic", "regime_dynamic_semantic"),
     ("G-SemanticRouter", "semantic_router"),
@@ -57,7 +58,7 @@ VARIANTS = [
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
-            "HeteroMixHop A/B/C/S0/S0D and retained F/F2/G/H/I/J/K/L ablations"
+            "HeteroMixHop A/B/C/S0/S0D/S1 and retained F/F2/G/H/I/J/K/L ablations"
         )
     )
     parser.add_argument("--epochs", type=int, default=NUM_EPOCHS)
@@ -70,7 +71,7 @@ def parse_args():
         "--variants",
         help=(
             "Comma-separated display or internal names; defaults to "
-            "A/B/C/S0/S0D/F/F2/G/H/I/J/K/L"
+            "A/B/C/S0/S0D/S1/F/F2/G/H/I/J/K/L"
         ),
     )
     return parser.parse_args()
@@ -423,6 +424,331 @@ def _market_token_diagnostics(model, loader, device):
             f"h_temporal max_abs_diff="
             f"{(h_batch[:1] - h_single).abs().max().item():.3e}"
         )
+
+
+def _aggregate_gradient_norm(parameters, gradients=None):
+    if gradients is None:
+        gradients = [parameter.grad for parameter in parameters]
+    squared = [
+        gradient.square().sum()
+        for gradient in gradients
+        if gradient is not None
+    ]
+    if not squared:
+        return 0.0
+    return torch.stack(squared).sum().sqrt().item()
+
+
+def _switching_transformer_diagnostics(model, loaders, device):
+    """Diagnostics for S1 switching inference and its S0D observation path."""
+    branch = model.switching_transformer
+    inference = branch.regime_inference
+    eps = inference.eps
+    split_probabilities = {}
+    test_parts = {
+        name: [] for name in ("p", "prior", "previous", "q", "E", "r")
+    }
+    input_stats = {
+        name: {"entropy": [], "level": [], "dispersion": []}
+        for name in branch.market_encoder.MARKET_NAMES
+    }
+
+    model.eval()
+    with torch.no_grad():
+        for split_name, loader in loaders.items():
+            probability_batches = []
+            for batch in loader:
+                x_batch = batch[0].to(device)
+                branch(x_batch)
+                p = branch.last_regime_probabilities.cpu()
+                probability_batches.append(p)
+                if split_name == "test":
+                    test_parts["p"].append(p)
+                    test_parts["prior"].append(inference.last_priors.cpu())
+                    test_parts["previous"].append(
+                        inference.last_previous_probabilities.cpu()
+                    )
+                    test_parts["q"].append(inference.last_posterior_heads.cpu())
+                    test_parts["E"].append(branch.last_market_tokens.cpu())
+                    test_parts["r"].append(branch.last_regime_intervention.cpu())
+                    encoder = branch.market_encoder
+                    for name in encoder.MARKET_NAMES:
+                        attention = encoder.last_market_attentions[name]
+                        entropy = -(
+                            attention * (attention + 1e-12).log()
+                        ).sum(dim=-1)
+                        input_stats[name]["entropy"].append(entropy.cpu())
+                        input_stats[name]["level"].append(
+                            encoder.last_market_tokens[name].norm(dim=-1).cpu()
+                        )
+                        input_stats[name]["dispersion"].append(
+                            encoder.last_market_dispersions[name].norm(dim=-1).cpu()
+                        )
+            probabilities = torch.cat(probability_batches)
+            split_probabilities[split_name] = probabilities
+            entropy = -(
+                probabilities * (probabilities + eps).log()
+            ).sum(dim=-1)
+            hard = probabilities.argmax(dim=-1)
+            mean_p = probabilities.mean(dim=(0, 1))
+            print(f"  [S1 {split_name.upper()}] mean p={mean_p.numpy().round(4)}")
+            print(
+                f"  [S1 {split_name.upper()}] entropy={entropy.mean().item():.6f} "
+                f"mean max p={probabilities.max(dim=-1).values.mean().item():.6f}"
+            )
+            print(f"  [S1 {split_name.upper()}] argmax occupancy")
+            for state in range(branch.K):
+                print(
+                    f"    state {state} = {(hard == state).float().mean().item() * 100:.2f}%"
+                )
+
+    parts = {name: torch.cat(values) for name, values in test_parts.items()}
+    p = parts["p"]
+    prior = parts["prior"]
+    previous = parts["previous"]
+    q = parts["q"]
+    entropy = -(p * (p + eps).log()).sum(dim=-1)
+    transition_magnitude = (p[:, 1:] - p[:, :-1]).abs().sum(dim=-1)
+    print(
+        f"  [S1 p] mean={p.mean(dim=(0, 1)).numpy().round(4)} "
+        f"std={p.std(unbiased=False).item():.6f} min={p.min().item():.6f} "
+        f"max={p.max().item():.6f}"
+    )
+    print(
+        f"  [S1 p] entropy mean={entropy.mean().item():.6f} "
+        f"std={entropy.std(unbiased=False).item():.6f} "
+        f"mean max probability={p.max(dim=-1).values.mean().item():.6f}"
+    )
+    print(
+        f"  [S1 p] mean ||p_t-p_(t-1)||_1="
+        f"{transition_magnitude.mean().item():.6f}"
+    )
+    for step in range(0, min(p.shape[1], 20), 2):
+        print(f"  [S1 p t={step}] {p[:, step].mean(dim=0).numpy().round(4)}")
+
+    transition = branch.transition_matrix().detach().cpu()
+    row_entropy = -(transition * (transition + eps).log()).sum(dim=-1)
+    diagonal = transition.diagonal()
+    off_diagonal = transition[~torch.eye(branch.K, dtype=torch.bool)]
+    print(f"  [S1 transition matrix]\n{transition.numpy().round(6)}")
+    print(f"  [S1 transition] row sums={transition.sum(dim=-1).numpy().round(8)}")
+    print(
+        f"  [S1 transition] diagonal={diagonal.numpy().round(6)} "
+        f"mean persistence={diagonal.mean().item():.6f} "
+        f"off-diagonal mean={off_diagonal.mean().item():.6f}"
+    )
+    for state, value in enumerate(row_entropy):
+        print(f"  [S1 transition] state {state} entropy={value.item():.6f}")
+    print(f"  [S1 transition] mean entropy={row_entropy.mean().item():.6f}")
+
+    prior_posterior_kl = (
+        p * ((p + eps).log() - (prior + eps).log())
+    ).sum(dim=-1)
+    prior_posterior_l1 = (p - prior).abs().sum(dim=-1)
+    print(
+        f"  [S1 prior/posterior] mean KL={prior_posterior_kl.mean().item():.6f} "
+        f"mean L1={prior_posterior_l1.mean().item():.6f}"
+    )
+
+    pairwise_l1 = []
+    for left, right in ((0, 1), (0, 2), (1, 2)):
+        value = (q[:, :, left] - q[:, :, right]).abs().sum(dim=-1).mean()
+        pairwise_l1.append(value)
+        print(f"  [S1 posterior heads] mean L1(q{left},q{right})={value.item():.6f}")
+    print(
+        f"  [S1 posterior heads] mean pairwise L1="
+        f"{torch.stack(pairwise_l1).mean().item():.6f}"
+    )
+    for state in range(branch.K):
+        q_entropy = -(
+            q[:, :, state] * (q[:, :, state] + eps).log()
+        ).sum(dim=-1).mean()
+        print(f"  [S1 posterior head {state}] entropy={q_entropy.item():.6f}")
+
+    hard = p.argmax(dim=-1)
+    counts = torch.zeros(branch.K, branch.K, dtype=torch.long)
+    for previous_state in range(branch.K):
+        for next_state in range(branch.K):
+            counts[previous_state, next_state] = (
+                (hard[:, :-1] == previous_state)
+                & (hard[:, 1:] == next_state)
+            ).sum()
+    empirical = counts.float() / counts.sum(dim=-1, keepdim=True).clamp(min=1)
+    print(f"  [S1 empirical transition counts]\n{counts.numpy()}")
+    print(f"  [S1 empirical transition probability]\n{empirical.numpy().round(6)}")
+
+    embeddings = branch.regime_embeddings.detach().cpu()
+    centered = branch.centered_regime_embeddings().detach().cpu()
+    for state in range(branch.K):
+        print(
+            f"  [S1 embedding state {state}] raw norm="
+            f"{embeddings[state].norm().item():.6f} centered norm="
+            f"{centered[state].norm().item():.6f}"
+        )
+    token_norm = parts["E"].norm(dim=-1).mean()
+    intervention_norm = parts["r"].norm(dim=-1).mean()
+    print(
+        f"  [S1 intervention] mean ||E||={token_norm.item():.6f} "
+        f"mean ||r||={intervention_norm.item():.6f} "
+        f"ratio={(intervention_norm / (token_norm + eps)).item():.6f}"
+    )
+    uniform_intervention = centered.mean(dim=0)
+    print(
+        f"  [S1 uniform-p sanity] max_abs(r_uniform)="
+        f"{uniform_intervention.abs().max().item():.3e}"
+    )
+
+    for name in branch.market_encoder.MARKET_NAMES:
+        market_size = branch.market_encoder.market_sizes[name]
+        market_entropy = torch.cat(input_stats[name]["entropy"])
+        normalized = (
+            market_entropy / np.log(market_size)
+            if market_size > 1
+            else torch.ones_like(market_entropy)
+        )
+        level_norm = torch.cat(input_stats[name]["level"]).mean()
+        dispersion_norm = torch.cat(input_stats[name]["dispersion"]).mean()
+        print(
+            f"  [S1 input {name}] normalized attention entropy="
+            f"{normalized.mean().item():.6f} effective nodes="
+            f"{market_entropy.exp().mean().item():.6f} level norm="
+            f"{level_norm.item():.6f} dispersion norm={dispersion_norm.item():.6f}"
+        )
+    print(f"  [S1 input] daily token E norm={token_norm.item():.6f}")
+
+    x_batch, y_batch = next(iter(loaders["test"]))[:2]
+    x_batch = x_batch[:16].to(device)
+    y_batch = y_batch[:16].to(device)
+    model.train()
+    model.zero_grad(set_to_none=True)
+    prediction = model(x_batch)
+    return_loss = _prediction_loss(prediction, y_batch, make_loss())
+    switch_raw = inference._last_switch_loss
+    weighted_switch = branch.switch_loss()
+    total_loss = return_loss + weighted_switch
+    prediction_groups = {
+        "Regime Evidence Transformer": list(branch.regime_evidence.parameters()),
+        "posterior head 0": list(inference.posterior_heads[0].parameters()),
+        "posterior head 1": list(inference.posterior_heads[1].parameters()),
+        "posterior head 2": list(inference.posterior_heads[2].parameters()),
+        "transition_logits": [inference.transition_logits],
+        "regime_embeddings": [branch.regime_embeddings],
+    }
+    prediction_parameters = [
+        parameter
+        for parameters in prediction_groups.values()
+        for parameter in parameters
+    ]
+    prediction_gradients = torch.autograd.grad(
+        return_loss,
+        prediction_parameters,
+        retain_graph=True,
+        allow_unused=True,
+    )
+    offset = 0
+    for name, parameters in prediction_groups.items():
+        group_gradients = prediction_gradients[offset:offset + len(parameters)]
+        offset += len(parameters)
+        print(
+            f"  [S1 prediction-only grad] {name}="
+            f"{_aggregate_gradient_norm(parameters, group_gradients):.3e}"
+        )
+    total_loss.backward()
+    total_groups = {
+        **prediction_groups,
+        "MarketAwareTemporalEncoder": list(branch.market_encoder.parameters()),
+        "Forecast Transformer": list(branch.transformer.parameters()),
+    }
+    for name, parameters in total_groups.items():
+        print(
+            f"  [S1 total-loss grad] {name}="
+            f"{_aggregate_gradient_norm(parameters):.3e}"
+        )
+    print(f"  [S1 loss] L_return={return_loss.item():.6e}")
+    print(f"  [S1 loss] L_switch_raw={switch_raw.item():.6e}")
+    print(f"  [S1 loss] beta={inference.current_beta:.6e}")
+    print(f"  [S1 loss] weighted_switch={weighted_switch.item():.6e}")
+    print(f"  [S1 loss] total={total_loss.item():.6e}")
+    print(
+        f"  [S1 loss ratio] switch_to_return_ratio="
+        f"{abs(weighted_switch.item()) / (return_loss.item() + eps):.6e}"
+    )
+
+    model.eval()
+    with torch.no_grad():
+        prediction_real = model(x_batch)
+        temporal_real = branch.last_h_temporal.clone()
+        for state in range(branch.K):
+            forced = torch.zeros(branch.K, device=device)
+            forced[state] = 1.0
+            prediction_forced = model._switching_transformer_forward(
+                x_batch, forced_probabilities=forced
+            )
+            temporal_forced = branch.last_h_temporal
+            temporal_diff = (temporal_forced - temporal_real).abs()
+            prediction_diff = (prediction_forced - prediction_real).abs()
+            print(
+                f"  [S1 forced state {state}] h_temporal mean/max abs diff="
+                f"{temporal_diff.mean().item():.3e}/{temporal_diff.max().item():.3e} "
+                f"prediction mean/max abs diff="
+                f"{prediction_diff.mean().item():.3e}/{prediction_diff.max().item():.3e}"
+            )
+
+        split = min(11, x_batch.shape[1])
+        original_tokens = branch.encode_market_tokens(x_batch)
+        original_p = branch.infer_regimes(original_tokens)
+        perturbed = x_batch.clone()
+        perturbed[:, split:] = torch.randn_like(perturbed[:, split:])
+        perturbed_tokens = branch.encode_market_tokens(perturbed)
+        perturbed_p = branch.infer_regimes(perturbed_tokens)
+        print(
+            f"  [S1 causality] max p diff through t=10="
+            f"{(original_p[:, :split] - perturbed_p[:, :split]).abs().max().item():.3e}"
+        )
+
+        tokens_batch = branch.encode_market_tokens(x_batch)
+        temporal_batch = branch.temporal_forward(tokens_batch)
+        p_batch = branch.last_regime_probabilities.clone()
+        tokens_single = branch.encode_market_tokens(x_batch[:1])
+        temporal_single = branch.temporal_forward(tokens_single)
+        p_single = branch.last_regime_probabilities.clone()
+        print(
+            f"  [S1 batch independence] E="
+            f"{(tokens_batch[:1] - tokens_single).abs().max().item():.3e} "
+            f"p={(p_batch[:1] - p_single).abs().max().item():.3e} "
+            f"h_temporal={(temporal_batch[:1] - temporal_single).abs().max().item():.3e}"
+        )
+
+        tokens_reference = branch.encode_market_tokens(x_batch)
+        temporal_reference = branch.temporal_forward(tokens_reference)
+        p_reference = branch.last_regime_probabilities.clone()
+        offsets = {
+            "stock": (0, branch.market_encoder.market_sizes["stock"]),
+            "bond": (
+                branch.market_encoder.market_sizes["stock"],
+                branch.market_encoder.market_sizes["stock"]
+                + branch.market_encoder.market_sizes["bond"],
+            ),
+            "commodity": (
+                branch.market_encoder.market_sizes["stock"]
+                + branch.market_encoder.market_sizes["bond"],
+                sum(branch.market_encoder.market_sizes.values()),
+            ),
+        }
+        for name, (start, end) in offsets.items():
+            permuted = x_batch.clone()
+            order = torch.randperm(end - start, device=device)
+            permuted[:, :, start:end] = x_batch[:, :, start:end].index_select(2, order)
+            permuted_tokens = branch.encode_market_tokens(permuted)
+            permuted_temporal = branch.temporal_forward(permuted_tokens)
+            permuted_p = branch.last_regime_probabilities
+            print(
+                f"  [S1 {name} permutation] E="
+                f"{(permuted_tokens - tokens_reference).abs().max().item():.3e} "
+                f"p={(permuted_p - p_reference).abs().max().item():.3e} "
+                f"h_temporal="
+                f"{(permuted_temporal - temporal_reference).abs().max().item():.3e}"
+            )
 
 
 def _print_split_router_diagnostics(model, loaders, device, label):
@@ -852,7 +1178,9 @@ def print_diagnostics(model, variant, loaders, device):
         f"std={alpha.std().item():.4f} min={alpha.min().item():.4f} "
         f"max={alpha.max().item():.4f}"
     )
-    if variant in ("market_token_transformer", "market_dispersion_transformer"):
+    if variant == "switching_transformer":
+        _switching_transformer_diagnostics(model, loaders, device)
+    elif variant in ("market_token_transformer", "market_dispersion_transformer"):
         _market_token_diagnostics(model, test_loader, device)
     elif variant in (
         "semantic_router", "loss_rebalance", "routing_strength", "context_calibrated",
@@ -937,6 +1265,29 @@ def run_variant(name, variant, args, device, data):
                 f"parameter increase={projection_increase:+,} "
                 "(daily projection 96→192 input width)"
             )
+    elif variant == "switching_transformer":
+        branch = model.switching_transformer
+        evidence_params = sum(
+            parameter.numel() for parameter in branch.regime_evidence.parameters()
+        )
+        posterior_params = sum(
+            parameter.numel()
+            for parameter in branch.regime_inference.posterior_heads.parameters()
+        )
+        transition_params = branch.regime_inference.transition_logits.numel()
+        embedding_params = branch.regime_embeddings.numel()
+        increase = (
+            evidence_params + posterior_params + transition_params + embedding_params
+        )
+        print(
+            f"  S0D total params={parameter_count - increase:,}; "
+            f"S1 total params={parameter_count:,}; S1-S0D increase={increase:+,}"
+        )
+        print(
+            f"  S1 added params: evidence Transformer={evidence_params:,}; "
+            f"posterior heads={posterior_params:,}; transition={transition_params:,}; "
+            f"regime embeddings={embedding_params:,}"
+        )
 
     started = time.time()
     loaders = (
