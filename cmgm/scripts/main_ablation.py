@@ -1,4 +1,4 @@
-"""Run retained CMGM ablations through L-AdapterOrthogonal.
+"""Run retained CMGM ablations plus the independent S0 temporal baseline.
 
 Usage:
     python -m cmgm.scripts.main_ablation
@@ -39,6 +39,9 @@ from cmgm.training.train import make_loss, train
 
 VARIANTS = [
     ("+TempWeighted", "temporal_weighted_graph"),
+    ("B-Transformer", "transformer_temporal"),
+    ("C-TransformerRPE", "transformer_rpe"),
+    ("S0-MarketTokenTransformer", "market_token_transformer"),
     ("F-RegimeDynamic", "regime_dynamic_transformer"),
     ("F2-RegimeSemantic", "regime_dynamic_semantic"),
     ("G-SemanticRouter", "semantic_router"),
@@ -51,7 +54,9 @@ VARIANTS = [
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="HeteroMixHop A/F/F2/G/H/I/J/K/L ablations")
+    parser = argparse.ArgumentParser(
+        description="HeteroMixHop A/B/C/S0 and retained F/F2/G/H/I/J/K/L ablations"
+    )
     parser.add_argument("--epochs", type=int, default=NUM_EPOCHS)
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
     parser.add_argument("--seq-len", type=int, default=SEQ_LEN)
@@ -60,7 +65,10 @@ def parse_args():
     parser.add_argument("--no-cuda", action="store_true")
     parser.add_argument(
         "--variants",
-        help="Comma-separated display or internal names; defaults to A/F/F2/G/H/I/J/K/L",
+        help=(
+            "Comma-separated display or internal names; defaults to "
+            "A/B/C/S0/F/F2/G/H/I/J/K/L"
+        ),
     )
     return parser.parse_args()
 
@@ -214,6 +222,144 @@ def _event_test(label, name, values, probabilities):
     print(f"  [{label} event/{name}] high p={np.round(high, 4)}")
     print(f"  [{label} event/{name}] low  p={np.round(low, 4)}")
     print(f"  [{label} event/{name}] L1 difference={np.abs(high - low).sum():.6f}")
+
+
+def _market_token_diagnostics(model, loader, device):
+    """Inference-only diagnostics for the independent S0 temporal branch."""
+    branch = model.market_token_transformer
+    encoder = branch.market_encoder
+    transformer = branch.transformer
+    market_attentions = {name: [] for name in encoder.MARKET_NAMES}
+    market_entropies = {name: [] for name in encoder.MARKET_NAMES}
+    node_norms = {name: [] for name in encoder.MARKET_NAMES}
+    market_norms = {name: [] for name in encoder.MARKET_NAMES}
+    temporal_attentions = []
+    daily_norms = []
+    transformer_norms = []
+    temporal_output_norms = []
+
+    model.eval()
+    with torch.no_grad():
+        for batch in loader:
+            x_batch = batch[0].to(device)
+            branch(x_batch)
+            for name in encoder.MARKET_NAMES:
+                attention = encoder.last_market_attentions[name]
+                entropy = -(attention * (attention + 1e-12).log()).sum(dim=-1)
+                market_attentions[name].append(attention.cpu().reshape(-1))
+                market_entropies[name].append(entropy.cpu().reshape(-1))
+                node_norms[name].append(
+                    encoder.last_node_encodings[name].norm(dim=-1).cpu().reshape(-1)
+                )
+                market_norms[name].append(
+                    encoder.last_market_tokens[name].norm(dim=-1).cpu().reshape(-1)
+                )
+            time_attention = transformer.last_temporal_attention
+            temporal_attentions.append(time_attention.cpu().reshape(-1))
+            daily_norms.append(
+                encoder.last_daily_tokens.norm(dim=-1).cpu().reshape(-1)
+            )
+            transformer_norms.append(
+                transformer.last_transformer_output.norm(dim=-1).cpu().reshape(-1)
+            )
+            temporal_output_norms.append(
+                transformer.last_temporal_output.norm(dim=-1).cpu().reshape(-1)
+            )
+
+    for name in encoder.MARKET_NAMES:
+        attention = torch.cat(market_attentions[name])
+        entropy = torch.cat(market_entropies[name])
+        n_nodes = encoder.market_sizes[name]
+        normalized_entropy = (
+            entropy / np.log(n_nodes) if n_nodes > 1 else torch.ones_like(entropy)
+        )
+        # Recover per-(sample,time) max weights without retaining all batches in 3-D.
+        attention_rows = attention.view(-1, n_nodes)
+        print(
+            f"  [S0 {name} attention] mean={attention.mean().item():.6f} "
+            f"std={attention.std(unbiased=False).item():.6f} "
+            f"min={attention.min().item():.6f} max={attention.max().item():.6f}"
+        )
+        print(
+            f"  [S0 {name} attention] entropy={entropy.mean().item():.6f} "
+            f"normalized_entropy={normalized_entropy.mean().item():.6f} "
+            f"mean_max={attention_rows.max(dim=-1).values.mean().item():.6f} "
+            f"effective_nodes={entropy.exp().mean().item():.6f}"
+        )
+
+    time_attention = torch.cat(temporal_attentions)
+    time_steps = next(iter(loader))[0].shape[1]
+    time_rows = time_attention.view(-1, time_steps)
+    time_entropy = -(time_rows * (time_rows + 1e-12).log()).sum(dim=-1)
+    print(
+        f"  [S0 temporal pooling] mean={time_attention.mean().item():.6f} "
+        f"std={time_attention.std(unbiased=False).item():.6f} "
+        f"min={time_attention.min().item():.6f} max={time_attention.max().item():.6f} "
+        f"entropy={time_entropy.mean().item():.6f} "
+        f"mean_max={time_rows.max(dim=-1).values.mean().item():.6f}"
+    )
+    for name in encoder.MARKET_NAMES:
+        print(
+            f"  [S0 norm] {name} node encoding="
+            f"{torch.cat(node_norms[name]).mean().item():.6f}; "
+            f"g_{name}={torch.cat(market_norms[name]).mean().item():.6f}"
+        )
+    print(
+        f"  [S0 norm] daily token E={torch.cat(daily_norms).mean().item():.6f}; "
+        f"Transformer output={torch.cat(transformer_norms).mean().item():.6f}; "
+        f"h_temporal={torch.cat(temporal_output_norms).mean().item():.6f}"
+    )
+
+    x_batch = next(iter(loader))[0][:16].to(device)
+    with torch.no_grad():
+        h_spatial = model._temp_weighted_spatial(x_batch)
+        h_reference = branch(x_batch)
+        pred_reference = model._market_token_predict(h_spatial, h_reference)
+        for name in encoder.MARKET_NAMES:
+            h_zero = branch(x_batch, zero_market=name)
+            pred_zero = model._market_token_predict(h_spatial, h_zero)
+            pred_diff = (pred_zero - pred_reference).abs()
+            print(
+                f"  [S0 zero-{name}] prediction max_abs_diff="
+                f"{pred_diff.max().item():.3e} mean_abs_diff={pred_diff.mean().item():.3e}"
+            )
+
+        offsets = {
+            "stock": (0, encoder.market_sizes["stock"]),
+            "bond": (
+                encoder.market_sizes["stock"],
+                encoder.market_sizes["stock"] + encoder.market_sizes["bond"],
+            ),
+            "commodity": (
+                encoder.market_sizes["stock"] + encoder.market_sizes["bond"],
+                sum(encoder.market_sizes.values()),
+            ),
+        }
+        for name, (start, end) in offsets.items():
+            permuted = x_batch.clone()
+            permutation = torch.arange(end - start - 1, -1, -1, device=device)
+            permuted[:, :, start:end, :] = x_batch[:, :, start:end, :].index_select(
+                2, permutation
+            )
+            h_permuted = branch(permuted)
+            pred_permuted = model._market_token_predict(h_spatial, h_permuted)
+            print(
+                f"  [S0 {name} permutation] h_temporal max_abs_diff="
+                f"{(h_permuted - h_reference).abs().max().item():.3e}; "
+                f"prediction max_abs_diff="
+                f"{(pred_permuted - pred_reference).abs().max().item():.3e}"
+            )
+
+        tokens_batch = branch.encode_market_tokens(x_batch)
+        h_batch = branch.temporal_forward(tokens_batch)
+        tokens_single = branch.encode_market_tokens(x_batch[:1])
+        h_single = branch.temporal_forward(tokens_single)
+        print(
+            f"  [S0 batch independence] token max_abs_diff="
+            f"{(tokens_batch[:1] - tokens_single).abs().max().item():.3e}; "
+            f"h_temporal max_abs_diff="
+            f"{(h_batch[:1] - h_single).abs().max().item():.3e}"
+        )
 
 
 def _print_split_router_diagnostics(model, loaders, device, label):
@@ -643,7 +789,9 @@ def print_diagnostics(model, variant, loaders, device):
         f"std={alpha.std().item():.4f} min={alpha.min().item():.4f} "
         f"max={alpha.max().item():.4f}"
     )
-    if variant in (
+    if variant == "market_token_transformer":
+        _market_token_diagnostics(model, test_loader, device)
+    elif variant in (
         "semantic_router", "loss_rebalance", "routing_strength", "context_calibrated",
         "context_balance", "adapter_orthogonal"
     ):
@@ -697,6 +845,25 @@ def run_variant(name, variant, args, device, data):
     ).to(device)
     parameter_count = sum(parameter.numel() for parameter in model.parameters())
     print(f"\n{name} ({variant}) — {parameter_count:,} parameters")
+    if variant == "market_token_transformer":
+        flat_projection_params = data["n_nodes"] * FEATURE_DIM * 128 + 128
+        market_encoder_params = sum(
+            parameter.numel()
+            for parameter in model.market_token_transformer.market_encoder.parameters()
+        )
+        temporal_branch_params = sum(
+            parameter.numel()
+            for parameter in model.market_token_transformer.parameters()
+        )
+        print(
+            f"  Flat temporal input projection params={flat_projection_params:,}; "
+            f"market-aware input encoder params={market_encoder_params:,}; "
+            f"difference={market_encoder_params - flat_projection_params:+,}"
+        )
+        print(
+            f"  S0 temporal branch params={temporal_branch_params:,}; "
+            f"total S0 params={parameter_count:,}"
+        )
 
     started = time.time()
     loaders = (
