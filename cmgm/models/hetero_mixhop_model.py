@@ -689,6 +689,7 @@ class HeteroMixHopCMGM(nn.Module):
             "loss_rebalance",
             "routing_strength",
             "context_calibrated",
+            "context_balance",
         }
         if variant not in supported_variants:
             supported = ", ".join(sorted(supported_variants))
@@ -732,7 +733,8 @@ class HeteroMixHopCMGM(nn.Module):
                                                "regime_dynamic_transformer",
                                                "regime_dynamic_semantic",
                                                "semantic_router", "loss_rebalance",
-                                               "routing_strength", "context_calibrated")
+                                               "routing_strength", "context_calibrated",
+                                               "context_balance")
         self.use_edge_attn   = variant in ("edge_attn", "edge_attn_static", "temporal_attn",
                                            "diff_input", "hybrid_attn", "node_level",
                                            "comm_nodes", "batch_graph", "factor_res",
@@ -748,7 +750,8 @@ class HeteroMixHopCMGM(nn.Module):
                                            "regime_dynamic_transformer",
                                            "regime_dynamic_semantic",
                                            "semantic_router", "loss_rebalance",
-                                           "routing_strength", "context_calibrated")
+                                           "routing_strength", "context_calibrated",
+                                           "context_balance")
         self.use_gate        = variant not in ("no_gate", "gcn_only", "lstm_only")
 
         # ── Multi-horizon output ──
@@ -979,7 +982,7 @@ class HeteroMixHopCMGM(nn.Module):
                              "transformer_regime2", "regime_rpe_transformer2",
                              "regime_dynamic_transformer", "regime_dynamic_semantic",
                              "semantic_router", "loss_rebalance", "routing_strength",
-                             "context_calibrated"):
+                             "context_calibrated", "context_balance"):
                 pass  # temporal branch is the transformer (no global LSTM)
             else:
                 # diff_input: concat first-order differences → 2× input size
@@ -1093,7 +1096,7 @@ class HeteroMixHopCMGM(nn.Module):
         # F2 (regime_dynamic_semantic): adds market-dynamics state target
         if variant in ("regime_dynamic_transformer", "regime_dynamic_semantic",
                        "semantic_router", "loss_rebalance", "routing_strength",
-                       "context_calibrated"):
+                       "context_calibrated", "context_balance"):
             self.temporal_score = nn.Linear(LSTM_HIDDEN_DIM, 1)   # spatial branch
             self.regime_dynamic = RegimeDynamicRPETransformer(
                 in_dim=num_nodes * feat_dim,
@@ -1102,21 +1105,27 @@ class HeteroMixHopCMGM(nn.Module):
                 use_state_loss=(variant == "regime_dynamic_semantic"),
                 use_semantic_router=(variant in (
                     "semantic_router", "loss_rebalance", "routing_strength",
-                    "context_calibrated"
+                    "context_calibrated", "context_balance"
                 )),
                 lambda_cluster=(
                     0.0005
                     if variant in (
-                        "loss_rebalance", "routing_strength", "context_calibrated"
+                        "loss_rebalance", "routing_strength", "context_calibrated",
+                        "context_balance"
                     )
                     else 0.005
                 ),
                 routing_strength=(
                     0.25
-                    if variant in ("routing_strength", "context_calibrated")
+                    if variant in (
+                        "routing_strength", "context_calibrated", "context_balance"
+                    )
                     else 1.0
                 ),
-                context_gamma=(1.0 if variant == "context_calibrated" else 5.0),
+                context_gamma={
+                    "context_calibrated": 1.0,
+                    "context_balance": 2.0,
+                }.get(variant, 5.0),
             )
 
         # temp_weighted_comm_cond: commodity graph representations
@@ -2292,7 +2301,7 @@ class HeteroMixHopCMGM(nn.Module):
             return self._transformer_temporal_forward(x, debug)
         if self.variant in ("regime_dynamic_transformer", "regime_dynamic_semantic",
                             "semantic_router", "loss_rebalance", "routing_strength",
-                            "context_calibrated"):
+                            "context_calibrated", "context_balance"):
             return self._regime_dynamic_forward(
                 x, market_descriptor=market_descriptor, debug=debug
             )
@@ -2412,7 +2421,7 @@ class HeteroMixHopCMGM(nn.Module):
                             "transformer_regime2", "regime_rpe_transformer2",
                             "regime_dynamic_transformer", "regime_dynamic_semantic",
                             "semantic_router", "loss_rebalance", "routing_strength",
-                            "context_calibrated"):
+                            "context_calibrated", "context_balance"):
             return {'mode': self.variant, 'note': 'no gate — per-node fusion'}
         if self.variant == "multiscale_graph":
             self.eval()
