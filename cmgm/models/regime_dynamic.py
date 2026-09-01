@@ -241,7 +241,8 @@ class RegimeDynamicRPETransformer(nn.Module):
                  use_semantic_router: bool = False,
                  lambda_cluster: float = 0.005,
                  routing_strength: float = 1.0,
-                 context_gamma: float = 5.0):
+                 context_gamma: float = 5.0,
+                 orthogonal_dynamic: bool = False):
         super().__init__()
         self.proj = nn.Linear(in_dim, d_model)
         self.use_semantic_router = use_semantic_router
@@ -249,6 +250,7 @@ class RegimeDynamicRPETransformer(nn.Module):
         self.lambda_info_max = 0.001
         self.routing_strength = float(routing_strength)
         self.context_gamma = float(context_gamma)
+        self.orthogonal_dynamic = bool(orthogonal_dynamic)
         if not 0.0 <= self.routing_strength <= 1.0:
             raise ValueError("routing_strength must be in [0, 1]")
         self.regime_gen = (
@@ -327,8 +329,8 @@ class RegimeDynamicRPETransformer(nn.Module):
                      lambda_state: float = 0.01) -> torch.Tensor:
         """
         F/F2: L = λd·L_dynamic_div + λb·L_balance [+ λs·L_state]
-        G/H:  L = λd·L_dynamic_div + λcluster·L_cluster + λIM·L_InfoMax
-          L_dynamic_div = mean pairwise cosine of adapter outputs
+        G-K:  L = λd·mean(cos) + λcluster·L_cluster + λIM·L_InfoMax
+        L:    L = λd·mean(cos²) + λcluster·L_cluster + λIM·L_InfoMax
           L_balance     = Σ_k p̄_k·log(p̄_k·K) on batch-level p̄
           L_state       = MSE(Σ_k p_tk·μ_k, m_t)  (if use_state_loss)
         All terms use NON-detached p / zs / m (full computational graph).
@@ -341,7 +343,10 @@ class RegimeDynamicRPETransformer(nn.Module):
         zs_n = F.normalize(zs.reshape(K, -1), dim=-1)             # (K, N)
         cos = zs_n @ zs_n.T
         mask = ~torch.eye(K, dtype=torch.bool, device=cos.device)
-        l_dyn = cos[mask].mean()
+        pairwise_cos = cos[mask]
+        l_signed_cos = pairwise_cos.mean()
+        l_orth = pairwise_cos.pow(2).mean()
+        l_dyn = l_orth if self.orthogonal_dynamic else l_signed_cos
         if self.use_semantic_router:
             descriptor = getattr(self, '_m_t_for_loss', None)
             if descriptor is None:
@@ -357,6 +362,9 @@ class RegimeDynamicRPETransformer(nn.Module):
             l_info_max = h_cond - h_marg
             self.last_loss_components = {
                 'dynamic': l_dyn.detach(),
+                'orth': l_orth.detach(),
+                'pairwise_cosine': l_signed_cos.detach(),
+                'pairwise_cosine_sq': l_orth.detach(),
                 'cluster': l_cluster.detach(),
                 'info_max': l_info_max.detach(),
                 'conditional_entropy': h_cond.detach(),
@@ -367,6 +375,8 @@ class RegimeDynamicRPETransformer(nn.Module):
                 'cluster': self.lambda_cluster,
                 'info_max': self.lambda_info_max,
             }
+            if self.orthogonal_dynamic:
+                self.last_loss_weights['orth'] = float(lambda_dynamic)
             return (
                 lambda_dynamic * l_dyn
                 + self.lambda_cluster * l_cluster
