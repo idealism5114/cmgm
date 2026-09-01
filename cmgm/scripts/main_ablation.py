@@ -44,6 +44,7 @@ VARIANTS = [
     ("S0-MarketTokenTransformer", "market_token_transformer"),
     ("S0D-MarketDispersionTransformer", "market_dispersion_transformer"),
     ("S1-SwitchingTransformer", "switching_transformer"),
+    ("S1C-NullSwitchControl", "switching_null_control"),
     ("F-RegimeDynamic", "regime_dynamic_transformer"),
     ("F2-RegimeSemantic", "regime_dynamic_semantic"),
     ("G-SemanticRouter", "semantic_router"),
@@ -58,7 +59,7 @@ VARIANTS = [
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
-            "HeteroMixHop A/B/C/S0/S0D/S1 and retained F/F2/G/H/I/J/K/L ablations"
+            "HeteroMixHop A/B/C/S0/S0D/S1/S1C and retained F/F2/G/H/I/J/K/L ablations"
         )
     )
     parser.add_argument("--epochs", type=int, default=NUM_EPOCHS)
@@ -71,7 +72,7 @@ def parse_args():
         "--variants",
         help=(
             "Comma-separated display or internal names; defaults to "
-            "A/B/C/S0/S0D/S1/F/F2/G/H/I/J/K/L"
+            "A/B/C/S0/S0D/S1/S1C/F/F2/G/H/I/J/K/L"
         ),
     )
     return parser.parse_args()
@@ -439,14 +440,34 @@ def _aggregate_gradient_norm(parameters, gradients=None):
     return torch.stack(squared).sum().sqrt().item()
 
 
+def _switching_parameter_groups(branch):
+    return {
+        "Regime Evidence Transformer": list(branch.regime_evidence.parameters()),
+        "posterior heads": list(branch.regime_inference.posterior_heads.parameters()),
+        "transition_logits": [branch.regime_inference.transition_logits],
+        "regime_embeddings": [branch.regime_embeddings],
+        "MarketAwareTemporalEncoder": list(branch.market_encoder.parameters()),
+        "Forecast Transformer": list(branch.transformer.parameters()),
+    }
+
+
+def _snapshot_switching_parameter_groups(branch):
+    return {
+        name: [parameter.detach().cpu().clone() for parameter in parameters]
+        for name, parameters in _switching_parameter_groups(branch).items()
+    }
+
+
 def _switching_transformer_diagnostics(model, loaders, device):
-    """Diagnostics for S1 switching inference and its S0D observation path."""
+    """Diagnostics for S1 and the strict S1C switching null control."""
     branch = model.switching_transformer
     inference = branch.regime_inference
+    label = "S1C" if branch.null_control else "S1"
     eps = inference.eps
     split_probabilities = {}
     test_parts = {
-        name: [] for name in ("p", "prior", "previous", "q", "E", "r")
+        name: []
+        for name in ("p", "prior", "previous", "q", "E", "r_real", "r_effective")
     }
     input_stats = {
         name: {"entropy": [], "level": [], "dispersion": []}
@@ -470,7 +491,12 @@ def _switching_transformer_diagnostics(model, loaders, device):
                     )
                     test_parts["q"].append(inference.last_posterior_heads.cpu())
                     test_parts["E"].append(branch.last_market_tokens.cpu())
-                    test_parts["r"].append(branch.last_regime_intervention.cpu())
+                    test_parts["r_real"].append(
+                        branch.last_regime_intervention_real.cpu()
+                    )
+                    test_parts["r_effective"].append(
+                        branch.last_regime_intervention_effective.cpu()
+                    )
                     encoder = branch.market_encoder
                     for name in encoder.MARKET_NAMES:
                         attention = encoder.last_market_attentions[name]
@@ -491,12 +517,12 @@ def _switching_transformer_diagnostics(model, loaders, device):
             ).sum(dim=-1)
             hard = probabilities.argmax(dim=-1)
             mean_p = probabilities.mean(dim=(0, 1))
-            print(f"  [S1 {split_name.upper()}] mean p={mean_p.numpy().round(4)}")
+            print(f"  [{label} {split_name.upper()}] mean p={mean_p.numpy().round(4)}")
             print(
-                f"  [S1 {split_name.upper()}] entropy={entropy.mean().item():.6f} "
+                f"  [{label} {split_name.upper()}] entropy={entropy.mean().item():.6f} "
                 f"mean max p={probabilities.max(dim=-1).values.mean().item():.6f}"
             )
-            print(f"  [S1 {split_name.upper()}] argmax occupancy")
+            print(f"  [{label} {split_name.upper()}] argmax occupancy")
             for state in range(branch.K):
                 print(
                     f"    state {state} = {(hard == state).float().mean().item() * 100:.2f}%"
@@ -510,43 +536,43 @@ def _switching_transformer_diagnostics(model, loaders, device):
     entropy = -(p * (p + eps).log()).sum(dim=-1)
     transition_magnitude = (p[:, 1:] - p[:, :-1]).abs().sum(dim=-1)
     print(
-        f"  [S1 p] mean={p.mean(dim=(0, 1)).numpy().round(4)} "
+        f"  [{label} p] mean={p.mean(dim=(0, 1)).numpy().round(4)} "
         f"std={p.std(unbiased=False).item():.6f} min={p.min().item():.6f} "
         f"max={p.max().item():.6f}"
     )
     print(
-        f"  [S1 p] entropy mean={entropy.mean().item():.6f} "
+        f"  [{label} p] entropy mean={entropy.mean().item():.6f} "
         f"std={entropy.std(unbiased=False).item():.6f} "
         f"mean max probability={p.max(dim=-1).values.mean().item():.6f}"
     )
     print(
-        f"  [S1 p] mean ||p_t-p_(t-1)||_1="
+        f"  [{label} p] mean ||p_t-p_(t-1)||_1="
         f"{transition_magnitude.mean().item():.6f}"
     )
     for step in range(0, min(p.shape[1], 20), 2):
-        print(f"  [S1 p t={step}] {p[:, step].mean(dim=0).numpy().round(4)}")
+        print(f"  [{label} p t={step}] {p[:, step].mean(dim=0).numpy().round(4)}")
 
     transition = branch.transition_matrix().detach().cpu()
     row_entropy = -(transition * (transition + eps).log()).sum(dim=-1)
     diagonal = transition.diagonal()
     off_diagonal = transition[~torch.eye(branch.K, dtype=torch.bool)]
-    print(f"  [S1 transition matrix]\n{transition.numpy().round(6)}")
-    print(f"  [S1 transition] row sums={transition.sum(dim=-1).numpy().round(8)}")
+    print(f"  [{label} transition matrix]\n{transition.numpy().round(6)}")
+    print(f"  [{label} transition] row sums={transition.sum(dim=-1).numpy().round(8)}")
     print(
-        f"  [S1 transition] diagonal={diagonal.numpy().round(6)} "
+        f"  [{label} transition] diagonal={diagonal.numpy().round(6)} "
         f"mean persistence={diagonal.mean().item():.6f} "
         f"off-diagonal mean={off_diagonal.mean().item():.6f}"
     )
     for state, value in enumerate(row_entropy):
-        print(f"  [S1 transition] state {state} entropy={value.item():.6f}")
-    print(f"  [S1 transition] mean entropy={row_entropy.mean().item():.6f}")
+        print(f"  [{label} transition] state {state} entropy={value.item():.6f}")
+    print(f"  [{label} transition] mean entropy={row_entropy.mean().item():.6f}")
 
     prior_posterior_kl = (
         p * ((p + eps).log() - (prior + eps).log())
     ).sum(dim=-1)
     prior_posterior_l1 = (p - prior).abs().sum(dim=-1)
     print(
-        f"  [S1 prior/posterior] mean KL={prior_posterior_kl.mean().item():.6f} "
+        f"  [{label} prior/posterior] mean KL={prior_posterior_kl.mean().item():.6f} "
         f"mean L1={prior_posterior_l1.mean().item():.6f}"
     )
 
@@ -554,16 +580,16 @@ def _switching_transformer_diagnostics(model, loaders, device):
     for left, right in ((0, 1), (0, 2), (1, 2)):
         value = (q[:, :, left] - q[:, :, right]).abs().sum(dim=-1).mean()
         pairwise_l1.append(value)
-        print(f"  [S1 posterior heads] mean L1(q{left},q{right})={value.item():.6f}")
+        print(f"  [{label} posterior heads] mean L1(q{left},q{right})={value.item():.6f}")
     print(
-        f"  [S1 posterior heads] mean pairwise L1="
+        f"  [{label} posterior heads] mean pairwise L1="
         f"{torch.stack(pairwise_l1).mean().item():.6f}"
     )
     for state in range(branch.K):
         q_entropy = -(
             q[:, :, state] * (q[:, :, state] + eps).log()
         ).sum(dim=-1).mean()
-        print(f"  [S1 posterior head {state}] entropy={q_entropy.item():.6f}")
+        print(f"  [{label} posterior head {state}] entropy={q_entropy.item():.6f}")
 
     hard = p.argmax(dim=-1)
     counts = torch.zeros(branch.K, branch.K, dtype=torch.long)
@@ -574,27 +600,35 @@ def _switching_transformer_diagnostics(model, loaders, device):
                 & (hard[:, 1:] == next_state)
             ).sum()
     empirical = counts.float() / counts.sum(dim=-1, keepdim=True).clamp(min=1)
-    print(f"  [S1 empirical transition counts]\n{counts.numpy()}")
-    print(f"  [S1 empirical transition probability]\n{empirical.numpy().round(6)}")
+    print(f"  [{label} empirical transition counts]\n{counts.numpy()}")
+    print(f"  [{label} empirical transition probability]\n{empirical.numpy().round(6)}")
 
     embeddings = branch.regime_embeddings.detach().cpu()
     centered = branch.centered_regime_embeddings().detach().cpu()
     for state in range(branch.K):
         print(
-            f"  [S1 embedding state {state}] raw norm="
+            f"  [{label} embedding state {state}] raw norm="
             f"{embeddings[state].norm().item():.6f} centered norm="
             f"{centered[state].norm().item():.6f}"
         )
     token_norm = parts["E"].norm(dim=-1).mean()
-    intervention_norm = parts["r"].norm(dim=-1).mean()
+    real_intervention_norm = parts["r_real"].norm(dim=-1).mean()
+    effective_intervention_norm = parts["r_effective"].norm(dim=-1).mean()
     print(
-        f"  [S1 intervention] mean ||E||={token_norm.item():.6f} "
-        f"mean ||r||={intervention_norm.item():.6f} "
-        f"ratio={(intervention_norm / (token_norm + eps)).item():.6f}"
+        f"  [{label} intervention] mean ||E||={token_norm.item():.6f} "
+        f"mean ||r_real||={real_intervention_norm.item():.6f} "
+        f"ratio={(real_intervention_norm / (token_norm + eps)).item():.6f}"
     )
+    if branch.null_control:
+        print(
+            f"  [S1C null intervention] mean ||r_real||="
+            f"{real_intervention_norm.item():.6f} mean ||r_effective||="
+            f"{effective_intervention_norm.item():.6f} "
+            f"max_abs(r_effective)={parts['r_effective'].abs().max().item():.3e}"
+        )
     uniform_intervention = centered.mean(dim=0)
     print(
-        f"  [S1 uniform-p sanity] max_abs(r_uniform)="
+        f"  [{label} uniform-p sanity] max_abs(r_uniform)="
         f"{uniform_intervention.abs().max().item():.3e}"
     )
 
@@ -609,12 +643,12 @@ def _switching_transformer_diagnostics(model, loaders, device):
         level_norm = torch.cat(input_stats[name]["level"]).mean()
         dispersion_norm = torch.cat(input_stats[name]["dispersion"]).mean()
         print(
-            f"  [S1 input {name}] normalized attention entropy="
+            f"  [{label} input {name}] normalized attention entropy="
             f"{normalized.mean().item():.6f} effective nodes="
             f"{market_entropy.exp().mean().item():.6f} level norm="
             f"{level_norm.item():.6f} dispersion norm={dispersion_norm.item():.6f}"
         )
-    print(f"  [S1 input] daily token E norm={token_norm.item():.6f}")
+    print(f"  [{label} input] daily token E norm={token_norm.item():.6f}")
 
     x_batch, y_batch = next(iter(loaders["test"]))[:2]
     x_batch = x_batch[:16].to(device)
@@ -650,7 +684,7 @@ def _switching_transformer_diagnostics(model, loaders, device):
         group_gradients = prediction_gradients[offset:offset + len(parameters)]
         offset += len(parameters)
         print(
-            f"  [S1 prediction-only grad] {name}="
+            f"  [{label} prediction-only grad] {name}="
             f"{_aggregate_gradient_norm(parameters, group_gradients):.3e}"
         )
     total_loss.backward()
@@ -661,38 +695,83 @@ def _switching_transformer_diagnostics(model, loaders, device):
     }
     for name, parameters in total_groups.items():
         print(
-            f"  [S1 total-loss grad] {name}="
+            f"  [{label} total-loss grad] {name}="
             f"{_aggregate_gradient_norm(parameters):.3e}"
         )
-    print(f"  [S1 loss] L_return={return_loss.item():.6e}")
-    print(f"  [S1 loss] L_switch_raw={switch_raw.item():.6e}")
-    print(f"  [S1 loss] beta={inference.current_beta:.6e}")
-    print(f"  [S1 loss] weighted_switch={weighted_switch.item():.6e}")
-    print(f"  [S1 loss] total={total_loss.item():.6e}")
-    print(
-        f"  [S1 loss ratio] switch_to_return_ratio="
-        f"{abs(weighted_switch.item()) / (return_loss.item() + eps):.6e}"
-    )
+    if branch.null_control:
+        would_be_weighted = branch.scheduled_beta * switch_raw
+        print(f"  [S1C loss] L_return={return_loss.item():.6e}")
+        print(f"  [S1C loss] L_switch_raw={switch_raw.item():.6e}")
+        print(f"  [S1C loss] scheduled_beta={branch.scheduled_beta:.6e}")
+        print(f"  [S1C loss] effective_beta={branch.effective_beta:.6e}")
+        print(
+            f"  [S1C loss] would_be_weighted_switch="
+            f"{would_be_weighted.item():.6e}"
+        )
+        print(f"  [S1C loss] actual_weighted_switch={weighted_switch.item():.6e}")
+        print(f"  [S1C loss] total={total_loss.item():.6e}")
+        print("  [S1C loss ratio] actual_switch_to_return_ratio=0.000000e+00")
+    else:
+        print(f"  [S1 loss] L_return={return_loss.item():.6e}")
+        print(f"  [S1 loss] L_switch_raw={switch_raw.item():.6e}")
+        print(f"  [S1 loss] beta={inference.current_beta:.6e}")
+        print(f"  [S1 loss] weighted_switch={weighted_switch.item():.6e}")
+        print(f"  [S1 loss] total={total_loss.item():.6e}")
+        print(
+            f"  [S1 loss ratio] switch_to_return_ratio="
+            f"{abs(weighted_switch.item()) / (return_loss.item() + eps):.6e}"
+        )
+
+    initial_groups = getattr(branch, "_initial_parameter_groups", None)
+    if branch.null_control and initial_groups is not None:
+        current_groups = _switching_parameter_groups(branch)
+        print("  [S1C parameter drift]")
+        for name, initial_parameters in initial_groups.items():
+            current_parameters = current_groups[name]
+            delta_sq = sum(
+                (current.detach().cpu() - initial).square().sum()
+                for current, initial in zip(current_parameters, initial_parameters)
+            )
+            initial_sq = sum(initial.square().sum() for initial in initial_parameters)
+            relative_drift = (delta_sq.sqrt() / (initial_sq.sqrt() + eps)).item()
+            print(f"    {name} = {relative_drift:.3e}")
 
     model.eval()
     with torch.no_grad():
         prediction_real = model(x_batch)
         temporal_real = branch.last_h_temporal.clone()
-        for state in range(branch.K):
-            forced = torch.zeros(branch.K, device=device)
-            forced[state] = 1.0
-            prediction_forced = model._switching_transformer_forward(
-                x_batch, forced_probabilities=forced
+        if branch.null_control:
+            forced_a = torch.tensor([1.0, 0.0, 0.0], device=device)
+            forced_b = torch.tensor([0.0, 0.0, 1.0], device=device)
+            prediction_a = model._switching_transformer_forward(
+                x_batch, forced_probabilities=forced_a
             )
-            temporal_forced = branch.last_h_temporal
-            temporal_diff = (temporal_forced - temporal_real).abs()
-            prediction_diff = (prediction_forced - prediction_real).abs()
+            temporal_a = branch.last_h_temporal.clone()
+            prediction_b = model._switching_transformer_forward(
+                x_batch, forced_probabilities=forced_b
+            )
+            temporal_b = branch.last_h_temporal.clone()
             print(
-                f"  [S1 forced state {state}] h_temporal mean/max abs diff="
-                f"{temporal_diff.mean().item():.3e}/{temporal_diff.max().item():.3e} "
-                f"prediction mean/max abs diff="
-                f"{prediction_diff.mean().item():.3e}/{prediction_diff.max().item():.3e}"
+                f"  [S1C null-state invariance] h_temporal diff="
+                f"{(temporal_a - temporal_b).abs().max().item():.3e} "
+                f"prediction diff={(prediction_a - prediction_b).abs().max().item():.3e}"
             )
+        else:
+            for state in range(branch.K):
+                forced = torch.zeros(branch.K, device=device)
+                forced[state] = 1.0
+                prediction_forced = model._switching_transformer_forward(
+                    x_batch, forced_probabilities=forced
+                )
+                temporal_forced = branch.last_h_temporal
+                temporal_diff = (temporal_forced - temporal_real).abs()
+                prediction_diff = (prediction_forced - prediction_real).abs()
+                print(
+                    f"  [S1 forced state {state}] h_temporal mean/max abs diff="
+                    f"{temporal_diff.mean().item():.3e}/{temporal_diff.max().item():.3e} "
+                    f"prediction mean/max abs diff="
+                    f"{prediction_diff.mean().item():.3e}/{prediction_diff.max().item():.3e}"
+                )
 
         split = min(11, x_batch.shape[1])
         original_tokens = branch.encode_market_tokens(x_batch)
@@ -702,7 +781,7 @@ def _switching_transformer_diagnostics(model, loaders, device):
         perturbed_tokens = branch.encode_market_tokens(perturbed)
         perturbed_p = branch.infer_regimes(perturbed_tokens)
         print(
-            f"  [S1 causality] max p diff through t=10="
+            f"  [{label} causality] max p diff through t=10="
             f"{(original_p[:, :split] - perturbed_p[:, :split]).abs().max().item():.3e}"
         )
 
@@ -713,7 +792,7 @@ def _switching_transformer_diagnostics(model, loaders, device):
         temporal_single = branch.temporal_forward(tokens_single)
         p_single = branch.last_regime_probabilities.clone()
         print(
-            f"  [S1 batch independence] E="
+            f"  [{label} batch independence] E="
             f"{(tokens_batch[:1] - tokens_single).abs().max().item():.3e} "
             f"p={(p_batch[:1] - p_single).abs().max().item():.3e} "
             f"h_temporal={(temporal_batch[:1] - temporal_single).abs().max().item():.3e}"
@@ -743,7 +822,7 @@ def _switching_transformer_diagnostics(model, loaders, device):
             permuted_temporal = branch.temporal_forward(permuted_tokens)
             permuted_p = branch.last_regime_probabilities
             print(
-                f"  [S1 {name} permutation] E="
+                f"  [{label} {name} permutation] E="
                 f"{(permuted_tokens - tokens_reference).abs().max().item():.3e} "
                 f"p={(permuted_p - p_reference).abs().max().item():.3e} "
                 f"h_temporal="
@@ -1178,7 +1257,7 @@ def print_diagnostics(model, variant, loaders, device):
         f"std={alpha.std().item():.4f} min={alpha.min().item():.4f} "
         f"max={alpha.max().item():.4f}"
     )
-    if variant == "switching_transformer":
+    if variant in ("switching_transformer", "switching_null_control"):
         _switching_transformer_diagnostics(model, loaders, device)
     elif variant in ("market_token_transformer", "market_dispersion_transformer"):
         _market_token_diagnostics(model, test_loader, device)
@@ -1226,14 +1305,67 @@ def run_variant(name, variant, args, device, data):
     set_seed(args.seed)
     n_stock = data["market_indices"]["stock"][1] - data["market_indices"]["stock"][0]
     n_bond = data["market_indices"]["bond"][1] - data["market_indices"]["bond"][0]
-    model = HeteroMixHopCMGM(
-        data["n_nodes"],
-        data["n_commodities"],
+    model_kwargs = dict(
         n_stock=n_stock,
         n_bond=n_bond,
-        variant=variant,
         feat_dim=FEATURE_DIM,
-    ).to(device)
+    )
+    # Keep construction on CPU so S1/S1C can be checked tensor-for-tensor
+    # before either model is moved to the selected accelerator.
+    model = HeteroMixHopCMGM(
+        data["n_nodes"], data["n_commodities"],
+        variant=variant, **model_kwargs,
+    )
+    if variant == "switching_null_control":
+        with torch.random.fork_rng():
+            torch.manual_seed(args.seed)
+            s1_reference = HeteroMixHopCMGM(
+                data["n_nodes"], data["n_commodities"],
+                variant="switching_transformer", **model_kwargs,
+            )
+            s1_state = s1_reference.state_dict()
+            s1c_state = model.state_dict()
+            assert s1_state.keys() == s1c_state.keys()
+            for parameter_name in s1_state:
+                torch.testing.assert_close(
+                    s1_state[parameter_name], s1c_state[parameter_name],
+                    rtol=0.0, atol=0.0,
+                )
+
+            # Both variants execute the complete regime side branch in train
+            # mode and therefore consume its dropout/RNG in the same order.
+            sanity_x = torch.randn(
+                2, args.seq_len, data["n_nodes"], FEATURE_DIM
+            )
+            s1_reference.train()
+            model.train()
+            torch.manual_seed(91017)
+            s1_reference.switching_transformer(sanity_x)
+            torch.manual_seed(91017)
+            model.switching_transformer(sanity_x)
+            for left, right in (
+                (
+                    s1_reference.switching_transformer.last_regime_evidence,
+                    model.switching_transformer.last_regime_evidence,
+                ),
+                (
+                    s1_reference.switching_transformer.last_regime_probabilities,
+                    model.switching_transformer.last_regime_probabilities,
+                ),
+                (
+                    s1_reference.switching_transformer.last_regime_intervention_real,
+                    model.switching_transformer.last_regime_intervention_real,
+                ),
+            ):
+                torch.testing.assert_close(left, right, rtol=0.0, atol=0.0)
+        print("  [S1/S1C shared initialization] PASS")
+        print("  [S1/S1C forward RNG sanity] H_reg/p/r_real PASS")
+
+    model = model.to(device)
+    if variant == "switching_null_control":
+        model.switching_transformer._initial_parameter_groups = (
+            _snapshot_switching_parameter_groups(model.switching_transformer)
+        )
     parameter_count = sum(parameter.numel() for parameter in model.parameters())
     print(f"\n{name} ({variant}) — {parameter_count:,} parameters")
     if variant in ("market_token_transformer", "market_dispersion_transformer"):
@@ -1265,7 +1397,7 @@ def run_variant(name, variant, args, device, data):
                 f"parameter increase={projection_increase:+,} "
                 "(daily projection 96→192 input width)"
             )
-    elif variant == "switching_transformer":
+    elif variant in ("switching_transformer", "switching_null_control"):
         branch = model.switching_transformer
         evidence_params = sum(
             parameter.numel() for parameter in branch.regime_evidence.parameters()
@@ -1279,12 +1411,19 @@ def run_variant(name, variant, args, device, data):
         increase = (
             evidence_params + posterior_params + transition_params + embedding_params
         )
+        route_label = "S1C" if branch.null_control else "S1"
         print(
             f"  S0D total params={parameter_count - increase:,}; "
-            f"S1 total params={parameter_count:,}; S1-S0D increase={increase:+,}"
+            f"{route_label} total params={parameter_count:,}; "
+            f"{route_label}-S0D increase={increase:+,}"
         )
+        if branch.null_control:
+            print(
+                f"  S1 params={parameter_count:,}; S1C params={parameter_count:,}; "
+                "difference=0"
+            )
         print(
-            f"  S1 added params: evidence Transformer={evidence_params:,}; "
+            f"  {route_label} added params: evidence Transformer={evidence_params:,}; "
             f"posterior heads={posterior_params:,}; transition={transition_params:,}; "
             f"regime embeddings={embedding_params:,}"
         )
@@ -1348,6 +1487,68 @@ def select_variants(requested):
     return selected
 
 
+def _print_s1c_control_comparison(results):
+    s1c = next(
+        (result for result in results if result["variant"] == "S1C-NullSwitchControl"),
+        None,
+    )
+    if s1c is None:
+        return
+
+    s0d = {"MAE": 0.023073, "RMSE": 0.029565, "Hit_Ratio": 0.511}
+    s1 = {"MAE": 0.022228, "RMSE": 0.028661, "Hit_Ratio": 0.503}
+    delta_s1 = s1c["MAE"] - s1["MAE"]
+    delta_s0d = s1c["MAE"] - s0d["MAE"]
+    print("\nS1C causal-control comparison")
+    print(
+        f"  S0D: MAE={s0d['MAE']:.6f} RMSE={s0d['RMSE']:.6f} "
+        f"Hit={s0d['Hit_Ratio'] * 100:.1f}%"
+    )
+    print(
+        f"  S1:  MAE={s1['MAE']:.6f} RMSE={s1['RMSE']:.6f} "
+        f"Hit={s1['Hit_Ratio'] * 100:.1f}%"
+    )
+    print(
+        f"  S1C: MAE={s1c['MAE']:.6f} RMSE={s1c['RMSE']:.6f} "
+        f"Hit={s1c['Hit_Ratio'] * 100:.1f}%"
+    )
+    print(f"  S1C-S1 delta MAE={delta_s1:+.6f}")
+    print(f"  S1C-S0D delta MAE={delta_s0d:+.6f}")
+
+    tolerance = 2e-4
+    if abs(delta_s1) <= tolerance:
+        case = "Case A"
+        conclusion = (
+            "S1 gain cannot be reliably attributed to switching; the null "
+            "control retains essentially the same prediction performance."
+        )
+    elif abs(delta_s0d) <= tolerance:
+        case = "Case B"
+        conclusion = (
+            "S1C returns to the S0D band; switching/KL may have changed the "
+            "optimization trajectory, without establishing regime semantics."
+        )
+    elif s1c["MAE"] < min(s0d["MAE"], s1["MAE"]) - tolerance:
+        case = "Case C"
+        conclusion = (
+            "The null control outperforms both references; seed-level "
+            "stochastic variation must be checked before structural claims."
+        )
+    elif s1c["MAE"] > s0d["MAE"] + tolerance:
+        case = "Case D"
+        conclusion = (
+            "S1C is worse than S0D; verify shared initialization, RNG order, "
+            "forecast initialization, and training settings first."
+        )
+    else:
+        case = "Between reference bands"
+        conclusion = (
+            "S1C lies between the predefined S1 and S0D equivalence bands; "
+            "the control is inconclusive under the stated single-run rule."
+        )
+    print(f"  [{case}] {conclusion}")
+
+
 def main():
     args = parse_args()
     variants = select_variants(args.variants)
@@ -1377,6 +1578,8 @@ def main():
             f"{result['MAE']:>10.6f} {result['RMSE']:>10.6f} "
             f"{result['Hit_Ratio'] * 100:>7.1f}% {result['vs_zero_pct']:>+9.2f}%"
         )
+
+    _print_s1c_control_comparison(results)
 
     ExperimentLogger().log_run(
         {

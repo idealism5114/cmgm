@@ -10,7 +10,7 @@ from cmgm.models.switching_transformer import (
     SwitchingRegimeInference,
     SwitchingTransformerBranch,
 )
-from cmgm.training.train import train
+from cmgm.training.train import make_loss, train, train_epoch
 
 
 def _branch():
@@ -269,6 +269,196 @@ def test_s1_shared_initialization_matches_s0d_common_modules():
     assert s0d_forecast.keys() == s1_forecast.keys()
     for name in s0d_forecast:
         torch.testing.assert_close(s0d_forecast[name], s1_forecast[name])
+
+
+def test_s1c_is_parameter_identical_to_s1_and_preserves_regime_rng_path():
+    common = dict(
+        feat_dim=5,
+        n_stock=4,
+        n_bond=3,
+        n_commodity=2,
+        d_model=16,
+        n_heads=4,
+        n_layers=2,
+        ffn_dim=32,
+        output_dim=8,
+        dropout=0.2,
+    )
+    torch.manual_seed(1801)
+    s1 = SwitchingTransformerBranch(**common)
+    torch.manual_seed(1801)
+    s1c = SwitchingTransformerBranch(**common, null_control=True)
+
+    assert sum(p.numel() for p in s1.parameters()) == sum(
+        p.numel() for p in s1c.parameters()
+    )
+    assert s1.state_dict().keys() == s1c.state_dict().keys()
+    for name, value in s1.state_dict().items():
+        torch.testing.assert_close(
+            value, s1c.state_dict()[name], rtol=0.0, atol=0.0
+        )
+
+    x = torch.randn(2, 7, 9, 5)
+    s1.train()
+    s1c.train()
+    torch.manual_seed(1802)
+    s1(x)
+    torch.manual_seed(1802)
+    s1c(x)
+    torch.testing.assert_close(
+        s1.last_regime_evidence, s1c.last_regime_evidence,
+        rtol=0.0, atol=0.0,
+    )
+    torch.testing.assert_close(
+        s1.last_regime_probabilities, s1c.last_regime_probabilities,
+        rtol=0.0, atol=0.0,
+    )
+    torch.testing.assert_close(
+        s1.last_regime_intervention_real,
+        s1c.last_regime_intervention_real,
+        rtol=0.0, atol=0.0,
+    )
+
+
+def test_s1c_null_intervention_loss_and_prediction_gradients_are_exactly_cut():
+    torch.manual_seed(1803)
+    branch = SwitchingTransformerBranch(
+        5, 4, 3, 2, d_model=16, n_heads=4, ffn_dim=32,
+        output_dim=8, dropout=0.0, null_control=True,
+    )
+    branch.set_epoch(20)
+    output = branch(torch.randn(2, 7, 9, 5))
+    return_loss = output.square().mean()
+    switch_loss = branch.switch_loss()
+    total_loss = return_loss + switch_loss
+
+    assert branch.scheduled_beta == 5e-4
+    assert branch.effective_beta == 0.0
+    assert branch.regime_inference._last_switch_loss.requires_grad
+    assert switch_loss.item() == 0.0
+    assert total_loss.item() == return_loss.item()
+    assert branch.last_regime_intervention_real.norm() > 0
+    assert branch.last_regime_intervention_effective.abs().max() == 0
+    torch.testing.assert_close(
+        branch.last_conditioned_tokens,
+        branch.last_market_tokens,
+        rtol=0.0,
+        atol=0.0,
+    )
+
+    total_loss.backward()
+    regime_parameters = [
+        *branch.regime_evidence.parameters(),
+        *branch.regime_inference.posterior_heads.parameters(),
+        branch.regime_inference.transition_logits,
+        branch.regime_embeddings,
+    ]
+    assert all(parameter.grad is None for parameter in regime_parameters)
+    assert any(
+        parameter.grad is not None and parameter.grad.abs().sum() > 0
+        for parameter in branch.market_encoder.parameters()
+    )
+    assert any(
+        parameter.grad is not None and parameter.grad.abs().sum() > 0
+        for parameter in branch.transformer.parameters()
+    )
+
+    initial_regime = [parameter.detach().clone() for parameter in regime_parameters]
+    optimizer = torch.optim.Adam(
+        branch.parameters(), lr=1e-3, weight_decay=0.1
+    )
+    optimizer.step()
+    for initial, parameter in zip(initial_regime, regime_parameters):
+        torch.testing.assert_close(
+            initial, parameter.detach(), rtol=0.0, atol=0.0
+        )
+
+
+def test_s1c_is_invariant_to_forced_null_states():
+    torch.manual_seed(1804)
+    branch = SwitchingTransformerBranch(
+        5, 4, 3, 2, d_model=16, n_heads=4, ffn_dim=32,
+        output_dim=8, dropout=0.0, null_control=True,
+    ).eval()
+    x = torch.randn(2, 7, 9, 5)
+    state_a = torch.tensor([1.0, 0.0, 0.0])
+    state_b = torch.tensor([0.0, 0.0, 1.0])
+    output_a = branch(x, forced_probabilities=state_a)
+    real_a = branch.last_regime_intervention_real.clone()
+    output_b = branch(x, forced_probabilities=state_b)
+    real_b = branch.last_regime_intervention_real.clone()
+
+    assert (real_a - real_b).abs().max() > 0
+    torch.testing.assert_close(output_a, output_b, rtol=0.0, atol=0.0)
+    assert branch.last_regime_intervention_effective.abs().max() == 0
+
+
+def test_s1c_full_model_variant_is_registered_without_extra_parameters():
+    common = dict(
+        num_nodes=6,
+        n_commodities=2,
+        n_stock=2,
+        n_bond=2,
+        feat_dim=5,
+    )
+    torch.manual_seed(1805)
+    s1 = HeteroMixHopCMGM(variant="switching_transformer", **common)
+    torch.manual_seed(1805)
+    s1c = HeteroMixHopCMGM(variant="switching_null_control", **common)
+    assert sum(p.numel() for p in s1.parameters()) == sum(
+        p.numel() for p in s1c.parameters()
+    )
+    assert s1.state_dict().keys() == s1c.state_dict().keys()
+    assert s1c.switching_transformer.null_control
+    prediction = s1c(torch.randn(2, 7, 6, 5))
+    assert prediction.shape == (2, s1c.n_horizons, 2)
+
+
+def test_s1c_train_epoch_keeps_all_switching_parameters_frozen():
+    torch.manual_seed(1806)
+    model = HeteroMixHopCMGM(
+        num_nodes=6,
+        n_commodities=2,
+        n_stock=2,
+        n_bond=2,
+        feat_dim=5,
+        variant="switching_null_control",
+    )
+    branch = model.switching_transformer
+    branch.set_epoch(20)
+    regime_parameters = [
+        *branch.regime_evidence.parameters(),
+        *branch.regime_inference.posterior_heads.parameters(),
+        branch.regime_inference.transition_logits,
+        branch.regime_embeddings,
+    ]
+    initial = [parameter.detach().clone() for parameter in regime_parameters]
+    loader = DataLoader(
+        TensorDataset(
+            torch.randn(2, 7, 6, 5),
+            torch.randn(2, model.n_horizons, 2),
+        ),
+        batch_size=2,
+    )
+    optimizer = torch.optim.Adam(
+        model.parameters(), lr=1e-3, weight_decay=0.1
+    )
+    train_epoch(
+        model,
+        loader,
+        torch.empty(2, 0, dtype=torch.long),
+        torch.empty(0),
+        optimizer,
+        make_loss(),
+        torch.device("cpu"),
+    )
+
+    assert branch.regime_inference._last_switch_loss is not None
+    assert all(parameter.grad is None for parameter in regime_parameters)
+    for before, after in zip(initial, regime_parameters):
+        torch.testing.assert_close(
+            before, after.detach(), rtol=0.0, atol=0.0
+        )
 
 
 def test_regime_evidence_transformer_is_causal():

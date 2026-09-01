@@ -132,7 +132,10 @@ def train_epoch(
         if rd is not None:
             loss = loss + rd.dynamic_loss()
         switching_branch = getattr(model, 'switching_transformer', None)
-        if switching_branch is not None:
+        if (
+            switching_branch is not None
+            and not switching_branch.null_control
+        ):
             loss = loss + switching_branch.switch_loss()
 
         # Backward pass
