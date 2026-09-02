@@ -32,7 +32,10 @@ def make_loss() -> nn.Module:
 
 
 def _switching_branch(model: nn.Module):
-    """Return the active S1/S1C/S2F branch without changing old interfaces."""
+    """Return the active S1/S1C/S2F/D0 branch without changing interfaces."""
+    branch = getattr(model, 'switching_latent_transformer', None)
+    if branch is not None:
+        return branch
     branch = getattr(model, 'switching_filter_rpe', None)
     if branch is not None:
         return branch
