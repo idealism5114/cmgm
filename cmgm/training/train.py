@@ -247,6 +247,7 @@ def train(
     weight_decay: float = WEIGHT_DECAY,
     patience: int = PATIENCE,
     checkpoint_path: Optional[str] = None,
+    epoch_diagnostic=None,
 ) -> Dict:
     """
     Full training loop with early stopping.
@@ -308,6 +309,7 @@ def train(
         'best_epoch': 0,
         'lr_history': [],
         'switch_beta': [],
+        'epoch_diagnostics': {},
     }
 
     best_val_loss = float('inf')
@@ -341,6 +343,10 @@ def train(
         history['val_loss'].append(val_loss)
         history['lr_history'].append(current_lr)
         history['switch_beta'].append(current_switch_beta)
+        if epoch_diagnostic is not None and epoch in (1, 5, 10):
+            history['epoch_diagnostics'][f'epoch{epoch}'] = (
+                epoch_diagnostic(model, f'epoch{epoch}')
+            )
 
         # Print progress
         print(f"  Epoch {epoch:3d}/{num_epochs} | "
@@ -388,6 +394,10 @@ def train(
         switching_branch = _switching_branch(model)
         if switching_branch is not None:
             switching_branch.set_epoch(history['best_epoch'])
+        if epoch_diagnostic is not None:
+            history['epoch_diagnostics']['best'] = epoch_diagnostic(
+                model, f"best(epoch {history['best_epoch']})"
+            )
         print(f"\n[Checkpoint] Restored best model from epoch {history['best_epoch']}")
 
     # Save checkpoint if path provided
