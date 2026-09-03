@@ -3,6 +3,7 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from cmgm.models.hetero_mixhop_model import HeteroMixHopCMGM
 from cmgm.models.switching_latent_transformer import (
+    LatentMemoryAttention,
     LongMemoryTransformer,
     MarkovRegimeFilter,
     RegimeLatentTransition,
@@ -11,7 +12,8 @@ from cmgm.models.switching_latent_transformer import (
 from cmgm.training.train import make_loss, train_epoch
 
 
-def _d0_branch(dropout=0.0, max_len=12, balanced_readout=False):
+def _d0_branch(dropout=0.0, max_len=12, balanced_readout=False,
+               use_latent_memory=False):
     return SwitchingLatentTransformerBranch(
         feat_dim=5,
         n_stock=4,
@@ -28,6 +30,7 @@ def _d0_branch(dropout=0.0, max_len=12, balanced_readout=False):
         z_dim=8,
         output_dim=8,
         balanced_readout=balanced_readout,
+        use_latent_memory=use_latent_memory,
     )
 
 
@@ -389,3 +392,148 @@ def test_d0b_full_model_registration_and_parameter_delta():
         sum(parameter.numel() for parameter in d0b.parameters())
         - sum(parameter.numel() for parameter in d0.parameters())
     ) == expected_delta
+
+
+def test_d1a_content_memory_is_legal_and_history_permutation_invariant():
+    torch.manual_seed(2015)
+    attention = LatentMemoryAttention(
+        query_dim=16, memory_dim=8, n_heads=4
+    ).eval()
+    query = torch.randn(3, 16)
+    history = torch.randn(3, 6, 8)
+    memory, weights = attention(query, history)
+    order = torch.tensor([4, 1, 5, 0, 3, 2])
+    permuted_memory, permuted_weights = attention(query, history[:, order])
+
+    assert memory.shape == (3, 8)
+    assert weights.shape == (3, 4, 6)
+    assert weights.min() >= 0
+    torch.testing.assert_close(weights.sum(dim=-1), torch.ones(3, 4))
+    torch.testing.assert_close(memory, permuted_memory, atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(
+        weights[:, :, order], permuted_weights, atol=1e-6, rtol=1e-6
+    )
+    assert not any("position" in name or "regime" in name for name, _ in attention.named_parameters())
+
+
+def test_d1a_zero_init_is_exactly_d0b_and_only_memory_projection_gets_first_gradient():
+    torch.manual_seed(2016)
+    d0b = _d0_branch(max_len=7, balanced_readout=True).eval()
+    torch.manual_seed(2016)
+    d1a = _d0_branch(
+        max_len=7, balanced_readout=True, use_latent_memory=True
+    ).eval()
+    x = torch.randn(3, 7, 9, 5)
+    baseline = d0b(x)
+    memory_output = d1a(x)
+
+    torch.testing.assert_close(
+        d0b.last_latent_states, d1a.last_latent_states,
+        atol=1e-7, rtol=0.0,
+    )
+    torch.testing.assert_close(baseline, memory_output, atol=1e-7, rtol=0.0)
+    assert d1a.last_latent_memories[:, 0].abs().sum() == 0
+    assert all(projection.bias is None for projection in d1a.memory_projections)
+    assert all(projection.weight.abs().sum() == 0 for projection in d1a.memory_projections)
+
+    loss = memory_output.square().mean()
+    memory_projection_parameters = [
+        projection.weight for projection in d1a.memory_projections
+    ]
+    attention_parameters = list(d1a.latent_memory_attention.parameters())
+    gradients = torch.autograd.grad(
+        loss, memory_projection_parameters + attention_parameters
+    )
+    projection_gradients = gradients[:3]
+    attention_gradients = gradients[3:]
+    assert all(gradient.abs().sum() > 0 for gradient in projection_gradients)
+    assert all(gradient.abs().sum() == 0 for gradient in attention_gradients)
+
+
+def test_d1a_memory_path_opens_and_backpropagates_through_non_detached_history():
+    torch.manual_seed(2017)
+    branch = _d0_branch(
+        max_len=7, balanced_readout=True, use_latent_memory=True
+    )
+    with torch.no_grad():
+        for projection in branch.memory_projections:
+            projection.weight.normal_(std=0.02)
+    x = torch.randn(3, 7, 9, 5)
+    output = branch(x)
+    real_z = branch.last_latent_states.clone()
+    zero_memory = branch(x, zero_latent_memory=True)
+    zero_z = branch.last_latent_states.clone()
+    assert (real_z - zero_z).abs().max() > 0
+    assert (output - zero_memory).abs().max() > 0
+
+    output = branch(x)
+    loss = output.square().mean()
+    groups = (
+        list(branch.latent_memory_attention.parameters())
+        + [projection.weight for projection in branch.memory_projections]
+        + list(branch.latent_transition.generators[0].parameters())
+    )
+    gradients = torch.autograd.grad(loss, groups)
+    assert all(gradient.abs().sum() > 0 for gradient in gradients)
+
+
+def test_d1a_full_causality_batch_independence_and_market_permutation():
+    torch.manual_seed(2018)
+    branch = _d0_branch(
+        max_len=12, balanced_readout=True, use_latent_memory=True
+    ).eval()
+    with torch.no_grad():
+        for projection in branch.memory_projections:
+            projection.weight.normal_(std=0.02)
+    x = torch.randn(3, 12, 9, 5)
+    output = branch(x)
+    E = branch.last_market_tokens.clone()
+    H = branch.last_long_memory.clone()
+    p = branch.last_regime_probabilities.clone()
+    M = branch.last_latent_memories.clone()
+    Z = branch.last_latent_states.clone()
+
+    perturbed = x.clone()
+    perturbed[:, 7:] = torch.randn_like(perturbed[:, 7:])
+    branch(perturbed)
+    for reference, changed in (
+        (E[:, :7], branch.last_market_tokens[:, :7]),
+        (H[:, :7], branch.last_long_memory[:, :7]),
+        (p[:, :7], branch.last_regime_probabilities[:, :7]),
+        (M[:, :7], branch.last_latent_memories[:, :7]),
+        (Z[:, :7], branch.last_latent_states[:, :7]),
+    ):
+        torch.testing.assert_close(reference, changed, atol=1e-6, rtol=1e-6)
+
+    single = branch(x[:1])
+    for reference, changed in (
+        (E[:1], branch.last_market_tokens),
+        (H[:1], branch.last_long_memory),
+        (p[:1], branch.last_regime_probabilities),
+        (M[:1], branch.last_latent_memories),
+        (Z[:1], branch.last_latent_states),
+        (output[:1], single),
+    ):
+        torch.testing.assert_close(reference, changed, atol=1e-6, rtol=1e-6)
+
+    for start, end in ((0, 4), (4, 7), (7, 9)):
+        permuted = x.clone()
+        order = torch.arange(end - start - 1, -1, -1)
+        permuted[:, :, start:end] = x[:, :, start:end].index_select(2, order)
+        changed = branch(permuted)
+        torch.testing.assert_close(M, branch.last_latent_memories, atol=1e-6, rtol=1e-6)
+        torch.testing.assert_close(Z, branch.last_latent_states, atol=1e-6, rtol=1e-6)
+        torch.testing.assert_close(output, changed, atol=1e-6, rtol=1e-6)
+
+
+def test_d1a_full_model_registration():
+    torch.manual_seed(2019)
+    model = HeteroMixHopCMGM(
+        num_nodes=6, n_commodities=2, n_stock=2, n_bond=2,
+        feat_dim=5, variant="switching_latent_memory",
+    )
+    branch = model.switching_latent_transformer
+    assert branch.balanced_readout
+    assert branch.use_latent_memory
+    output = model(torch.randn(2, 20, 6, 5))
+    assert output.shape == (2, model.n_horizons, 2)

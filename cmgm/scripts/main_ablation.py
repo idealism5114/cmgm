@@ -49,6 +49,7 @@ VARIANTS = [
     ("S2F-SwitchingFilterRPE", "switching_filter_rpe"),
     ("D0-SwitchingLatentTransformer", "switching_latent_transformer"),
     ("D0B-BalancedLatentReadout", "switching_latent_balanced_readout"),
+    ("D1A-LatentMemory", "switching_latent_memory"),
     ("F-RegimeDynamic", "regime_dynamic_transformer"),
     ("F2-RegimeSemantic", "regime_dynamic_semantic"),
     ("G-SemanticRouter", "semantic_router"),
@@ -63,7 +64,7 @@ VARIANTS = [
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
-            "HeteroMixHop A/B/C/S0/S0D/S1/S1C/S2F/D0/D0B and retained F/F2/G/H/I/J/K/L ablations"
+            "HeteroMixHop A/B/C/S0/S0D/S1/S1C/S2F/D0/D0B/D1A and retained F/F2/G/H/I/J/K/L ablations"
         )
     )
     parser.add_argument("--epochs", type=int, default=NUM_EPOCHS)
@@ -76,7 +77,7 @@ def parse_args():
         "--variants",
         help=(
             "Comma-separated display or internal names; defaults to "
-            "A/B/C/S0/S0D/S1/S1C/S2F/D0/F/F2/G/H/I/J/K/L"
+            "A/B/C/S0/S0D/S1/S1C/S2F/D0/D0B/D1A/F/F2/G/H/I/J/K/L"
         ),
     )
     return parser.parse_args()
@@ -1236,7 +1237,9 @@ def _switching_latent_diagnostics(model, loaders, device):
     """Mechanism diagnostics for D0/D0B switching latent dynamics."""
     branch = model.switching_latent_transformer
     balanced = branch.balanced_readout
-    label = "D0B" if balanced else "D0"
+    latent_memory = branch.use_latent_memory
+    label = "D1A" if latent_memory else ("D0B" if balanced else "D0")
+    rpe_label = "D1A LongMemory" if latent_memory else label
     filtering = branch.regime_filter
     memory = branch.long_memory
     eps = filtering.eps
@@ -1249,6 +1252,11 @@ def _switching_latent_diagnostics(model, loaders, device):
     }
     balanced_parts = {
         name: [] for name in ("h_long", "h_micro", "balanced_concat")
+    }
+    memory_parts = {
+        name: [] for name in (
+            "M", "attention", "base_preactivation", "memory_injection"
+        )
     }
     dispersion_last = {
         name: [] for name in branch.market_encoder.MARKET_NAMES
@@ -1290,6 +1298,19 @@ def _switching_latent_diagnostics(model, loaders, device):
                         )
                         balanced_parts["balanced_concat"].append(
                             branch.last_balanced_concat.cpu()
+                        )
+                    if latent_memory:
+                        memory_parts["M"].append(
+                            branch.last_latent_memories.cpu()
+                        )
+                        memory_parts["attention"].append(
+                            branch.last_latent_memory_attention.cpu()
+                        )
+                        memory_parts["base_preactivation"].append(
+                            branch.last_generator_base_preactivations.cpu()
+                        )
+                        memory_parts["memory_injection"].append(
+                            branch.last_generator_memory_injections.cpu()
                         )
                     test_parts["base_bias"].append(
                         memory.last_base_relative_bias.cpu()
@@ -1336,6 +1357,10 @@ def _switching_latent_diagnostics(model, loaders, device):
     balanced_values = (
         {name: torch.cat(values) for name, values in balanced_parts.items()}
         if balanced else {}
+    )
+    memory_values = (
+        {name: torch.cat(values) for name, values in memory_parts.items()}
+        if latent_memory else {}
     )
     p = parts["p"]
     prior = parts["prior"]
@@ -1395,7 +1420,7 @@ def _switching_latent_diagnostics(model, loaders, device):
     qk_abs = parts["qk"].abs()[..., causal_entries].mean()
     base_abs = parts["base_bias"].abs()[..., causal_entries].mean()
     print(
-        f"  [{label} Base RPE] norm={memory.base_rpe.detach().norm().item():.6f} "
+        f"  [{rpe_label} Base RPE] norm={memory.base_rpe.detach().norm().item():.6f} "
         f"mean |QK/sqrt(d)|={qk_abs.item():.6e} "
         f"mean |base bias|={base_abs.item():.6e} "
         f"base/QK={(base_abs / (qk_abs + eps)).item():.6e}"
@@ -1407,7 +1432,7 @@ def _switching_latent_diagnostics(model, loaders, device):
             continue
         head_values = base_table[:, table_center + lag]
         print(
-            f"  [{label} Base RPE delta=+{lag}] heads="
+            f"  [{rpe_label} Base RPE delta=+{lag}] heads="
             f"{head_values.numpy().round(6)} mean={head_values.mean().item():.6f} "
             f"std={head_values.std(unbiased=False).item():.6f}"
         )
@@ -1510,6 +1535,131 @@ def _switching_latent_diagnostics(model, loaders, device):
             f"h_temporal={h_temporal_norm.item():.6f}"
         )
 
+    memory_expected_lag = None
+    if latent_memory:
+        M = memory_values["M"]
+        attention = memory_values["attention"]
+        valid_probabilities = []
+        raw_entropies = []
+        normalized_entropies = []
+        effective_counts = []
+        max_weights = []
+        expected_lags = []
+        short_masses = []
+        medium_masses = []
+        long_masses = []
+        time_diagnostics = {}
+        sum_errors = []
+        for step in range(1, attention.shape[1]):
+            weights = attention[:, step, :, :step]
+            valid_probabilities.append(weights.reshape(-1))
+            sum_errors.append((weights.sum(dim=-1) - 1.0).abs().reshape(-1))
+            if step < 2:
+                continue
+            entropy_t = -(weights * (weights + eps).log()).sum(dim=-1)
+            normalized_t = entropy_t / np.log(step)
+            lags = torch.arange(
+                step, 0, -1, dtype=weights.dtype
+            ).view(1, 1, step)
+            expected_t = (weights * lags).sum(dim=-1)
+            max_t = weights.max(dim=-1).values
+            raw_entropies.append(entropy_t.reshape(-1))
+            normalized_entropies.append(normalized_t.reshape(-1))
+            effective_counts.append(entropy_t.exp().reshape(-1))
+            max_weights.append(max_t.reshape(-1))
+            expected_lags.append(expected_t.reshape(-1))
+            short_masses.append(weights[..., lags.flatten() <= 2].sum(dim=-1).reshape(-1))
+            medium_mask = (lags.flatten() >= 3) & (lags.flatten() <= 5)
+            medium_masses.append(weights[..., medium_mask].sum(dim=-1).reshape(-1))
+            long_masses.append(weights[..., lags.flatten() >= 6].sum(dim=-1).reshape(-1))
+            if step in (5, 10, 15, 19):
+                time_diagnostics[step] = (
+                    normalized_t.mean().item(),
+                    expected_t.mean().item(),
+                    max_t.mean().item(),
+                )
+        probability_values = torch.cat(valid_probabilities)
+        sum_error_values = torch.cat(sum_errors)
+        entropy_values = torch.cat(raw_entropies)
+        normalized_values = torch.cat(normalized_entropies)
+        effective_values = torch.cat(effective_counts)
+        max_values = torch.cat(max_weights)
+        memory_expected_lag = torch.stack([
+            torch.zeros(attention.shape[0]),
+            *[
+                (
+                    attention[:, step, :, :step]
+                    * torch.arange(step, 0, -1, dtype=attention.dtype).view(1, 1, step)
+                ).sum(dim=-1).mean(dim=-1)
+                for step in range(1, attention.shape[1])
+            ],
+        ], dim=1)
+        expected_values = torch.cat(expected_lags)
+        print(
+            f"  [D1A LatentMemory legality] min attention probability="
+            f"{probability_values.min().item():.6e} max attention-sum error="
+            f"{sum_error_values.max().item():.3e}"
+        )
+        print(
+            f"  [D1A LatentMemory entropy] raw mean={entropy_values.mean().item():.6f} "
+            f"normalized mean/std={normalized_values.mean().item():.6f}/"
+            f"{normalized_values.std(unbiased=False).item():.6f} "
+            f"effective history={effective_values.mean().item():.6f}"
+        )
+        print(
+            f"  [D1A LatentMemory concentration] max weight mean/median="
+            f"{max_values.mean().item():.6f}/{max_values.median().item():.6f} "
+            f"expected lag mean/median/std={expected_values.mean().item():.6f}/"
+            f"{expected_values.median().item():.6f}/"
+            f"{expected_values.std(unbiased=False).item():.6f}"
+        )
+        print(
+            f"  [D1A LatentMemory lag mass] short(1-2)={torch.cat(short_masses).mean().item():.6f} "
+            f"medium(3-5)={torch.cat(medium_masses).mean().item():.6f} "
+            f"long(6+)={torch.cat(long_masses).mean().item():.6f}"
+        )
+        for step, (entropy_t, lag_t, max_t) in time_diagnostics.items():
+            print(
+                f"  [D1A LatentMemory t={step}] normalized entropy={entropy_t:.6f} "
+                f"expected lag={lag_t:.6f} max weight={max_t:.6f}"
+            )
+        m_norm = M.norm(dim=-1)
+        print(
+            f"  [D1A LatentMemory norm] mean/std/max={m_norm.mean().item():.6f}/"
+            f"{m_norm.std(unbiased=False).item():.6f}/{m_norm.max().item():.6f}"
+        )
+        for step in (1, 5, 10, 15, 19):
+            if step < M.shape[1]:
+                print(
+                    f"  [D1A LatentMemory norm t={step}] "
+                    f"{m_norm[:, step].mean().item():.6f}"
+                )
+        base_norm = memory_values["base_preactivation"].norm(dim=-1)
+        injection_norm = memory_values["memory_injection"].norm(dim=-1)
+        for state in range(branch.K):
+            print(
+                f"  [D1A memory injection state {state}] base norm="
+                f"{base_norm[:, :, state].mean().item():.6f} memory norm="
+                f"{injection_norm[:, :, state].mean().item():.6f} ratio="
+                f"{(injection_norm[:, :, state].mean() / (base_norm[:, :, state].mean() + eps)).item():.6e}"
+            )
+        initial_memory = getattr(branch, "_initial_latent_memory_parameters", {})
+        for name, parameter in branch.named_parameters():
+            if not (
+                name.startswith("latent_memory_attention.")
+                or name.startswith("memory_projections.")
+            ):
+                continue
+            drift = float("nan")
+            if name in initial_memory:
+                drift = (
+                    parameter.detach().cpu() - initial_memory[name]
+                ).norm().item()
+            print(
+                f"  [D1A memory parameter] {name} norm="
+                f"{parameter.detach().norm().item():.6e} drift={drift:.6e}"
+            )
+
     p_last = p[:, -1]
     z_last_sample_norm = Z[:, -1].norm(dim=-1)
     for market_name in branch.market_encoder.MARKET_NAMES:
@@ -1532,6 +1682,12 @@ def _switching_latent_diagnostics(model, loaders, device):
                 f"{balanced_values['h_micro'].norm(dim=-1)[high_indices].mean().item():.6f}/"
                 f"{balanced_values['h_micro'].norm(dim=-1)[low_indices].mean().item():.6f}"
                 if balanced else ""
+            )
+            + (
+                f" high/low expected memory lag="
+                f"{memory_expected_lag[high_indices, -1].mean().item():.6f}/"
+                f"{memory_expected_lag[low_indices, -1].mean().item():.6f}"
+                if latent_memory else ""
             )
         )
 
@@ -1562,6 +1718,17 @@ def _switching_latent_diagnostics(model, loaders, device):
             "micro_state_readout": list(branch.micro_state_readout.parameters())
             + list(branch.micro_state_norm.parameters()),
         })
+    if latent_memory:
+        for projection_name in ("q_proj", "k_proj", "v_proj", "out_proj"):
+            gradient_groups[f"LatentMemory {projection_name}"] = list(
+                getattr(
+                    branch.latent_memory_attention, projection_name
+                ).parameters()
+            )
+        for state, projection in enumerate(branch.memory_projections):
+            gradient_groups[f"memory_proj_{state}"] = list(
+                projection.parameters()
+            )
     gradient_groups["state readout"] = list(branch.state_readout.parameters())
     flat_parameters = [
         parameter for values in gradient_groups.values() for parameter in values
@@ -1699,6 +1866,30 @@ def _switching_latent_diagnostics(model, loaders, device):
                 "  [D0B vs D0 zero-out reference] D0 zero-Z mean=7.417e-05 "
                 "D0 zero-H mean=1.112e-02 D0 ratio≈6.670e-03"
             )
+        zero_memory_prediction_diff = None
+        if latent_memory:
+            prediction_zero_memory = model._switching_latent_transformer_forward(
+                x_batch, zero_latent_memory=True
+            )
+            z_zero_memory = branch.last_z_last.clone()
+            micro_zero_memory = branch.last_h_micro.clone()
+            temporal_zero_memory = branch.last_h_temporal.clone()
+            z_memory_diff = (z_zero_memory - z_real).abs()
+            micro_memory_diff = (micro_zero_memory - micro_real).abs()
+            temporal_memory_diff = (temporal_zero_memory - temporal_real).abs()
+            zero_memory_prediction_diff = (
+                prediction_zero_memory - prediction_real
+            ).abs()
+            print(
+                "  [D1A zero-memory trajectory] Z_T mean/max diff="
+                f"{z_memory_diff.mean().item():.3e}/{z_memory_diff.max().item():.3e} "
+                f"h_micro={micro_memory_diff.mean().item():.3e}/"
+                f"{micro_memory_diff.max().item():.3e} h_temporal="
+                f"{temporal_memory_diff.mean().item():.3e}/"
+                f"{temporal_memory_diff.max().item():.3e} prediction="
+                f"{zero_memory_prediction_diff.mean().item():.3e}/"
+                f"{zero_memory_prediction_diff.max().item():.3e}"
+            )
 
         split = min(11, x_batch.shape[1])
         branch(x_batch)
@@ -1706,6 +1897,7 @@ def _switching_latent_diagnostics(model, loaders, device):
         original_H = branch.last_long_memory.clone()
         original_p = branch.last_regime_probabilities.clone()
         original_Z = branch.last_latent_states.clone()
+        original_M = branch.last_latent_memories.clone() if latent_memory else None
         if balanced:
             branch.readout(
                 original_H[:, split - 1], original_Z[:, split - 1]
@@ -1728,6 +1920,10 @@ def _switching_latent_diagnostics(model, loaders, device):
             )
         else:
             balanced_causal_text = ""
+        memory_causal_text = (
+            f" M diff={(original_M[:, :split] - branch.last_latent_memories[:, :split]).abs().max().item():.3e}"
+            if latent_memory else ""
+        )
         print(
             f"  [{label} causality] E diff through t=10="
             f"{(original_E[:, :split] - branch.last_market_tokens[:, :split]).abs().max().item():.3e} "
@@ -1735,6 +1931,7 @@ def _switching_latent_diagnostics(model, loaders, device):
             f"{(original_H[:, :split] - branch.last_long_memory[:, :split]).abs().max().item():.3e} "
             f"p diff={(original_p[:, :split] - branch.last_regime_probabilities[:, :split]).abs().max().item():.3e} "
             f"Z diff={(original_Z[:, :split] - branch.last_latent_states[:, :split]).abs().max().item():.3e}"
+            f"{memory_causal_text}"
             f"{balanced_causal_text}"
         )
 
@@ -1743,6 +1940,7 @@ def _switching_latent_diagnostics(model, loaders, device):
         H_batch = branch.last_long_memory.clone()
         p_batch = branch.last_regime_probabilities.clone()
         Z_batch = branch.last_latent_states.clone()
+        M_batch = branch.last_latent_memories.clone() if latent_memory else None
         h_long_batch = branch.last_h_long.clone() if balanced else None
         h_micro_batch = branch.last_h_micro.clone() if balanced else None
         temporal_single = branch(x_batch[:1])
@@ -1752,6 +1950,10 @@ def _switching_latent_diagnostics(model, loaders, device):
             f"H={(H_batch[:1] - branch.last_long_memory).abs().max().item():.3e} "
             f"p={(p_batch[:1] - branch.last_regime_probabilities).abs().max().item():.3e} "
             f"Z={(Z_batch[:1] - branch.last_latent_states).abs().max().item():.3e} "
+            + (
+                f"M={(M_batch[:1] - branch.last_latent_memories).abs().max().item():.3e} "
+                if latent_memory else ""
+            )
             + (
                 f"h_long={(h_long_batch[:1] - branch.last_h_long).abs().max().item():.3e} "
                 f"h_micro={(h_micro_batch[:1] - branch.last_h_micro).abs().max().item():.3e} "
@@ -1765,6 +1967,7 @@ def _switching_latent_diagnostics(model, loaders, device):
         H_reference = branch.last_long_memory.clone()
         p_reference = branch.last_regime_probabilities.clone()
         Z_reference = branch.last_latent_states.clone()
+        M_reference = branch.last_latent_memories.clone() if latent_memory else None
         h_long_reference = branch.last_h_long.clone() if balanced else None
         h_micro_reference = branch.last_h_micro.clone() if balanced else None
         temporal_reference = branch.last_h_temporal.clone()
@@ -1795,6 +1998,10 @@ def _switching_latent_diagnostics(model, loaders, device):
                 f"p={(p_reference - branch.last_regime_probabilities).abs().max().item():.3e} "
                 f"Z={(Z_reference - branch.last_latent_states).abs().max().item():.3e} "
                 + (
+                    f"M={(M_reference - branch.last_latent_memories).abs().max().item():.3e} "
+                    if latent_memory else ""
+                )
+                + (
                     f"h_long={(h_long_reference - branch.last_h_long).abs().max().item():.3e} "
                     f"h_micro={(h_micro_reference - branch.last_h_micro).abs().max().item():.3e} "
                     if balanced else ""
@@ -1820,6 +2027,17 @@ def _switching_latent_diagnostics(model, loaders, device):
         "micro_long_prediction_impact_ratio": prediction_impact_ratio,
         "mean_consecutive_z_cosine": consecutive_z_cosine.mean().item(),
         "mean_z_directional_change": (1.0 - consecutive_z_cosine).mean().item(),
+        "zero_memory_prediction_mean_diff": (
+            zero_memory_prediction_diff.mean().item()
+            if zero_memory_prediction_diff is not None else float("nan")
+        ),
+        "memory_projection_norm": (
+            float(np.mean([
+                projection.weight.detach().norm().item()
+                for projection in branch.memory_projections
+            ]))
+            if latent_memory else float("nan")
+        ),
         "prediction_gradient_norms": prediction_gradient_norms,
     }
 
@@ -2258,6 +2476,7 @@ def print_diagnostics(model, variant, loaders, device):
     elif variant in (
         "switching_latent_transformer",
         "switching_latent_balanced_readout",
+        "switching_latent_memory",
     ):
         return _switching_latent_diagnostics(model, loaders, device)
     elif variant in ("market_token_transformer", "market_dispersion_transformer"):
@@ -2361,17 +2580,31 @@ def run_variant(name, variant, args, device, data):
                 torch.testing.assert_close(left, right, rtol=0.0, atol=0.0)
         print("  [S1/S1C shared initialization] PASS")
         print("  [S1/S1C forward RNG sanity] H_reg/p/r_real PASS")
-    if variant == "switching_latent_balanced_readout":
+    if variant in (
+        "switching_latent_balanced_readout",
+        "switching_latent_memory",
+    ):
         with torch.random.fork_rng():
             torch.manual_seed(args.seed)
+            reference_variant = (
+                "switching_latent_balanced_readout"
+                if variant == "switching_latent_memory"
+                else "switching_latent_transformer"
+            )
             d0_reference = HeteroMixHopCMGM(
                 data["n_nodes"], data["n_commodities"],
-                variant="switching_latent_transformer", **model_kwargs,
+                variant=reference_variant, **model_kwargs,
             )
-            for module_name in (
+            shared_module_names = [
                 "market_encoder", "long_memory", "regime_filter",
                 "latent_transition",
-            ):
+            ]
+            if variant == "switching_latent_memory":
+                shared_module_names.extend([
+                    "long_memory_readout", "micro_state_readout",
+                    "long_memory_norm", "micro_state_norm", "state_readout",
+                ])
+            for module_name in shared_module_names:
                 reference_state = getattr(
                     d0_reference.switching_latent_transformer, module_name
                 ).state_dict()
@@ -2385,7 +2618,63 @@ def run_variant(name, variant, args, device, data):
                         balanced_state[parameter_name],
                         rtol=0.0, atol=0.0,
                     )
-        print("  [D0/D0B shared initialization] PASS")
+            if variant == "switching_latent_memory":
+                sanity_x = torch.randn(
+                    2, args.seq_len, data["n_nodes"], FEATURE_DIM
+                )
+                d0_reference.eval()
+                model.eval()
+                with torch.no_grad():
+                    reference_prediction = d0_reference(sanity_x)
+                    memory_prediction = model(sanity_x)
+                reference_branch = d0_reference.switching_latent_transformer
+                memory_branch = model.switching_latent_transformer
+                z_diff = (
+                    reference_branch.last_latent_states
+                    - memory_branch.last_latent_states
+                ).abs().max().item()
+                temporal_diff = (
+                    reference_branch.last_h_temporal
+                    - memory_branch.last_h_temporal
+                ).abs().max().item()
+                prediction_diff = (
+                    reference_prediction - memory_prediction
+                ).abs().max().item()
+                torch.testing.assert_close(
+                    reference_branch.last_latent_states,
+                    memory_branch.last_latent_states,
+                    rtol=0.0, atol=1e-7,
+                )
+                torch.testing.assert_close(
+                    reference_prediction, memory_prediction,
+                    rtol=0.0, atol=1e-7,
+                )
+                query = torch.randn(3, 128)
+                history = torch.randn(3, 9, 64)
+                original_memory, _ = memory_branch.latent_memory_attention(
+                    query, history
+                )
+                order = torch.randperm(history.shape[1])
+                permuted_memory, _ = memory_branch.latent_memory_attention(
+                    query, history[:, order]
+                )
+                permutation_diff = (
+                    original_memory - permuted_memory
+                ).abs().max().item()
+                torch.testing.assert_close(
+                    original_memory, permuted_memory, atol=1e-6, rtol=1e-6
+                )
+                print(
+                    "  [D1A zero-init equivalence] max Z diff="
+                    f"{z_diff:.3e} h_temporal={temporal_diff:.3e} "
+                    f"prediction={prediction_diff:.3e}"
+                )
+                print(
+                    "  [D1A LatentMemory history permutation] max M diff="
+                    f"{permutation_diff:.3e} PASS"
+                )
+        comparison = "D0B/D1A" if variant == "switching_latent_memory" else "D0/D0B"
+        print(f"  [{comparison} shared initialization] PASS")
 
     model = model.to(device)
     if variant == "switching_null_control":
@@ -2400,11 +2689,20 @@ def run_variant(name, variant, args, device, data):
     if variant in (
         "switching_latent_transformer",
         "switching_latent_balanced_readout",
+        "switching_latent_memory",
     ):
         model.switching_latent_transformer._initial_transition_logits = (
             model.switching_latent_transformer.regime_filter.transition_logits
             .detach().cpu().clone()
         )
+        if variant == "switching_latent_memory":
+            branch = model.switching_latent_transformer
+            branch._initial_latent_memory_parameters = {
+                name: parameter.detach().cpu().clone()
+                for name, parameter in branch.named_parameters()
+                if name.startswith("latent_memory_attention.")
+                or name.startswith("memory_projections.")
+            }
     parameter_count = sum(parameter.numel() for parameter in model.parameters())
     print(f"\n{name} ({variant}) — {parameter_count:,} parameters")
     if variant in ("market_token_transformer", "market_dispersion_transformer"):
@@ -2507,6 +2805,7 @@ def run_variant(name, variant, args, device, data):
     elif variant in (
         "switching_latent_transformer",
         "switching_latent_balanced_readout",
+        "switching_latent_memory",
     ):
         branch = model.switching_latent_transformer
         market_encoder_params = sum(
@@ -2558,11 +2857,38 @@ def run_variant(name, variant, args, device, data):
                 long_readout_params + micro_readout_params
                 + long_norm_params + micro_norm_params + readout_params
             )
-            d0_total_params = parameter_count - d0b_readout_params + d0_readout_params
-            print(
-                f"  D0 params={d0_total_params:,}; D0B params={parameter_count:,}; "
-                f"difference={parameter_count - d0_total_params:+,}"
-            )
+            latent_memory_params = 0
+            if branch.use_latent_memory:
+                attention_params = sum(
+                    parameter.numel()
+                    for parameter in branch.latent_memory_attention.parameters()
+                )
+                memory_projection_params = [
+                    sum(parameter.numel() for parameter in projection.parameters())
+                    for projection in branch.memory_projections
+                ]
+                latent_memory_params = attention_params + sum(
+                    memory_projection_params
+                )
+                d0b_total_params = parameter_count - latent_memory_params
+                print(
+                    f"  D0B params={d0b_total_params:,}; "
+                    f"D1A params={parameter_count:,}; "
+                    f"increase={latent_memory_params:+,}"
+                )
+                print(
+                    f"  D1A added params: LatentMemory q/k/v/out="
+                    f"{attention_params:,}; memory_proj_0/1/2="
+                    f"{memory_projection_params}"
+                )
+            else:
+                d0_total_params = (
+                    parameter_count - d0b_readout_params + d0_readout_params
+                )
+                print(
+                    f"  D0 params={d0_total_params:,}; D0B params={parameter_count:,}; "
+                    f"difference={parameter_count - d0_total_params:+,}"
+                )
             print(
                 f"  D0B readout params: long projection={long_readout_params:,}; "
                 f"micro projection={micro_readout_params:,}; "
@@ -2577,7 +2903,7 @@ def run_variant(name, variant, args, device, data):
                 f"D0-S0D increase={parameter_count - s0d_total_params:+,}"
             )
         print(
-            f"  {'D0B' if branch.balanced_readout else 'D0'} temporal params: "
+            f"  {'D1A' if branch.use_latent_memory else ('D0B' if branch.balanced_readout else 'D0')} temporal params: "
             f"Market Encoder={market_encoder_params:,}; "
             f"LongMemory Transformer={long_memory_without_rpe:,}; "
             f"Base RPE={base_rpe_params:,}; regime evidence="
@@ -2917,6 +3243,55 @@ def _print_d0b_conclusion(results):
     print(f"\nD0B mechanism conclusion: [{case}] {conclusion}")
 
 
+def _print_d1a_conclusion(results):
+    result = next(
+        (item for item in results if item["variant"] == "D1A-LatentMemory"),
+        None,
+    )
+    if result is None or not result.get("diagnostics"):
+        return
+    diagnostics = result["diagnostics"]
+    gradients = diagnostics["prediction_gradient_norms"]
+    attention_gradient = float(np.mean([
+        gradients[f"LatentMemory {name}"]
+        for name in ("q_proj", "k_proj", "v_proj", "out_proj")
+    ]))
+    memory_active = (
+        diagnostics["memory_projection_norm"] > 1e-8
+        and attention_gradient > 1e-12
+        and diagnostics["zero_memory_prediction_mean_diff"] > 1e-8
+    )
+    improves = result["MAE"] < 0.021995
+    near_baseline = abs(result["MAE"] - 0.021995) <= 0.021995 * 0.01
+
+    if memory_active and improves:
+        case = "Case A"
+        conclusion = "Multi-lag latent memory is active and improves over D0B."
+    elif memory_active and near_baseline:
+        case = "Case B"
+        conclusion = (
+            "Latent memory changes the representation but adds no clear forecast gain."
+        )
+    elif memory_active:
+        case = "Case C"
+        conclusion = (
+            "Latent memory is used but worsens accuracy; extra Z history may add noise."
+        )
+    elif improves:
+        case = "Case E"
+        conclusion = (
+            "Accuracy improves while the memory path remains ineffective; do not "
+            "attribute the gain to latent memory."
+        )
+    else:
+        case = "Case D"
+        conclusion = (
+            "The optimizer keeps the zero-initialized latent-memory path near its "
+            "D0B null state."
+        )
+    print(f"\nD1A mechanism conclusion: [{case}] {conclusion}")
+
+
 def main():
     args = parse_args()
     variants = select_variants(args.variants)
@@ -2951,6 +3326,7 @@ def main():
     _print_s2f_conclusion(results)
     _print_d0_conclusion(results)
     _print_d0b_conclusion(results)
+    _print_d1a_conclusion(results)
 
     ExperimentLogger().log_run(
         {
