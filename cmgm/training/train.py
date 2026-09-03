@@ -247,6 +247,7 @@ def train(
     weight_decay: float = WEIGHT_DECAY,
     patience: int = PATIENCE,
     checkpoint_path: Optional[str] = None,
+    checkpoint_metadata: Optional[Dict] = None,
     epoch_diagnostic=None,
 ) -> Dict:
     """
@@ -270,6 +271,7 @@ def train(
         weight_decay: L2 regularization
         patience: Early stopping patience
         checkpoint_path: Path to save best model checkpoint
+        checkpoint_metadata: Optional provenance fields stored with checkpoint
 
     Returns:
         dict: Training history with keys 'train_loss', 'val_loss', 'best_epoch'
@@ -402,12 +404,15 @@ def train(
 
     # Save checkpoint if path provided
     if checkpoint_path and best_model_state is not None:
-        torch.save({
+        checkpoint = {
             'model_state_dict': best_model_state,
             'history': history,
             'best_val_loss': best_val_loss,
             'best_epoch': history['best_epoch'],
-        }, checkpoint_path)
+        }
+        if checkpoint_metadata:
+            checkpoint['metadata'] = dict(checkpoint_metadata)
+        torch.save(checkpoint, checkpoint_path)
         print(f"[Checkpoint] Saved to {checkpoint_path}")
 
     print(f"{'=' * 60}\n")

@@ -307,7 +307,8 @@ class SwitchingLatentTransformerBranch(nn.Module):
                  use_latent_memory: bool = False,
                  zero_init_memory_projection: bool = True,
                  use_regime_relative_memory: bool = False,
-                 use_dynamic_slope: bool = False):
+                 use_dynamic_slope: bool = False,
+                 use_balanced_transition_input: bool = False):
         super().__init__()
         self.K = int(K)
         self.z_dim = int(z_dim)
@@ -320,12 +321,19 @@ class SwitchingLatentTransformerBranch(nn.Module):
             use_regime_relative_memory
         )
         self.use_dynamic_slope = bool(use_dynamic_slope)
+        self.use_balanced_transition_input = bool(
+            use_balanced_transition_input
+        )
         if self.use_latent_memory and not self.balanced_readout:
             raise ValueError("latent memory requires the D0B balanced readout")
         if self.use_regime_relative_memory and not self.use_latent_memory:
             raise ValueError("regime-relative memory requires latent memory")
         if self.use_dynamic_slope and not self.balanced_readout:
             raise ValueError("dynamic slope requires the D0B balanced readout")
+        if self.use_balanced_transition_input and not self.balanced_readout:
+            raise ValueError(
+                "balanced transition input requires the D0B balanced readout"
+            )
         self.market_encoder = MarketAwareTemporalEncoder(
             feat_dim=feat_dim,
             n_stock=n_stock,
@@ -357,6 +365,16 @@ class SwitchingLatentTransformerBranch(nn.Module):
             hidden_dim=128,
             K=self.K,
         )
+        if self.use_balanced_transition_input:
+            # D0D adds no trainable parameters and does not rotate either
+            # representation. These normalizers are used only immediately
+            # before the existing G_k input concatenation.
+            self.transition_h_norm = nn.LayerNorm(
+                d_model, elementwise_affine=False
+            )
+            self.transition_z_norm = nn.LayerNorm(
+                self.z_dim, elementwise_affine=False
+            )
         if self.balanced_readout:
             # D0B changes only the final H_T/Z_T readout.  The latent
             # trajectories above remain byte-for-byte shared with D0.
@@ -427,6 +445,19 @@ class SwitchingLatentTransformerBranch(nn.Module):
 
     def encode_market_tokens(self, x: torch.Tensor) -> torch.Tensor:
         return self.market_encoder(x)
+
+    def transition_inputs(self, h_t: torch.Tensor, z_prev: torch.Tensor,
+                          step: int):
+        """Return generator-only H/Z representations for D0B or D0D."""
+        if not self.use_balanced_transition_input:
+            return h_t, z_prev
+        h_for_transition = self.transition_h_norm(h_t)
+        # Preserve Z_-1=0 exactly instead of relying on LayerNorm behavior.
+        z_for_transition = (
+            torch.zeros_like(z_prev)
+            if step == 0 else self.transition_z_norm(z_prev)
+        )
+        return h_for_transition, z_for_transition
 
     def latent_forward(self, long_memory: torch.Tensor,
                        forced_probabilities: torch.Tensor = None,
@@ -502,12 +533,19 @@ class SwitchingLatentTransformerBranch(nn.Module):
         )
         slope_contributions = []
         slope_base_preactivations = []
+        transition_h_inputs = []
+        transition_z_inputs = []
         for step in range(time_steps):
             h_t = long_memory[:, step]
             prior_t, evidence_t, p_t, kl_t = self.regime_filter.step(
                 h_t, p_prev, transition
             )
             p_for_z = forced[:, step] if forced is not None else p_t
+            h_for_transition, z_for_transition = self.transition_inputs(
+                h_t, z_prev, step
+            )
+            transition_h_inputs.append(h_for_transition)
+            transition_z_inputs.append(z_for_transition)
             if self.use_latent_memory:
                 if step == 0 or zero_latent_memory:
                     memory_t = torch.zeros_like(z_prev)
@@ -535,7 +573,9 @@ class SwitchingLatentTransformerBranch(nn.Module):
                     memory_t, attention_t = self.latent_memory_attention(
                         h_t, history_t, score_bias=score_bias_t
                     )
-                transition_input = torch.cat([h_t, z_prev], dim=-1)
+                transition_input = torch.cat(
+                    [h_for_transition, z_for_transition], dim=-1
+                )
                 state_candidates = []
                 state_base = []
                 state_injections = []
@@ -589,7 +629,9 @@ class SwitchingLatentTransformerBranch(nn.Module):
                     memory_regime_biases.append(None)
             else:
                 if self.use_dynamic_slope:
-                    transition_input = torch.cat([h_t, z_prev], dim=-1)
+                    transition_input = torch.cat(
+                        [h_for_transition, z_for_transition], dim=-1
+                    )
                     delta_h_t = long_memory_slopes[:, step] * slope_scale
                     state_candidates = []
                     state_base = []
@@ -616,7 +658,7 @@ class SwitchingLatentTransformerBranch(nn.Module):
                     )
                 else:
                     z_t, candidates_t = self.latent_transition(
-                        h_t, z_prev, p_for_z
+                        h_for_transition, z_for_transition, p_for_z
                     )
             priors.append(prior_t)
             evidence_values.append(evidence_t)
@@ -648,6 +690,12 @@ class SwitchingLatentTransformerBranch(nn.Module):
         self.last_latent_probabilities = (
             forced.detach() if forced is not None else p.detach()
         )
+        self.last_transition_h_inputs = torch.stack(
+            transition_h_inputs, dim=1
+        ).detach()
+        self.last_transition_z_inputs = torch.stack(
+            transition_z_inputs, dim=1
+        ).detach()
         if self.use_latent_memory:
             padded_attention = long_memory.new_zeros(
                 batch_size, time_steps, self.latent_memory_attention.n_heads,

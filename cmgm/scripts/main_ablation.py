@@ -50,6 +50,7 @@ VARIANTS = [
     ("S2F-SwitchingFilterRPE", "switching_filter_rpe"),
     ("D0-SwitchingLatentTransformer", "switching_latent_transformer"),
     ("D0B-BalancedLatentReadout", "switching_latent_balanced_readout"),
+    ("D0D-BalancedTransitionInput", "switching_latent_balanced_transition"),
     ("D0C-DynamicSlopeTransition", "switching_latent_dynamic_slope"),
     ("D1A-LatentMemory", "switching_latent_memory"),
     ("D1A2-ActiveLatentMemory", "switching_active_latent_memory"),
@@ -67,6 +68,7 @@ VARIANTS = [
 D_SERIES_VARIANTS = frozenset({
     "switching_latent_transformer",
     "switching_latent_balanced_readout",
+    "switching_latent_balanced_transition",
     "switching_latent_dynamic_slope",
     "switching_latent_memory",
     "switching_active_latent_memory",
@@ -77,7 +79,7 @@ D_SERIES_VARIANTS = frozenset({
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
-            "HeteroMixHop A/B/C/S0/S0D/S1/S1C/S2F/D0/D0B/D0C/D1A/D1A2/D1 "
+            "HeteroMixHop A/B/C/S0/S0D/S1/S1C/S2F/D0/D0B/D0D/D0C/D1A/D1A2/D1 "
             "and retained F/F2/G/H/I/J/K/L ablations"
         )
     )
@@ -92,7 +94,7 @@ def parse_args():
         type=Path,
         default=Path("checkpoints"),
         help=(
-            "Directory for best checkpoints of D0/D0B/D0C/D1A/D1A2/D1 "
+            "Directory for best checkpoints of D0/D0B/D0D/D0C/D1A/D1A2/D1 "
             "(default: ./checkpoints). Other variants are not saved."
         ),
     )
@@ -100,7 +102,7 @@ def parse_args():
         "--variants",
         help=(
             "Comma-separated display or internal names; defaults to "
-            "A/B/C/S0/S0D/S1/S1C/S2F/D0/D0B/D0C/D1A/D1A2/D1/F/F2/G/H/I/J/K/L"
+            "A/B/C/S0/S0D/S1/S1C/S2F/D0/D0B/D0D/D0C/D1A/D1A2/D1/F/F2/G/H/I/J/K/L"
         ),
     )
     return parser.parse_args()
@@ -1271,14 +1273,16 @@ def _switching_latent_diagnostics(model, loaders, device):
     balanced = branch.balanced_readout
     latent_memory = branch.use_latent_memory
     dynamic_slope = branch.use_dynamic_slope
+    balanced_transition = branch.use_balanced_transition_input
     active_memory = latent_memory and not branch.zero_init_memory_projection
     label = (
         "D0C" if dynamic_slope
+        else ("D0D" if balanced_transition
         else ("D1" if branch.use_regime_relative_memory
         else (
             "D1A2" if active_memory
             else ("D1A" if latent_memory else ("D0B" if balanced else "D0"))
-        ))
+        )))
     )
     rpe_label = f"{label} LongMemory" if latent_memory else label
     filtering = branch.regime_filter
@@ -3317,12 +3321,36 @@ def print_diagnostics(model, variant, loaders, device):
     elif variant in (
         "switching_latent_transformer",
         "switching_latent_balanced_readout",
+        "switching_latent_balanced_transition",
         "switching_latent_dynamic_slope",
         "switching_latent_memory",
         "switching_active_latent_memory",
         "switching_regime_relative_latent_memory",
     ):
-        return _switching_latent_diagnostics(model, loaders, device)
+        diagnostics = _switching_latent_diagnostics(model, loaders, device)
+        if variant == "switching_latent_balanced_transition":
+            from cmgm.scripts.d0b_previous_state_diagnostics import (
+                run_previous_state_diagnostics,
+            )
+            recurrence = run_previous_state_diagnostics(
+                model, x_batch,
+                seed=getattr(model, "_experiment_seed", RANDOM_SEED),
+            )
+            diagnostics["previous_state"] = {
+                "recurrence_fraction": recurrence["recurrence_fraction"],
+                "identity_fraction": recurrence["identity_fraction"],
+                "zero_previous_prediction": recurrence["comparison"][
+                    "zero_previous"
+                ]["prediction"][0],
+                "zero_micro_prediction": recurrence["zero_micro_impact"][0],
+                "feature_permute_prediction": recurrence["comparison"][
+                    "feature_permute"
+                ]["prediction"][0],
+                "effective_ratios": [
+                    item["effective_ratio"] for item in recurrence["local"]
+                ],
+            }
+        return diagnostics
     elif variant in ("market_token_transformer", "market_dispersion_transformer"):
         _market_token_diagnostics(model, test_loader, device)
     elif variant in (
@@ -3514,6 +3542,40 @@ def _active_memory_checkpoint_diagnostic(model, loader, device, stage):
     }
 
 
+def _balanced_transition_input_diagnostic(model, batch, stage):
+    """Report D0D raw/balanced generator inputs without an optimizer step."""
+    branch = model.switching_latent_transformer
+    if not branch.use_balanced_transition_input:
+        return None
+    was_training = model.training
+    model.eval()
+    x_batch = batch[0].to(next(model.parameters()).device)
+    with torch.no_grad():
+        branch(x_batch)
+        raw_h = branch.last_long_memory[:, 1:]
+        raw_z_previous = branch.last_latent_states[:, :-1]
+        balanced_h = branch.last_transition_h_inputs[:, 1:]
+        balanced_z = branch.last_transition_z_inputs[:, 1:]
+        eps = branch.regime_filter.eps
+        values = {
+            "raw_h": raw_h.norm(dim=-1).mean().item(),
+            "raw_z": raw_z_previous.norm(dim=-1).mean().item(),
+            "balanced_h": balanced_h.norm(dim=-1).mean().item(),
+            "balanced_z": balanced_z.norm(dim=-1).mean().item(),
+        }
+    print(
+        f"  [D0D {stage} transition input] raw H/Z="
+        f"{values['raw_h']:.6e}/{values['raw_z']:.6e} "
+        f"raw Z/H={values['raw_z']/(values['raw_h']+eps):.6e}; "
+        f"balanced H/Z={values['balanced_h']:.6e}/"
+        f"{values['balanced_z']:.6e} balanced Z/H="
+        f"{values['balanced_z']/(values['balanced_h']+eps):.6e}"
+    )
+    if was_training:
+        model.train()
+    return values
+
+
 def run_variant(name, variant, args, device, data):
     set_seed(args.seed)
     n_stock = data["market_indices"]["stock"][1] - data["market_indices"]["stock"][0]
@@ -3575,6 +3637,7 @@ def run_variant(name, variant, args, device, data):
         print("  [S1/S1C forward RNG sanity] H_reg/p/r_real PASS")
     if variant in (
         "switching_latent_balanced_readout",
+        "switching_latent_balanced_transition",
         "switching_latent_dynamic_slope",
         "switching_latent_memory",
         "switching_active_latent_memory",
@@ -3584,7 +3647,10 @@ def run_variant(name, variant, args, device, data):
             torch.manual_seed(args.seed)
             reference_variant = (
                 "switching_latent_balanced_readout"
-                if variant == "switching_latent_dynamic_slope"
+                if variant in (
+                    "switching_latent_balanced_transition",
+                    "switching_latent_dynamic_slope",
+                )
                 else ("switching_active_latent_memory"
                 if variant == "switching_regime_relative_latent_memory"
                 else (
@@ -3606,6 +3672,7 @@ def run_variant(name, variant, args, device, data):
                 "latent_transition",
             ]
             if variant in (
+                "switching_latent_balanced_transition",
                 "switching_latent_dynamic_slope",
                 "switching_latent_memory",
                 "switching_active_latent_memory",
@@ -3634,6 +3701,31 @@ def run_variant(name, variant, args, device, data):
                         balanced_state[parameter_name],
                         rtol=0.0, atol=0.0,
                     )
+            if variant == "switching_latent_balanced_transition":
+                reference_state = d0_reference.state_dict()
+                transition_state = model.state_dict()
+                assert reference_state.keys() == transition_state.keys()
+                for parameter_name in reference_state:
+                    torch.testing.assert_close(
+                        reference_state[parameter_name],
+                        transition_state[parameter_name],
+                        rtol=0.0, atol=0.0,
+                    )
+                transition_branch = model.switching_latent_transformer
+                assert not transition_branch.transition_h_norm.elementwise_affine
+                assert not transition_branch.transition_z_norm.elementwise_affine
+                assert sum(
+                    parameter.numel()
+                    for parameter in transition_branch.transition_h_norm.parameters()
+                ) == 0
+                assert sum(
+                    parameter.numel()
+                    for parameter in transition_branch.transition_z_norm.parameters()
+                ) == 0
+                print(
+                    "  [D0B/D0D shared initialization] all trainable parameters "
+                    "identical; transition LayerNorms non-affine PASS"
+                )
             if variant == "switching_latent_dynamic_slope":
                 reference_state = d0_reference.state_dict()
                 dynamic_state = model.state_dict()
@@ -3812,16 +3904,24 @@ def run_variant(name, variant, args, device, data):
                     f"{permutation_diff:.3e} PASS"
                 )
         comparison = (
-            "D0B/D0C" if variant == "switching_latent_dynamic_slope"
+            "D0B/D0D" if variant == "switching_latent_balanced_transition"
+            else ("D0B/D0C" if variant == "switching_latent_dynamic_slope"
             else ("D1A2/D1" if variant == "switching_regime_relative_latent_memory"
             else (
                 "D1A/D1A2" if variant == "switching_active_latent_memory"
                 else ("D0B/D1A" if variant == "switching_latent_memory" else "D0/D0B")
-            ))
+            )))
         )
         print(f"  [{comparison} shared initialization] PASS")
 
     model = model.to(device)
+    model._experiment_seed = args.seed
+    if variant == "switching_latent_balanced_transition":
+        with torch.random.fork_rng():
+            initial_batch = next(iter(data["loaders"]["train"]))
+        _balanced_transition_input_diagnostic(
+            model, initial_batch, "initial"
+        )
     if variant == "switching_null_control":
         model.switching_transformer._initial_parameter_groups = (
             _snapshot_switching_parameter_groups(model.switching_transformer)
@@ -3834,6 +3934,7 @@ def run_variant(name, variant, args, device, data):
     if variant in (
         "switching_latent_transformer",
         "switching_latent_balanced_readout",
+        "switching_latent_balanced_transition",
         "switching_latent_dynamic_slope",
         "switching_latent_memory",
         "switching_active_latent_memory",
@@ -3968,6 +4069,7 @@ def run_variant(name, variant, args, device, data):
     elif variant in (
         "switching_latent_transformer",
         "switching_latent_balanced_readout",
+        "switching_latent_balanced_transition",
         "switching_latent_dynamic_slope",
         "switching_latent_memory",
         "switching_active_latent_memory",
@@ -4069,7 +4171,22 @@ def run_variant(name, variant, args, device, data):
                         f"regime-relative latent-memory RPE={regime_rpe_params:,}"
                     )
             else:
-                if branch.use_dynamic_slope:
+                if branch.use_balanced_transition_input:
+                    transition_norm_params = sum(
+                        parameter.numel()
+                        for module in (
+                            branch.transition_h_norm,
+                            branch.transition_z_norm,
+                        )
+                        for parameter in module.parameters()
+                    )
+                    print(
+                        f"  D0B params={parameter_count:,}; "
+                        f"D0D params={parameter_count:,}; difference=0; "
+                        f"transition LayerNorm trainable params="
+                        f"{transition_norm_params}"
+                    )
+                elif branch.use_dynamic_slope:
                     slope_projection_params = [
                         sum(parameter.numel() for parameter in projection.parameters())
                         for projection in branch.slope_projections
@@ -4102,7 +4219,7 @@ def run_variant(name, variant, args, device, data):
                 f"D0-S0D increase={parameter_count - s0d_total_params:+,}"
             )
         print(
-            f"  {('D1' if branch.use_regime_relative_memory else ('D1A' if branch.zero_init_memory_projection else 'D1A2')) if branch.use_latent_memory else ('D0C' if branch.use_dynamic_slope else ('D0B' if branch.balanced_readout else 'D0'))} temporal params: "
+            f"  {('D1' if branch.use_regime_relative_memory else ('D1A' if branch.zero_init_memory_projection else 'D1A2')) if branch.use_latent_memory else ('D0D' if branch.use_balanced_transition_input else ('D0C' if branch.use_dynamic_slope else ('D0B' if branch.balanced_readout else 'D0')))} temporal params: "
             f"Market Encoder={market_encoder_params:,}; "
             f"LongMemory Transformer={long_memory_without_rpe:,}; "
             f"Base RPE={base_rpe_params:,}; regime evidence="
@@ -4156,6 +4273,12 @@ def run_variant(name, variant, args, device, data):
         checkpoint_path=(
             str(checkpoint_path) if checkpoint_path is not None else None
         ),
+        checkpoint_metadata={
+            "variant": variant,
+            "display_name": name,
+            "seed": args.seed,
+            "seq_len": args.seq_len,
+        },
         epoch_diagnostic=epoch_diagnostic,
     )
     normalized, original, target = evaluate_primary_horizon(
@@ -4469,6 +4592,66 @@ def _print_d0b_conclusion(results):
     print(f"\nD0B mechanism conclusion: [{case}] {conclusion}")
 
 
+def _print_d0d_conclusion(results):
+    result = next(
+        (
+            item for item in results
+            if item["variant"] == "D0D-BalancedTransitionInput"
+        ),
+        None,
+    )
+    if result is None or not result.get("diagnostics"):
+        return
+    previous = result["diagnostics"].get("previous_state")
+    if not previous:
+        return
+    d0b_mae = 0.021995
+    d0b_recurrence = 0.001303
+    d0b_identity = 0.000220
+    effective = float(np.mean(previous["effective_ratios"]))
+    recurrence_gain = previous["recurrence_fraction"] > d0b_recurrence * 2.0
+    identity_gain = previous["identity_fraction"] > d0b_identity * 2.0
+    prediction_improves = result["MAE"] < d0b_mae
+    prediction_similar = abs(result["MAE"] - d0b_mae) <= 2e-4
+    contribution_improves = effective > 0.02
+
+    if recurrence_gain and identity_gain and contribution_improves and prediction_improves:
+        case = "Case A"
+        conclusion = (
+            "Transition-input balancing strengthens functional, sample-specific "
+            "recurrence and improves forecasting over D0B."
+        )
+    elif recurrence_gain and prediction_similar:
+        case = "Case B"
+        conclusion = (
+            "Recurrence is stronger, but it adds no clear forecasting gain over D0B."
+        )
+    elif recurrence_gain and result["MAE"] > d0b_mae + 2e-4:
+        case = "Case C"
+        conclusion = (
+            "Stronger recurrence hurts forecasting; D0B may correctly prefer "
+            "long-memory-dominated transitions."
+        )
+    elif not recurrence_gain and not identity_gain and not contribution_improves:
+        case = "Case D"
+        conclusion = (
+            "Recurrence remains weak after normalization, so transition-input "
+            "scale suppression is unlikely to be the main cause."
+        )
+    else:
+        case = "Case E"
+        conclusion = (
+            "Any accuracy change is not accompanied by consistent recurrence "
+            "evidence and must not be attributed to stronger Z_(t-1) use."
+        )
+    print(
+        "\nD0D mechanism conclusion: "
+        f"[{case}] {conclusion} mean effective Z/H={effective:.6e}; "
+        f"recurrence={previous['recurrence_fraction']:.6e}; "
+        f"identity={previous['identity_fraction']:.6e}."
+    )
+
+
 def _print_d0c_conclusion(results):
     result = next(
         (
@@ -4728,6 +4911,7 @@ def main():
     _print_s2f_conclusion(results)
     _print_d0_conclusion(results)
     _print_d0b_conclusion(results)
+    _print_d0d_conclusion(results)
     _print_d0c_conclusion(results)
     _print_d1a_conclusion(results)
     _print_d1a2_conclusion(results)

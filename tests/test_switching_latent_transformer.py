@@ -16,7 +16,8 @@ def _d0_branch(dropout=0.0, max_len=12, balanced_readout=False,
                use_latent_memory=False,
                zero_init_memory_projection=True,
                use_regime_relative_memory=False,
-               use_dynamic_slope=False):
+               use_dynamic_slope=False,
+               use_balanced_transition_input=False):
     return SwitchingLatentTransformerBranch(
         feat_dim=5,
         n_stock=4,
@@ -37,7 +38,104 @@ def _d0_branch(dropout=0.0, max_len=12, balanced_readout=False,
         zero_init_memory_projection=zero_init_memory_projection,
         use_regime_relative_memory=use_regime_relative_memory,
         use_dynamic_slope=use_dynamic_slope,
+        use_balanced_transition_input=use_balanced_transition_input,
     )
+
+
+def test_d0d_balances_only_generator_inputs_without_adding_parameters():
+    torch.manual_seed(2017)
+    d0b = _d0_branch(max_len=7, balanced_readout=True).eval()
+    torch.manual_seed(2017)
+    d0d = _d0_branch(
+        max_len=7,
+        balanced_readout=True,
+        use_balanced_transition_input=True,
+    ).eval()
+
+    assert sum(p.numel() for p in d0b.parameters()) == sum(
+        p.numel() for p in d0d.parameters()
+    )
+    assert d0b.state_dict().keys() == d0d.state_dict().keys()
+    for name, value in d0b.state_dict().items():
+        torch.testing.assert_close(value, d0d.state_dict()[name], rtol=0.0, atol=0.0)
+    assert not d0d.transition_h_norm.elementwise_affine
+    assert not d0d.transition_z_norm.elementwise_affine
+    assert list(d0d.transition_h_norm.parameters()) == []
+    assert list(d0d.transition_z_norm.parameters()) == []
+
+    x = torch.randn(3, 7, 9, 5)
+    d0b(x)
+    d0d(x)
+    torch.testing.assert_close(
+        d0b.last_long_memory, d0d.last_long_memory, rtol=0.0, atol=0.0
+    )
+    torch.testing.assert_close(
+        d0b.last_regime_probabilities,
+        d0d.last_regime_probabilities,
+        rtol=0.0,
+        atol=0.0,
+    )
+    torch.testing.assert_close(
+        d0d.last_transition_z_inputs[:, 0],
+        torch.zeros_like(d0d.last_transition_z_inputs[:, 0]),
+        rtol=0.0,
+        atol=0.0,
+    )
+    expected_h = d0d.transition_h_norm(d0d.last_long_memory)
+    expected_z = d0d.transition_z_norm(d0d.last_latent_states[:, :-1])
+    torch.testing.assert_close(d0d.last_transition_h_inputs, expected_h)
+    torch.testing.assert_close(d0d.last_transition_z_inputs[:, 1:], expected_z)
+    assert (d0b.last_latent_states[:, 1:] - d0d.last_latent_states[:, 1:]).abs().max() > 0
+
+
+def test_d0d_causality_batch_independence_and_market_permutation():
+    torch.manual_seed(2018)
+    branch = _d0_branch(
+        max_len=12,
+        balanced_readout=True,
+        use_balanced_transition_input=True,
+    ).eval()
+    x = torch.randn(3, 12, 9, 5)
+    output = branch(x)
+    references = {
+        "H": branch.last_long_memory.clone(),
+        "H_bal": branch.last_transition_h_inputs.clone(),
+        "Z": branch.last_latent_states.clone(),
+        "Z_bal": branch.last_transition_z_inputs.clone(),
+        "p": branch.last_regime_probabilities.clone(),
+    }
+
+    changed = x.clone()
+    changed[:, 7:] = torch.randn_like(changed[:, 7:])
+    branch(changed)
+    for name, reference in references.items():
+        current = {
+            "H": branch.last_long_memory,
+            "H_bal": branch.last_transition_h_inputs,
+            "Z": branch.last_latent_states,
+            "Z_bal": branch.last_transition_z_inputs,
+            "p": branch.last_regime_probabilities,
+        }[name]
+        torch.testing.assert_close(reference[:, :7], current[:, :7], atol=1e-6, rtol=1e-6)
+
+    single = branch(x[:1])
+    torch.testing.assert_close(output[:1], single, atol=1e-6, rtol=1e-6)
+    for name, reference in references.items():
+        current = {
+            "H": branch.last_long_memory,
+            "H_bal": branch.last_transition_h_inputs,
+            "Z": branch.last_latent_states,
+            "Z_bal": branch.last_transition_z_inputs,
+            "p": branch.last_regime_probabilities,
+        }[name]
+        torch.testing.assert_close(reference[:1], current, atol=1e-6, rtol=1e-6)
+
+    for start, end in ((0, 4), (4, 7), (7, 9)):
+        permuted = x.clone()
+        order = torch.arange(end - start - 1, -1, -1)
+        permuted[:, :, start:end] = x[:, :, start:end].index_select(2, order)
+        permuted_output = branch(permuted)
+        torch.testing.assert_close(output, permuted_output, atol=1e-6, rtol=1e-6)
 
 
 def test_d0_long_memory_is_causal_and_uses_signed_base_rpe():

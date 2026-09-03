@@ -19,6 +19,17 @@ def _model():
     ).eval()
 
 
+def _d0d_model():
+    return HeteroMixHopCMGM(
+        num_nodes=9,
+        n_commodities=2,
+        n_stock=4,
+        n_bond=3,
+        feat_dim=5,
+        variant="switching_latent_balanced_transition",
+    ).eval()
+
+
 def test_d0b_replay_interventions_are_recursive_and_leave_model_unchanged():
     torch.manual_seed(4101)
     model = _model()
@@ -56,3 +67,19 @@ def test_lagged_replay_never_uses_a_future_state_and_shuffle_is_deranged():
     assert (lagged_z[:, 2:] - normal_z[:, 2:]).abs().max() > 0
     order = _fixed_derangement(5, 99, x.device)
     assert not torch.any(order == torch.arange(5))
+
+
+def test_d0d_replay_uses_normalized_transition_inputs_and_direction_test():
+    torch.manual_seed(4103)
+    model = _d0d_model()
+    x = torch.randn(4, 20, 9, 5)
+    result = run_previous_state_diagnostics(model, x, seed=81)
+
+    assert result["label"] == "D0D"
+    assert result["zero_previous_time_diffs"][0] == 0.0
+    assert "feature_permute" in result["comparison"]
+    assert result["comparison"]["feature_permute"]["prediction"][0] > 0
+    # Positive global scaling occurs before non-affine LN and should vanish
+    # up to epsilon/floating-point effects.
+    assert result["comparison"]["scale_0.5"]["prediction"][0] < 1e-5
+    assert result["comparison"]["scale_1.5"]["prediction"][0] < 1e-5
