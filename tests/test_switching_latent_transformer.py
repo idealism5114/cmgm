@@ -13,7 +13,8 @@ from cmgm.training.train import make_loss, train_epoch
 
 
 def _d0_branch(dropout=0.0, max_len=12, balanced_readout=False,
-               use_latent_memory=False):
+               use_latent_memory=False,
+               zero_init_memory_projection=True):
     return SwitchingLatentTransformerBranch(
         feat_dim=5,
         n_stock=4,
@@ -31,6 +32,7 @@ def _d0_branch(dropout=0.0, max_len=12, balanced_readout=False,
         output_dim=8,
         balanced_readout=balanced_readout,
         use_latent_memory=use_latent_memory,
+        zero_init_memory_projection=zero_init_memory_projection,
     )
 
 
@@ -537,3 +539,80 @@ def test_d1a_full_model_registration():
     assert branch.use_latent_memory
     output = model(torch.randn(2, 20, 6, 5))
     assert output.shape == (2, model.n_horizons, 2)
+
+
+def test_d1a2_differs_from_d1a_only_in_memory_projection_initial_values():
+    torch.manual_seed(2020)
+    d1a = _d0_branch(
+        max_len=7, balanced_readout=True, use_latent_memory=True,
+        zero_init_memory_projection=True,
+    )
+    torch.manual_seed(2020)
+    d1a2 = _d0_branch(
+        max_len=7, balanced_readout=True, use_latent_memory=True,
+        zero_init_memory_projection=False,
+    )
+    assert sum(parameter.numel() for parameter in d1a.parameters()) == sum(
+        parameter.numel() for parameter in d1a2.parameters()
+    )
+    shared_modules = (
+        "market_encoder", "long_memory", "regime_filter", "latent_transition",
+        "long_memory_readout", "micro_state_readout", "long_memory_norm",
+        "micro_state_norm", "state_readout", "latent_memory_attention",
+    )
+    for module_name in shared_modules:
+        left = getattr(d1a, module_name).state_dict()
+        right = getattr(d1a2, module_name).state_dict()
+        assert left.keys() == right.keys()
+        for name in left:
+            torch.testing.assert_close(left[name], right[name], rtol=0.0, atol=0.0)
+    assert all(
+        projection.weight.abs().sum() == 0
+        for projection in d1a.memory_projections
+    )
+    assert all(
+        projection.weight.abs().sum() > 0
+        for projection in d1a2.memory_projections
+    )
+
+
+def test_d1a2_default_memory_projection_opens_initial_attention_gradient():
+    torch.manual_seed(2021)
+    branch = _d0_branch(
+        max_len=7, balanced_readout=True, use_latent_memory=True,
+        zero_init_memory_projection=False,
+    )
+    output = branch(torch.randn(3, 7, 9, 5))
+    injection = branch.last_generator_memory_injections
+    base = branch.last_generator_base_preactivations
+    assert injection.norm(dim=-1).mean() > 0
+    assert injection.norm(dim=-1).mean() / base.norm(dim=-1).mean() > 0
+    modules = (
+        branch.latent_memory_attention.q_proj,
+        branch.latent_memory_attention.k_proj,
+        branch.latent_memory_attention.v_proj,
+        branch.latent_memory_attention.out_proj,
+        *branch.memory_projections,
+    )
+    parameters = [parameter for module in modules for parameter in module.parameters()]
+    gradients = torch.autograd.grad(output.square().mean(), parameters)
+    assert all(gradient.abs().sum() > 0 for gradient in gradients)
+
+
+def test_d1a2_full_model_registration_and_parameter_equality():
+    common = dict(
+        num_nodes=6, n_commodities=2, n_stock=2, n_bond=2, feat_dim=5
+    )
+    torch.manual_seed(2022)
+    d1a = HeteroMixHopCMGM(variant="switching_latent_memory", **common)
+    torch.manual_seed(2022)
+    d1a2 = HeteroMixHopCMGM(
+        variant="switching_active_latent_memory", **common
+    )
+    assert sum(parameter.numel() for parameter in d1a.parameters()) == sum(
+        parameter.numel() for parameter in d1a2.parameters()
+    )
+    branch = d1a2.switching_latent_transformer
+    assert branch.use_latent_memory
+    assert not branch.zero_init_memory_projection
+    assert d1a2(torch.randn(2, 20, 6, 5)).shape == (2, d1a2.n_horizons, 2)

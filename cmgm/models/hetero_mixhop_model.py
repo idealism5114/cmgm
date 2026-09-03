@@ -709,6 +709,7 @@ class HeteroMixHopCMGM(nn.Module):
             "switching_latent_transformer",
             "switching_latent_balanced_readout",
             "switching_latent_memory",
+            "switching_active_latent_memory",
         }
         if variant not in supported_variants:
             supported = ", ".join(sorted(supported_variants))
@@ -761,7 +762,8 @@ class HeteroMixHopCMGM(nn.Module):
                                                "switching_filter_rpe",
                                                "switching_latent_transformer",
                                                "switching_latent_balanced_readout",
-                                               "switching_latent_memory")
+                                               "switching_latent_memory",
+                                               "switching_active_latent_memory")
         self.use_edge_attn   = variant in ("edge_attn", "edge_attn_static", "temporal_attn",
                                            "diff_input", "hybrid_attn", "node_level",
                                            "comm_nodes", "batch_graph", "factor_res",
@@ -786,7 +788,8 @@ class HeteroMixHopCMGM(nn.Module):
                                            "switching_filter_rpe",
                                            "switching_latent_transformer",
                                            "switching_latent_balanced_readout",
-                                           "switching_latent_memory")
+                                           "switching_latent_memory",
+                                           "switching_active_latent_memory")
         self.use_gate        = variant not in ("no_gate", "gcn_only", "lstm_only")
 
         # ── Multi-horizon output ──
@@ -1023,7 +1026,8 @@ class HeteroMixHopCMGM(nn.Module):
                              "switching_null_control", "switching_filter_rpe",
                              "switching_latent_transformer",
                              "switching_latent_balanced_readout",
-                             "switching_latent_memory"):
+                             "switching_latent_memory",
+                             "switching_active_latent_memory"):
                 pass  # temporal branch is the transformer (no global LSTM)
             else:
                 # diff_input: concat first-order differences → 2× input size
@@ -1198,6 +1202,7 @@ class HeteroMixHopCMGM(nn.Module):
             "switching_latent_transformer",
             "switching_latent_balanced_readout",
             "switching_latent_memory",
+            "switching_active_latent_memory",
         ):
             self.temporal_score = nn.Linear(LSTM_HIDDEN_DIM, 1)
             self.switching_latent_transformer = SwitchingLatentTransformerBranch(
@@ -1220,7 +1225,13 @@ class HeteroMixHopCMGM(nn.Module):
                 warmup_epochs=20,
                 output_dim=LSTM_HIDDEN_DIM,
                 balanced_readout=(variant != "switching_latent_transformer"),
-                use_latent_memory=(variant == "switching_latent_memory"),
+                use_latent_memory=(variant in (
+                    "switching_latent_memory",
+                    "switching_active_latent_memory",
+                )),
+                zero_init_memory_projection=(
+                    variant != "switching_active_latent_memory"
+                ),
             )
 
         # RegimeDynamicRPETransformer (F): modular regime → dynamics →
@@ -2543,6 +2554,7 @@ class HeteroMixHopCMGM(nn.Module):
             "switching_latent_transformer",
             "switching_latent_balanced_readout",
             "switching_latent_memory",
+            "switching_active_latent_memory",
         ):
             return self._switching_latent_transformer_forward(x, debug)
         if self.variant in ("regime_dynamic_transformer", "regime_dynamic_semantic",
@@ -2664,6 +2676,7 @@ class HeteroMixHopCMGM(nn.Module):
             "switching_latent_transformer",
             "switching_latent_balanced_readout",
             "switching_latent_memory",
+            "switching_active_latent_memory",
         ):
             self.eval()
             with torch.no_grad():
@@ -2674,6 +2687,7 @@ class HeteroMixHopCMGM(nn.Module):
                         "switching_latent_transformer",
                         "switching_latent_balanced_readout",
                         "switching_latent_memory",
+                        "switching_active_latent_memory",
                     )
                     else (
                         self.switching_filter_rpe

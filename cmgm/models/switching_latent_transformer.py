@@ -267,6 +267,10 @@ class LatentMemoryAttention(nn.Module):
         memory = torch.einsum("bhl,bhld->bhd", attention, v).reshape(
             batch_size, self.memory_dim
         )
+        self.last_query = q.detach()
+        self.last_keys = k.detach()
+        self.last_values = v.detach()
+        self.last_logits = logits.detach()
         return self.out_proj(memory), attention
 
 
@@ -283,12 +287,16 @@ class SwitchingLatentTransformerBranch(nn.Module):
                  beta_max: float = 5e-4, warmup_epochs: int = 20,
                  output_dim: int = 64,
                  balanced_readout: bool = False,
-                 use_latent_memory: bool = False):
+                 use_latent_memory: bool = False,
+                 zero_init_memory_projection: bool = True):
         super().__init__()
         self.K = int(K)
         self.z_dim = int(z_dim)
         self.balanced_readout = bool(balanced_readout)
         self.use_latent_memory = bool(use_latent_memory)
+        self.zero_init_memory_projection = bool(
+            zero_init_memory_projection
+        )
         if self.use_latent_memory and not self.balanced_readout:
             raise ValueError("latent memory requires the D0B balanced readout")
         self.market_encoder = MarketAwareTemporalEncoder(
@@ -343,8 +351,9 @@ class SwitchingLatentTransformerBranch(nn.Module):
                 nn.Linear(self.z_dim, 128, bias=False)
                 for _ in range(self.K)
             ])
-            for projection in self.memory_projections:
-                nn.init.zeros_(projection.weight)
+            if self.zero_init_memory_projection:
+                for projection in self.memory_projections:
+                    nn.init.zeros_(projection.weight)
 
     def encode_market_tokens(self, x: torch.Tensor) -> torch.Tensor:
         return self.market_encoder(x)
@@ -393,6 +402,10 @@ class SwitchingLatentTransformerBranch(nn.Module):
         memory_attentions = []
         base_preactivations = []
         memory_injections = []
+        memory_scores = []
+        memory_query_norms = []
+        memory_key_norms = []
+        memory_value_norms = []
         for step in range(time_steps):
             h_t = long_memory[:, step]
             prior_t, evidence_t, p_t, kl_t = self.regime_filter.step(
@@ -428,6 +441,27 @@ class SwitchingLatentTransformerBranch(nn.Module):
                 z_t = torch.einsum("bk,bkd->bd", p_for_z, candidates_t)
                 memory_values.append(memory_t)
                 memory_attentions.append(attention_t)
+                if attention_t is None:
+                    empty_norm = long_memory.new_zeros(
+                        batch_size, self.latent_memory_attention.n_heads
+                    )
+                    memory_scores.append(None)
+                    memory_query_norms.append(empty_norm)
+                    memory_key_norms.append(empty_norm)
+                    memory_value_norms.append(empty_norm)
+                else:
+                    memory_scores.append(
+                        self.latent_memory_attention.last_logits
+                    )
+                    memory_query_norms.append(
+                        self.latent_memory_attention.last_query.norm(dim=-1)
+                    )
+                    memory_key_norms.append(
+                        self.latent_memory_attention.last_keys.norm(dim=-1).mean(dim=-1)
+                    )
+                    memory_value_norms.append(
+                        self.latent_memory_attention.last_values.norm(dim=-1).mean(dim=-1)
+                    )
                 base_preactivations.append(torch.stack(state_base, dim=1))
                 memory_injections.append(
                     torch.stack(state_injections, dim=1)
@@ -471,13 +505,28 @@ class SwitchingLatentTransformerBranch(nn.Module):
                 batch_size, time_steps, self.latent_memory_attention.n_heads,
                 time_steps,
             )
+            padded_scores = long_memory.new_zeros(
+                batch_size, time_steps, self.latent_memory_attention.n_heads,
+                time_steps,
+            )
             for step, attention_t in enumerate(memory_attentions):
                 if attention_t is not None:
                     padded_attention[:, step, :, :step] = attention_t.detach()
+                    padded_scores[:, step, :, :step] = memory_scores[step]
             self.last_latent_memories = torch.stack(
                 memory_values, dim=1
             ).detach()
             self.last_latent_memory_attention = padded_attention.detach()
+            self.last_latent_memory_scores = padded_scores.detach()
+            self.last_latent_memory_query_norms = torch.stack(
+                memory_query_norms, dim=1
+            ).detach()
+            self.last_latent_memory_key_norms = torch.stack(
+                memory_key_norms, dim=1
+            ).detach()
+            self.last_latent_memory_value_norms = torch.stack(
+                memory_value_norms, dim=1
+            ).detach()
             self.last_generator_base_preactivations = torch.stack(
                 base_preactivations, dim=1
             ).detach()
