@@ -232,6 +232,44 @@ class RegimeLatentTransition(nn.Module):
         return z_t, candidates
 
 
+class LatentMemoryAttention(nn.Module):
+    """Pure content attention from H_t to the unordered set Z_<t."""
+
+    def __init__(self, query_dim: int = 128, memory_dim: int = 64,
+                 n_heads: int = 4):
+        super().__init__()
+        if memory_dim % n_heads != 0:
+            raise ValueError("memory_dim must be divisible by n_heads")
+        self.memory_dim = int(memory_dim)
+        self.n_heads = int(n_heads)
+        self.head_dim = self.memory_dim // self.n_heads
+        self.scale = self.head_dim ** -0.5
+        self.q_proj = nn.Linear(query_dim, self.memory_dim)
+        self.k_proj = nn.Linear(self.memory_dim, self.memory_dim)
+        self.v_proj = nn.Linear(self.memory_dim, self.memory_dim)
+        self.out_proj = nn.Linear(self.memory_dim, self.memory_dim)
+
+    def forward(self, query: torch.Tensor, history: torch.Tensor):
+        if history.dim() != 3 or history.shape[1] == 0:
+            raise ValueError("history must be non-empty with shape (B,L,D)")
+        batch_size, history_length, _ = history.shape
+        q = self.q_proj(query).view(
+            batch_size, self.n_heads, self.head_dim
+        )
+        k = self.k_proj(history).view(
+            batch_size, history_length, self.n_heads, self.head_dim
+        ).transpose(1, 2)
+        v = self.v_proj(history).view(
+            batch_size, history_length, self.n_heads, self.head_dim
+        ).transpose(1, 2)
+        logits = torch.einsum("bhd,bhld->bhl", q, k) * self.scale
+        attention = F.softmax(logits, dim=-1)
+        memory = torch.einsum("bhl,bhld->bhd", attention, v).reshape(
+            batch_size, self.memory_dim
+        )
+        return self.out_proj(memory), attention
+
+
 class SwitchingLatentTransformerBranch(nn.Module):
     """D0 long-memory plus regime-selected deterministic micro dynamics."""
 
@@ -244,11 +282,15 @@ class SwitchingLatentTransformerBranch(nn.Module):
                  sticky_alpha: float = 0.5, tau: float = 1.0,
                  beta_max: float = 5e-4, warmup_epochs: int = 20,
                  output_dim: int = 64,
-                 balanced_readout: bool = False):
+                 balanced_readout: bool = False,
+                 use_latent_memory: bool = False):
         super().__init__()
         self.K = int(K)
         self.z_dim = int(z_dim)
         self.balanced_readout = bool(balanced_readout)
+        self.use_latent_memory = bool(use_latent_memory)
+        if self.use_latent_memory and not self.balanced_readout:
+            raise ValueError("latent memory requires the D0B balanced readout")
         self.market_encoder = MarketAwareTemporalEncoder(
             feat_dim=feat_dim,
             n_stock=n_stock,
@@ -291,11 +333,25 @@ class SwitchingLatentTransformerBranch(nn.Module):
         else:
             self.state_readout = nn.Linear(d_model + self.z_dim, output_dim)
 
+        # Construct D1A-only modules strictly after every D0B shared module so
+        # identical seeds preserve the entire D0B initialization sequence.
+        if self.use_latent_memory:
+            self.latent_memory_attention = LatentMemoryAttention(
+                query_dim=d_model, memory_dim=self.z_dim, n_heads=4
+            )
+            self.memory_projections = nn.ModuleList([
+                nn.Linear(self.z_dim, 128, bias=False)
+                for _ in range(self.K)
+            ])
+            for projection in self.memory_projections:
+                nn.init.zeros_(projection.weight)
+
     def encode_market_tokens(self, x: torch.Tensor) -> torch.Tensor:
         return self.market_encoder(x)
 
     def latent_forward(self, long_memory: torch.Tensor,
-                       forced_probabilities: torch.Tensor = None):
+                       forced_probabilities: torch.Tensor = None,
+                       zero_latent_memory: bool = False):
         batch_size, time_steps, _ = long_memory.shape
         transition = self.regime_filter.transition_matrix()
         p_prev = torch.full(
@@ -332,21 +388,62 @@ class SwitchingLatentTransformerBranch(nn.Module):
         latent_states = []
         candidate_values = []
         switch_kls = []
+        z_history = []
+        memory_values = []
+        memory_attentions = []
+        base_preactivations = []
+        memory_injections = []
         for step in range(time_steps):
             h_t = long_memory[:, step]
             prior_t, evidence_t, p_t, kl_t = self.regime_filter.step(
                 h_t, p_prev, transition
             )
             p_for_z = forced[:, step] if forced is not None else p_t
-            z_t, candidates_t = self.latent_transition(
-                h_t, z_prev, p_for_z
-            )
+            if self.use_latent_memory:
+                if step == 0 or zero_latent_memory:
+                    memory_t = torch.zeros_like(z_prev)
+                    attention_t = None
+                else:
+                    # z_history is intentionally non-detached and contains
+                    # exactly Z_0,...,Z_(t-1), never the current or future Z.
+                    history_t = torch.stack(z_history, dim=1)
+                    memory_t, attention_t = self.latent_memory_attention(
+                        h_t, history_t
+                    )
+                transition_input = torch.cat([h_t, z_prev], dim=-1)
+                state_candidates = []
+                state_base = []
+                state_injections = []
+                for generator, memory_projection in zip(
+                    self.latent_transition.generators,
+                    self.memory_projections,
+                ):
+                    base_t = generator[0](transition_input)
+                    injection_t = memory_projection(memory_t)
+                    hidden_t = generator[1](base_t + injection_t)
+                    state_candidates.append(generator[2](hidden_t))
+                    state_base.append(base_t)
+                    state_injections.append(injection_t)
+                candidates_t = torch.stack(state_candidates, dim=1)
+                z_t = torch.einsum("bk,bkd->bd", p_for_z, candidates_t)
+                memory_values.append(memory_t)
+                memory_attentions.append(attention_t)
+                base_preactivations.append(torch.stack(state_base, dim=1))
+                memory_injections.append(
+                    torch.stack(state_injections, dim=1)
+                )
+            else:
+                z_t, candidates_t = self.latent_transition(
+                    h_t, z_prev, p_for_z
+                )
             priors.append(prior_t)
             evidence_values.append(evidence_t)
             probabilities.append(p_t)
             latent_states.append(z_t)
             candidate_values.append(candidates_t)
             switch_kls.append(kl_t)
+            if self.use_latent_memory:
+                z_history.append(z_t)
             p_prev = p_t
             z_prev = z_t
 
@@ -369,6 +466,24 @@ class SwitchingLatentTransformerBranch(nn.Module):
         self.last_latent_probabilities = (
             forced.detach() if forced is not None else p.detach()
         )
+        if self.use_latent_memory:
+            padded_attention = long_memory.new_zeros(
+                batch_size, time_steps, self.latent_memory_attention.n_heads,
+                time_steps,
+            )
+            for step, attention_t in enumerate(memory_attentions):
+                if attention_t is not None:
+                    padded_attention[:, step, :, :step] = attention_t.detach()
+            self.last_latent_memories = torch.stack(
+                memory_values, dim=1
+            ).detach()
+            self.last_latent_memory_attention = padded_attention.detach()
+            self.last_generator_base_preactivations = torch.stack(
+                base_preactivations, dim=1
+            ).detach()
+            self.last_generator_memory_injections = torch.stack(
+                memory_injections, dim=1
+            ).detach()
         return p, z, candidates
 
     def readout(self, h_last: torch.Tensor, z_last: torch.Tensor,
@@ -411,10 +526,13 @@ class SwitchingLatentTransformerBranch(nn.Module):
 
     def temporal_forward(self, tokens: torch.Tensor,
                          forced_probabilities: torch.Tensor = None,
-                         zero_readout_component: str = None) -> torch.Tensor:
+                         zero_readout_component: str = None,
+                         zero_latent_memory: bool = False) -> torch.Tensor:
         long_memory = self.long_memory(tokens)
         _, latent_states, _ = self.latent_forward(
-            long_memory, forced_probabilities=forced_probabilities
+            long_memory,
+            forced_probabilities=forced_probabilities,
+            zero_latent_memory=zero_latent_memory,
         )
         h_last = long_memory[:, -1]
         z_last = latent_states[:, -1]
@@ -429,12 +547,14 @@ class SwitchingLatentTransformerBranch(nn.Module):
 
     def forward(self, x: torch.Tensor,
                 forced_probabilities: torch.Tensor = None,
-                zero_readout_component: str = None) -> torch.Tensor:
+                zero_readout_component: str = None,
+                zero_latent_memory: bool = False) -> torch.Tensor:
         tokens = self.encode_market_tokens(x)
         return self.temporal_forward(
             tokens,
             forced_probabilities=forced_probabilities,
             zero_readout_component=zero_readout_component,
+            zero_latent_memory=zero_latent_memory,
         )
 
     def set_epoch(self, epoch: int) -> float:
