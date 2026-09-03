@@ -7,6 +7,7 @@ Usage:
 
 import argparse
 import time
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -63,6 +64,15 @@ VARIANTS = [
     ("L-AdapterOrthogonal", "adapter_orthogonal"),
 ]
 
+D_SERIES_VARIANTS = frozenset({
+    "switching_latent_transformer",
+    "switching_latent_balanced_readout",
+    "switching_latent_dynamic_slope",
+    "switching_latent_memory",
+    "switching_active_latent_memory",
+    "switching_regime_relative_latent_memory",
+})
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -78,6 +88,15 @@ def parse_args():
     parser.add_argument("--patience", type=int, default=PATIENCE)
     parser.add_argument("--no-cuda", action="store_true")
     parser.add_argument(
+        "--checkpoint-dir",
+        type=Path,
+        default=Path("checkpoints"),
+        help=(
+            "Directory for best checkpoints of D0/D0B/D0C/D1A/D1A2/D1 "
+            "(default: ./checkpoints). Other variants are not saved."
+        ),
+    )
+    parser.add_argument(
         "--variants",
         help=(
             "Comma-separated display or internal names; defaults to "
@@ -85,6 +104,15 @@ def parse_args():
         ),
     )
     return parser.parse_args()
+
+
+def _checkpoint_path_for_variant(variant, checkpoint_dir):
+    """Create and return this D-series variant's deterministic best path."""
+    if variant not in D_SERIES_VARIANTS:
+        return None
+    directory = Path(checkpoint_dir).expanduser()
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / f"{variant}_best.pt"
 
 
 def build_data(args):
@@ -4111,6 +4139,11 @@ def run_variant(name, variant, args, device, data):
                 active_model, diagnostic_source, device, stage
             )
         )
+    checkpoint_path = _checkpoint_path_for_variant(
+        variant, args.checkpoint_dir
+    )
+    if checkpoint_path is not None:
+        print(f"  Best checkpoint path={checkpoint_path.resolve()}")
     history = train(
         model,
         loaders["train"],
@@ -4120,6 +4153,9 @@ def run_variant(name, variant, args, device, data):
         device,
         num_epochs=args.epochs,
         patience=args.patience,
+        checkpoint_path=(
+            str(checkpoint_path) if checkpoint_path is not None else None
+        ),
         epoch_diagnostic=epoch_diagnostic,
     )
     normalized, original, target = evaluate_primary_horizon(
