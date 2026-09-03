@@ -15,7 +15,8 @@ from cmgm.training.train import make_loss, train_epoch
 def _d0_branch(dropout=0.0, max_len=12, balanced_readout=False,
                use_latent_memory=False,
                zero_init_memory_projection=True,
-               use_regime_relative_memory=False):
+               use_regime_relative_memory=False,
+               use_dynamic_slope=False):
     return SwitchingLatentTransformerBranch(
         feat_dim=5,
         n_stock=4,
@@ -35,6 +36,7 @@ def _d0_branch(dropout=0.0, max_len=12, balanced_readout=False,
         use_latent_memory=use_latent_memory,
         zero_init_memory_projection=zero_init_memory_projection,
         use_regime_relative_memory=use_regime_relative_memory,
+        use_dynamic_slope=use_dynamic_slope,
     )
 
 
@@ -396,6 +398,149 @@ def test_d0b_full_model_registration_and_parameter_delta():
         sum(parameter.numel() for parameter in d0b.parameters())
         - sum(parameter.numel() for parameter in d0.parameters())
     ) == expected_delta
+
+
+def test_d0c_adds_only_active_state_specific_slope_projections():
+    kwargs = dict(max_len=7, balanced_readout=True)
+    torch.manual_seed(2030)
+    d0b = _d0_branch(**kwargs)
+    torch.manual_seed(2030)
+    d0c = _d0_branch(**kwargs, use_dynamic_slope=True)
+    assert sum(p.numel() for p in d0c.parameters()) - sum(
+        p.numel() for p in d0b.parameters()
+    ) == 3 * 16 * 128
+    d0c_state = d0c.state_dict()
+    for name, value in d0b.state_dict().items():
+        torch.testing.assert_close(value, d0c_state[name], rtol=0.0, atol=0.0)
+    assert len(d0c.slope_projections) == 3
+    assert all(projection.bias is None for projection in d0c.slope_projections)
+    assert all(projection.weight.abs().sum() > 0 for projection in d0c.slope_projections)
+
+
+def test_d0c_slope_definition_and_zero_slope_initial_equivalence():
+    kwargs = dict(max_len=7, balanced_readout=True)
+    torch.manual_seed(2031)
+    d0b = _d0_branch(**kwargs).eval()
+    torch.manual_seed(2031)
+    d0c = _d0_branch(**kwargs, use_dynamic_slope=True).eval()
+    x = torch.randn(3, 7, 9, 5)
+    with torch.no_grad():
+        expected = d0b(x)
+        actual = d0c(x, slope_scale=0.0)
+    torch.testing.assert_close(
+        d0c.last_long_memory_slopes[:, 0],
+        torch.zeros_like(d0c.last_long_memory_slopes[:, 0]),
+    )
+    torch.testing.assert_close(
+        d0c.last_long_memory_slopes[:, 1:],
+        d0c.last_long_memory[:, 1:] - d0c.last_long_memory[:, :-1],
+    )
+    torch.testing.assert_close(expected, actual, atol=1e-7, rtol=0.0)
+    torch.testing.assert_close(
+        d0b.last_latent_candidates, d0c.last_latent_candidates,
+        atol=1e-7, rtol=0.0,
+    )
+    torch.testing.assert_close(
+        d0b.last_latent_states, d0c.last_latent_states,
+        atol=1e-7, rtol=0.0,
+    )
+
+
+def test_d0c_slope_path_gets_prediction_gradient_and_isolation_interventions():
+    torch.manual_seed(2032)
+    branch = _d0_branch(
+        max_len=7, balanced_readout=True, use_dynamic_slope=True
+    ).eval()
+    x = torch.randn(4, 7, 9, 5)
+    normal = branch(x)
+    p_normal = branch.last_regime_probabilities.clone()
+    parameters = [
+        parameter
+        for projection in branch.slope_projections
+        for parameter in projection.parameters()
+    ]
+    gradients = torch.autograd.grad(normal.square().mean(), parameters)
+    assert all(gradient.abs().sum() > 0 for gradient in gradients)
+    with torch.no_grad():
+        zero = branch(x, slope_scale=0.0)
+        p_zero = branch.last_regime_probabilities.clone()
+        flipped = branch(x, slope_scale=-1.0)
+        half = branch(x, slope_scale=0.5)
+        one_and_half = branch(x, slope_scale=1.5)
+    torch.testing.assert_close(p_normal, p_zero)
+    assert (normal - zero).abs().max() > 0
+    assert (normal - flipped).abs().max() > 0
+    assert (normal - half).abs().max() > 0
+    assert (normal - one_and_half).abs().max() > 0
+
+
+def test_d0c_causality_batch_independence_and_market_permutation():
+    torch.manual_seed(2033)
+    branch = _d0_branch(
+        max_len=7, balanced_readout=True, use_dynamic_slope=True
+    ).eval()
+    x = torch.randn(3, 7, 9, 5)
+    with torch.no_grad():
+        output = branch(x)
+        references = {
+            "E": branch.last_market_tokens.clone(),
+            "H": branch.last_long_memory.clone(),
+            "delta": branch.last_long_memory_slopes.clone(),
+            "p": branch.last_regime_probabilities.clone(),
+            "Z": branch.last_latent_states.clone(),
+        }
+        perturbed = x.clone()
+        perturbed[:, 4:] = torch.randn_like(perturbed[:, 4:])
+        branch(perturbed)
+        for name, attribute in (
+            ("E", "last_market_tokens"),
+            ("H", "last_long_memory"),
+            ("delta", "last_long_memory_slopes"),
+            ("p", "last_regime_probabilities"),
+            ("Z", "last_latent_states"),
+        ):
+            torch.testing.assert_close(
+                references[name][:, :4], getattr(branch, attribute)[:, :4],
+                atol=1e-6, rtol=1e-6,
+            )
+        single = branch(x[:1])
+        torch.testing.assert_close(output[:1], single, atol=1e-6, rtol=1e-6)
+        torch.testing.assert_close(
+            references["delta"][:1], branch.last_long_memory_slopes,
+            atol=2e-6, rtol=1e-6,
+        )
+        for start, end in ((0, 4), (4, 7), (7, 9)):
+            permuted = x.clone()
+            order = torch.arange(end - start - 1, -1, -1)
+            permuted[:, :, start:end] = x[:, :, start:end].index_select(2, order)
+            changed = branch(permuted)
+            torch.testing.assert_close(output, changed, atol=1e-6, rtol=1e-6)
+            torch.testing.assert_close(
+                references["delta"], branch.last_long_memory_slopes,
+                atol=2e-6, rtol=1e-6,
+            )
+
+
+def test_d0c_full_model_registration_parameter_delta_and_shared_initialization():
+    common = dict(
+        num_nodes=6, n_commodities=2, n_stock=2, n_bond=2, feat_dim=5
+    )
+    torch.manual_seed(2034)
+    d0b = HeteroMixHopCMGM(
+        variant="switching_latent_balanced_readout", **common
+    )
+    torch.manual_seed(2034)
+    d0c = HeteroMixHopCMGM(
+        variant="switching_latent_dynamic_slope", **common
+    )
+    assert sum(p.numel() for p in d0c.parameters()) - sum(
+        p.numel() for p in d0b.parameters()
+    ) == 3 * 128 * 128
+    d0c_state = d0c.state_dict()
+    for name, value in d0b.state_dict().items():
+        torch.testing.assert_close(value, d0c_state[name], rtol=0.0, atol=0.0)
+    output = d0c(torch.randn(2, 20, 6, 5))
+    assert output.shape == (2, d0c.n_horizons, 2)
 
 
 def test_d1a_content_memory_is_legal_and_history_permutation_invariant():

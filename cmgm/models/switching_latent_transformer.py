@@ -306,7 +306,8 @@ class SwitchingLatentTransformerBranch(nn.Module):
                  balanced_readout: bool = False,
                  use_latent_memory: bool = False,
                  zero_init_memory_projection: bool = True,
-                 use_regime_relative_memory: bool = False):
+                 use_regime_relative_memory: bool = False,
+                 use_dynamic_slope: bool = False):
         super().__init__()
         self.K = int(K)
         self.z_dim = int(z_dim)
@@ -318,10 +319,13 @@ class SwitchingLatentTransformerBranch(nn.Module):
         self.use_regime_relative_memory = bool(
             use_regime_relative_memory
         )
+        self.use_dynamic_slope = bool(use_dynamic_slope)
         if self.use_latent_memory and not self.balanced_readout:
             raise ValueError("latent memory requires the D0B balanced readout")
         if self.use_regime_relative_memory and not self.use_latent_memory:
             raise ValueError("regime-relative memory requires latent memory")
+        if self.use_dynamic_slope and not self.balanced_readout:
+            raise ValueError("dynamic slope requires the D0B balanced readout")
         self.market_encoder = MarketAwareTemporalEncoder(
             feat_dim=feat_dim,
             n_stock=n_stock,
@@ -383,6 +387,14 @@ class SwitchingLatentTransformerBranch(nn.Module):
                 self.latent_memory_attention.n_heads,
                 max_len - 1,
             ))
+        # D0C-only modules are created last so every D0B/shared parameter keeps
+        # exactly the same seeded initialization. These projections are active
+        # from the first optimization step via PyTorch's default initialization.
+        if self.use_dynamic_slope:
+            self.slope_projections = nn.ModuleList([
+                nn.Linear(d_model, 128, bias=False)
+                for _ in range(self.K)
+            ])
 
     def centered_regime_relative_lag_bias(self) -> torch.Tensor:
         if not self.use_regime_relative_memory:
@@ -420,7 +432,8 @@ class SwitchingLatentTransformerBranch(nn.Module):
                        forced_probabilities: torch.Tensor = None,
                        zero_latent_memory: bool = False,
                        zero_regime_memory_bias: bool = False,
-                       forced_rpe_probabilities: torch.Tensor = None):
+                       forced_rpe_probabilities: torch.Tensor = None,
+                       slope_scale: float = 1.0):
         batch_size, time_steps, _ = long_memory.shape
         transition = self.regime_filter.transition_matrix()
         p_prev = torch.full(
@@ -483,6 +496,12 @@ class SwitchingLatentTransformerBranch(nn.Module):
         memory_value_norms = []
         memory_content_scores = []
         memory_regime_biases = []
+        long_memory_slopes = torch.zeros_like(long_memory)
+        long_memory_slopes[:, 1:] = (
+            long_memory[:, 1:] - long_memory[:, :-1]
+        )
+        slope_contributions = []
+        slope_base_preactivations = []
         for step in range(time_steps):
             h_t = long_memory[:, step]
             prior_t, evidence_t, p_t, kl_t = self.regime_filter.step(
@@ -569,9 +588,36 @@ class SwitchingLatentTransformerBranch(nn.Module):
                     memory_content_scores.append(None)
                     memory_regime_biases.append(None)
             else:
-                z_t, candidates_t = self.latent_transition(
-                    h_t, z_prev, p_for_z
-                )
+                if self.use_dynamic_slope:
+                    transition_input = torch.cat([h_t, z_prev], dim=-1)
+                    delta_h_t = long_memory_slopes[:, step] * slope_scale
+                    state_candidates = []
+                    state_base = []
+                    state_slopes = []
+                    for generator, slope_projection in zip(
+                        self.latent_transition.generators,
+                        self.slope_projections,
+                    ):
+                        base_t = generator[0](transition_input)
+                        slope_t = slope_projection(delta_h_t)
+                        hidden_t = generator[1](base_t + slope_t)
+                        state_candidates.append(generator[2](hidden_t))
+                        state_base.append(base_t)
+                        state_slopes.append(slope_t)
+                    candidates_t = torch.stack(state_candidates, dim=1)
+                    z_t = torch.einsum(
+                        "bk,bkd->bd", p_for_z, candidates_t
+                    )
+                    slope_base_preactivations.append(
+                        torch.stack(state_base, dim=1)
+                    )
+                    slope_contributions.append(
+                        torch.stack(state_slopes, dim=1)
+                    )
+                else:
+                    z_t, candidates_t = self.latent_transition(
+                        h_t, z_prev, p_for_z
+                    )
             priors.append(prior_t)
             evidence_values.append(evidence_t)
             probabilities.append(p_t)
@@ -647,6 +693,16 @@ class SwitchingLatentTransformerBranch(nn.Module):
             self.last_generator_memory_injections = torch.stack(
                 memory_injections, dim=1
             ).detach()
+        if self.use_dynamic_slope:
+            slope_tensor = torch.stack(slope_contributions, dim=1)
+            self.last_long_memory_slopes = long_memory_slopes.detach()
+            self.last_slope_contributions = slope_tensor.detach()
+            self.last_generator_base_preactivations = torch.stack(
+                slope_base_preactivations, dim=1
+            ).detach()
+            self.last_regime_weighted_slope = torch.einsum(
+                "btk,btkd->btd", self.last_latent_probabilities, slope_tensor
+            ).detach()
         return p, z, candidates
 
     def readout(self, h_last: torch.Tensor, z_last: torch.Tensor,
@@ -692,7 +748,8 @@ class SwitchingLatentTransformerBranch(nn.Module):
                          zero_readout_component: str = None,
                          zero_latent_memory: bool = False,
                          zero_regime_memory_bias: bool = False,
-                         forced_rpe_probabilities: torch.Tensor = None) -> torch.Tensor:
+                         forced_rpe_probabilities: torch.Tensor = None,
+                         slope_scale: float = 1.0) -> torch.Tensor:
         long_memory = self.long_memory(tokens)
         _, latent_states, _ = self.latent_forward(
             long_memory,
@@ -700,6 +757,7 @@ class SwitchingLatentTransformerBranch(nn.Module):
             zero_latent_memory=zero_latent_memory,
             zero_regime_memory_bias=zero_regime_memory_bias,
             forced_rpe_probabilities=forced_rpe_probabilities,
+            slope_scale=slope_scale,
         )
         h_last = long_memory[:, -1]
         z_last = latent_states[:, -1]
@@ -717,7 +775,8 @@ class SwitchingLatentTransformerBranch(nn.Module):
                 zero_readout_component: str = None,
                 zero_latent_memory: bool = False,
                 zero_regime_memory_bias: bool = False,
-                forced_rpe_probabilities: torch.Tensor = None) -> torch.Tensor:
+                forced_rpe_probabilities: torch.Tensor = None,
+                slope_scale: float = 1.0) -> torch.Tensor:
         tokens = self.encode_market_tokens(x)
         return self.temporal_forward(
             tokens,
@@ -726,6 +785,7 @@ class SwitchingLatentTransformerBranch(nn.Module):
             zero_latent_memory=zero_latent_memory,
             zero_regime_memory_bias=zero_regime_memory_bias,
             forced_rpe_probabilities=forced_rpe_probabilities,
+            slope_scale=slope_scale,
         )
 
     def set_epoch(self, epoch: int) -> float:
