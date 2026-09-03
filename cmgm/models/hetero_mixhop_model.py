@@ -708,6 +708,7 @@ class HeteroMixHopCMGM(nn.Module):
             "switching_filter_rpe",
             "switching_latent_transformer",
             "switching_latent_balanced_readout",
+            "switching_latent_dynamic_slope",
             "switching_latent_memory",
             "switching_active_latent_memory",
             "switching_regime_relative_latent_memory",
@@ -763,6 +764,7 @@ class HeteroMixHopCMGM(nn.Module):
                                                "switching_filter_rpe",
                                                "switching_latent_transformer",
                                                "switching_latent_balanced_readout",
+                                               "switching_latent_dynamic_slope",
                                                "switching_latent_memory",
                                                "switching_active_latent_memory",
                                                "switching_regime_relative_latent_memory")
@@ -790,6 +792,7 @@ class HeteroMixHopCMGM(nn.Module):
                                            "switching_filter_rpe",
                                            "switching_latent_transformer",
                                            "switching_latent_balanced_readout",
+                                           "switching_latent_dynamic_slope",
                                            "switching_latent_memory",
                                            "switching_active_latent_memory",
                                            "switching_regime_relative_latent_memory")
@@ -1029,6 +1032,7 @@ class HeteroMixHopCMGM(nn.Module):
                              "switching_null_control", "switching_filter_rpe",
                              "switching_latent_transformer",
                              "switching_latent_balanced_readout",
+                             "switching_latent_dynamic_slope",
                              "switching_latent_memory",
                              "switching_active_latent_memory",
                              "switching_regime_relative_latent_memory"):
@@ -1205,6 +1209,7 @@ class HeteroMixHopCMGM(nn.Module):
         if variant in (
             "switching_latent_transformer",
             "switching_latent_balanced_readout",
+            "switching_latent_dynamic_slope",
             "switching_latent_memory",
             "switching_active_latent_memory",
             "switching_regime_relative_latent_memory",
@@ -1243,6 +1248,9 @@ class HeteroMixHopCMGM(nn.Module):
                 ),
                 use_regime_relative_memory=(
                     variant == "switching_regime_relative_latent_memory"
+                ),
+                use_dynamic_slope=(
+                    variant == "switching_latent_dynamic_slope"
                 ),
             )
 
@@ -2325,6 +2333,7 @@ class HeteroMixHopCMGM(nn.Module):
         zero_latent_memory: bool = False,
         zero_regime_memory_bias: bool = False,
         forced_rpe_probabilities: torch.Tensor = None,
+        slope_scale: float = 1.0,
     ) -> torch.Tensor:
         """D0 temporal replacement with the unchanged spatial/fusion/head path."""
         h_spatial = self._temp_weighted_spatial(x)
@@ -2335,6 +2344,7 @@ class HeteroMixHopCMGM(nn.Module):
             zero_latent_memory=zero_latent_memory,
             zero_regime_memory_bias=zero_regime_memory_bias,
             forced_rpe_probabilities=forced_rpe_probabilities,
+            slope_scale=slope_scale,
         )
         pred = self._market_token_predict(h_spatial, h_temporal)
         if debug:
@@ -2569,6 +2579,7 @@ class HeteroMixHopCMGM(nn.Module):
         if self.variant in (
             "switching_latent_transformer",
             "switching_latent_balanced_readout",
+            "switching_latent_dynamic_slope",
             "switching_latent_memory",
             "switching_active_latent_memory",
             "switching_regime_relative_latent_memory",
@@ -2692,6 +2703,7 @@ class HeteroMixHopCMGM(nn.Module):
             "switching_filter_rpe",
             "switching_latent_transformer",
             "switching_latent_balanced_readout",
+            "switching_latent_dynamic_slope",
             "switching_latent_memory",
             "switching_active_latent_memory",
             "switching_regime_relative_latent_memory",
@@ -2704,6 +2716,7 @@ class HeteroMixHopCMGM(nn.Module):
                     if self.variant in (
                         "switching_latent_transformer",
                         "switching_latent_balanced_readout",
+                        "switching_latent_dynamic_slope",
                         "switching_latent_memory",
                         "switching_active_latent_memory",
                         "switching_regime_relative_latent_memory",

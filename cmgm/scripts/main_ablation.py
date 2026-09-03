@@ -49,6 +49,7 @@ VARIANTS = [
     ("S2F-SwitchingFilterRPE", "switching_filter_rpe"),
     ("D0-SwitchingLatentTransformer", "switching_latent_transformer"),
     ("D0B-BalancedLatentReadout", "switching_latent_balanced_readout"),
+    ("D0C-DynamicSlopeTransition", "switching_latent_dynamic_slope"),
     ("D1A-LatentMemory", "switching_latent_memory"),
     ("D1A2-ActiveLatentMemory", "switching_active_latent_memory"),
     ("D1-RegimeRelativeLatentMemory", "switching_regime_relative_latent_memory"),
@@ -66,7 +67,7 @@ VARIANTS = [
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
-            "HeteroMixHop A/B/C/S0/S0D/S1/S1C/S2F/D0/D0B/D1A/D1A2/D1 "
+            "HeteroMixHop A/B/C/S0/S0D/S1/S1C/S2F/D0/D0B/D0C/D1A/D1A2/D1 "
             "and retained F/F2/G/H/I/J/K/L ablations"
         )
     )
@@ -80,7 +81,7 @@ def parse_args():
         "--variants",
         help=(
             "Comma-separated display or internal names; defaults to "
-            "A/B/C/S0/S0D/S1/S1C/S2F/D0/D0B/D1A/D1A2/D1/F/F2/G/H/I/J/K/L"
+            "A/B/C/S0/S0D/S1/S1C/S2F/D0/D0B/D0C/D1A/D1A2/D1/F/F2/G/H/I/J/K/L"
         ),
     )
     return parser.parse_args()
@@ -1241,13 +1242,15 @@ def _switching_latent_diagnostics(model, loaders, device):
     branch = model.switching_latent_transformer
     balanced = branch.balanced_readout
     latent_memory = branch.use_latent_memory
+    dynamic_slope = branch.use_dynamic_slope
     active_memory = latent_memory and not branch.zero_init_memory_projection
     label = (
-        "D1" if branch.use_regime_relative_memory
+        "D0C" if dynamic_slope
+        else ("D1" if branch.use_regime_relative_memory
         else (
             "D1A2" if active_memory
             else ("D1A" if latent_memory else ("D0B" if balanced else "D0"))
-        )
+        ))
     )
     rpe_label = f"{label} LongMemory" if latent_memory else label
     filtering = branch.regime_filter
@@ -1270,6 +1273,11 @@ def _switching_latent_diagnostics(model, loaders, device):
             "memory_injection"
         )
     }
+    slope_parts = {
+        name: [] for name in (
+            "delta_h", "contributions", "base", "weighted"
+        )
+    }
     dispersion_last = {
         name: [] for name in branch.market_encoder.MARKET_NAMES
     }
@@ -1279,6 +1287,8 @@ def _switching_latent_diagnostics(model, loaders, device):
         for split_name, loader in loaders.items():
             p_batches = []
             prior_batches = []
+            split_slope_batches = []
+            split_h_batches = []
             for batch in loader:
                 x_batch = batch[0].to(device)
                 branch(x_batch)
@@ -1286,6 +1296,13 @@ def _switching_latent_diagnostics(model, loaders, device):
                 prior_batch = branch.last_regime_priors.cpu()
                 p_batches.append(p_batch)
                 prior_batches.append(prior_batch)
+                if dynamic_slope:
+                    split_slope_batches.append(
+                        branch.last_long_memory_slopes[:, 1:].cpu()
+                    )
+                    split_h_batches.append(
+                        branch.last_long_memory[:, 1:].cpu()
+                    )
                 if split_name == "test":
                     test_parts["E"].append(branch.last_market_tokens.cpu())
                     test_parts["H"].append(branch.last_long_memory.cpu())
@@ -1342,6 +1359,19 @@ def _switching_latent_diagnostics(model, loaders, device):
                         memory_parts["memory_injection"].append(
                             branch.last_generator_memory_injections.cpu()
                         )
+                    if dynamic_slope:
+                        slope_parts["delta_h"].append(
+                            branch.last_long_memory_slopes.cpu()
+                        )
+                        slope_parts["contributions"].append(
+                            branch.last_slope_contributions.cpu()
+                        )
+                        slope_parts["base"].append(
+                            branch.last_generator_base_preactivations.cpu()
+                        )
+                        slope_parts["weighted"].append(
+                            branch.last_regime_weighted_slope.cpu()
+                        )
                     test_parts["base_bias"].append(
                         memory.last_base_relative_bias.cpu()
                     )
@@ -1382,6 +1412,28 @@ def _switching_latent_diagnostics(model, loaders, device):
                 f"{prior_entropy.mean().item():.6f} mean max p="
                 f"{priors.max(dim=-1).values.mean().item():.6f}"
             )
+            if dynamic_slope:
+                split_slopes = torch.cat(split_slope_batches)
+                split_h = torch.cat(split_h_batches)
+                slope_norms = split_slopes.norm(dim=-1).reshape(-1)
+                relative = (
+                    split_slopes.norm(dim=-1)
+                    / (split_h.norm(dim=-1) + eps)
+                ).reshape(-1)
+                print(
+                    f"  [D0C {split_name.upper()} raw slope norm] mean/std/median/p90/max="
+                    f"{slope_norms.mean().item():.6f}/"
+                    f"{slope_norms.std(unbiased=False).item():.6f}/"
+                    f"{slope_norms.median().item():.6f}/"
+                    f"{torch.quantile(slope_norms, 0.9).item():.6f}/"
+                    f"{slope_norms.max().item():.6f}"
+                )
+                print(
+                    f"  [D0C {split_name.upper()} slope/H] mean/median/p90="
+                    f"{relative.mean().item():.6e}/"
+                    f"{relative.median().item():.6e}/"
+                    f"{torch.quantile(relative, 0.9).item():.6e}"
+                )
 
     parts = {name: torch.cat(values) for name, values in test_parts.items()}
     balanced_values = (
@@ -1391,6 +1443,10 @@ def _switching_latent_diagnostics(model, loaders, device):
     memory_values = (
         {name: torch.cat(values) for name, values in memory_parts.items()}
         if latent_memory else {}
+    )
+    slope_values = (
+        {name: torch.cat(values) for name, values in slope_parts.items()}
+        if dynamic_slope else {}
     )
     p = parts["p"]
     prior = parts["prior"]
@@ -1523,6 +1579,80 @@ def _switching_latent_diagnostics(model, loaders, device):
         f"{weighted_contributions.numpy().round(6)}"
     )
 
+    slope_base_ratio_mean = float("nan")
+    mean_slope_pairwise_l1 = float("nan")
+    if dynamic_slope:
+        delta_h = slope_values["delta_h"]
+        slope_contributions_tensor = slope_values["contributions"]
+        slope_base = slope_values["base"]
+        weighted_slope = slope_values["weighted"]
+        valid_delta = delta_h[:, 1:]
+        h_values = parts["H"]
+        h_cosine = F.cosine_similarity(
+            h_values[:, 1:], h_values[:, :-1], dim=-1, eps=eps
+        )
+        delta_cosine = F.cosine_similarity(
+            delta_h[:, 2:], delta_h[:, 1:-1], dim=-1, eps=eps
+        )
+        print(
+            f"  [D0C dynamic slope] mean ||delta_H||="
+            f"{valid_delta.norm(dim=-1).mean().item():.6f} "
+            f"mean cosine(H_t,H_(t-1))={h_cosine.mean().item():.6f} "
+            f"mean cosine(delta_H_t,delta_H_(t-1))="
+            f"{delta_cosine.mean().item():.6f}"
+        )
+        slope_ratios = []
+        for state in range(branch.K):
+            state_slope_norm = slope_contributions_tensor[:, 1:, state].norm(
+                dim=-1
+            )
+            state_base_norm = slope_base[:, 1:, state].norm(dim=-1)
+            ratio = state_slope_norm.mean() / (state_base_norm.mean() + eps)
+            slope_ratios.append(ratio.item())
+            print(
+                f"  [D0C slope state {state}] output norm mean/std/max="
+                f"{state_slope_norm.mean().item():.6f}/"
+                f"{state_slope_norm.std(unbiased=False).item():.6f}/"
+                f"{state_slope_norm.max().item():.6f} slope/base={ratio.item():.6e}"
+            )
+        slope_base_ratio_mean = float(np.mean(slope_ratios))
+        slope_pairwise_l1 = []
+        for left, right in ((0, 1), (0, 2), (1, 2)):
+            left_values = slope_contributions_tensor[:, 1:, left]
+            right_values = slope_contributions_tensor[:, 1:, right]
+            pair_l1 = (left_values - right_values).abs().mean()
+            pair_cosine = F.cosine_similarity(
+                left_values, right_values, dim=-1, eps=eps
+            ).mean()
+            slope_pairwise_l1.append(pair_l1.item())
+            print(
+                f"  [D0C slope pair {left}/{right}] mean L1="
+                f"{pair_l1.item():.6f} cosine={pair_cosine.item():.6f}"
+            )
+        mean_slope_pairwise_l1 = float(np.mean(slope_pairwise_l1))
+        weighted_slope_norm = weighted_slope[:, 1:].norm(dim=-1)
+        print(
+            "  [D0C regime-weighted slope contribution] norm mean/std="
+            f"{weighted_slope_norm.mean().item():.6f}/"
+            f"{weighted_slope_norm.std(unbiased=False).item():.6f}"
+        )
+        initial_slope = getattr(branch, "_initial_slope_parameters", {})
+        for state, projection in enumerate(branch.slope_projections):
+            initial_weight = initial_slope.get(f"slope_projections.{state}.weight")
+            initial_norm = (
+                initial_weight.norm().item()
+                if initial_weight is not None else float("nan")
+            )
+            drift = (
+                (projection.weight.detach().cpu() - initial_weight).norm().item()
+                if initial_weight is not None else float("nan")
+            )
+            print(
+                f"  [D0C slope projection {state}] initial norm="
+                f"{initial_norm:.6e} best norm="
+                f"{projection.weight.detach().norm().item():.6e} drift={drift:.6e}"
+            )
+
     E_norm = parts["E"].norm(dim=-1).mean()
     H_norm = parts["H"].norm(dim=-1).mean()
     H_last_norm = parts["H"][:, -1].norm(dim=-1).mean()
@@ -1558,7 +1688,7 @@ def _switching_latent_diagnostics(model, loaders, device):
             dim=-1
         ).mean()
         print(
-            f"  [D0B post-balance scale] ||h_long||={h_long_norm.item():.6f} "
+            f"  [{label} post-balance scale] ||h_long||={h_long_norm.item():.6f} "
             f"||h_micro||={h_micro_norm.item():.6f} "
             f"micro/long={post_balance_ratio:.6f} "
             f"balanced concat={balanced_concat_norm.item():.6f} "
@@ -1944,6 +2074,15 @@ def _switching_latent_diagnostics(model, loaders, device):
                 f"{memory_expected_lag[low_indices, -1].mean().item():.6f}"
                 if latent_memory else ""
             )
+            + (
+                f" high/low ||delta_H_T||="
+                f"{slope_values['delta_h'][:, -1].norm(dim=-1)[high_indices].mean().item():.6f}/"
+                f"{slope_values['delta_h'][:, -1].norm(dim=-1)[low_indices].mean().item():.6f} "
+                f"high/low ||weighted slope_T||="
+                f"{slope_values['weighted'][:, -1].norm(dim=-1)[high_indices].mean().item():.6f}/"
+                f"{slope_values['weighted'][:, -1].norm(dim=-1)[low_indices].mean().item():.6f}"
+                if dynamic_slope else ""
+            )
         )
 
     x_batch, y_batch = next(iter(loaders["test"]))[:2]
@@ -1988,6 +2127,11 @@ def _switching_latent_diagnostics(model, loaders, device):
             gradient_groups["Regime latent-memory RPE"] = [
                 branch.regime_relative_lag_bias
             ]
+    if dynamic_slope:
+        for state, projection in enumerate(branch.slope_projections):
+            gradient_groups[f"slope_projection_{state}"] = list(
+                projection.parameters()
+            )
     gradient_groups["state readout"] = list(branch.state_readout.parameters())
     flat_parameters = [
         parameter for values in gradient_groups.values() for parameter in values
@@ -2006,6 +2150,17 @@ def _switching_latent_diagnostics(model, loaders, device):
     generator_gradient_mean = float(np.mean([
         prediction_gradient_norms[name] for name in ("G0", "G1", "G2")
     ]))
+    if dynamic_slope:
+        slope_gradient_mean = float(np.mean([
+            prediction_gradient_norms[f"slope_projection_{state}"]
+            for state in range(branch.K)
+        ]))
+        print(
+            "  [D0C prediction-only grad ratio] slope/generator="
+            f"{slope_gradient_mean / (generator_gradient_mean + eps):.6e} "
+            f"slope/LongMemory="
+            f"{slope_gradient_mean / (prediction_gradient_norms['LongMemory Transformer'] + eps):.6e}"
+        )
     if branch.use_regime_relative_memory:
         qk_gradient = float(np.mean([
             prediction_gradient_norms["LatentMemory q_proj"],
@@ -2027,7 +2182,7 @@ def _switching_latent_diagnostics(model, loaders, device):
     )
     if balanced:
         print(
-            "  [D0B prediction-only grad ratio] "
+            f"  [{label} prediction-only grad ratio] "
             "microReadout/longReadout="
             f"{prediction_gradient_norms['micro_state_readout'] / (prediction_gradient_norms['long_memory_readout'] + eps):.6e}"
         )
@@ -2042,6 +2197,17 @@ def _switching_latent_diagnostics(model, loaders, device):
     total_generator_gradient_mean = float(np.mean([
         total_gradient_norms[name] for name in ("G0", "G1", "G2")
     ]))
+    if dynamic_slope:
+        total_slope_gradient_mean = float(np.mean([
+            total_gradient_norms[f"slope_projection_{state}"]
+            for state in range(branch.K)
+        ]))
+        print(
+            "  [D0C total-loss grad ratio] slope/generator="
+            f"{total_slope_gradient_mean / (total_generator_gradient_mean + eps):.6e} "
+            f"slope/LongMemory="
+            f"{total_slope_gradient_mean / (total_gradient_norms['LongMemory Transformer'] + eps):.6e}"
+        )
     if branch.use_regime_relative_memory:
         total_qk_gradient = float(np.mean([
             total_gradient_norms["LatentMemory q_proj"],
@@ -2062,7 +2228,7 @@ def _switching_latent_diagnostics(model, loaders, device):
     )
     if balanced:
         print(
-            "  [D0B total-loss grad ratio] microReadout/longReadout="
+            f"  [{label} total-loss grad ratio] microReadout/longReadout="
             f"{total_gradient_norms['micro_state_readout'] / (total_gradient_norms['long_memory_readout'] + eps):.6e}"
         )
     print(f"  [{label} loss] L_return={return_loss.item():.6e}")
@@ -2079,6 +2245,9 @@ def _switching_latent_diagnostics(model, loaders, device):
     forced_prediction_diffs = []
     forced_z_diffs = []
     zero_regime_rpe_prediction_mean_diff = float("nan")
+    zero_slope_prediction_mean_diff = float("nan")
+    flipped_slope_prediction_mean_diff = float("nan")
+    slope_regime_interactions = []
     with torch.no_grad():
         prediction_real = model(x_batch)
         temporal_real = branch.last_h_temporal.clone()
@@ -2268,6 +2437,24 @@ def _switching_latent_diagnostics(model, loaders, device):
                 f"prediction mean/max diff="
                 f"{prediction_diff.mean().item():.3e}/{prediction_diff.max().item():.3e}"
             )
+            if dynamic_slope:
+                prediction_forced_zero_slope = (
+                    model._switching_latent_transformer_forward(
+                        x_batch,
+                        forced_probabilities=forced,
+                        slope_scale=0.0,
+                    )
+                )
+                interaction = (
+                    prediction_forced - prediction_forced_zero_slope
+                ).abs()
+                slope_regime_interactions.append(interaction.mean().item())
+                print(
+                    f"  [D0C slope-regime interaction state {state}] "
+                    f"normalSlope-vs-zeroSlope prediction mean/max diff="
+                    f"{interaction.mean().item():.3e}/"
+                    f"{interaction.max().item():.3e}"
+                )
 
         if branch.use_regime_relative_memory:
             for state in range(branch.K):
@@ -2324,6 +2511,64 @@ def _switching_latent_diagnostics(model, loaders, device):
             zero_regime_rpe_prediction_mean_diff = (
                 prediction_zero_rpe - prediction_real
             ).abs().mean().item()
+
+        if dynamic_slope:
+            prediction_zero_slope = model._switching_latent_transformer_forward(
+                x_batch, slope_scale=0.0
+            )
+            zero_slope_z = branch.last_z_last.clone()
+            zero_slope_micro = branch.last_h_micro.clone()
+            zero_slope_temporal = branch.last_h_temporal.clone()
+            zero_slope_prediction_diff = (
+                prediction_zero_slope - prediction_real
+            ).abs()
+            zero_slope_prediction_mean_diff = (
+                zero_slope_prediction_diff.mean().item()
+            )
+            print(
+                "  [D0C zero-slope trajectory] Z_T mean/max diff="
+                f"{(zero_slope_z-z_real).abs().mean().item():.3e}/"
+                f"{(zero_slope_z-z_real).abs().max().item():.3e} "
+                f"h_micro={(zero_slope_micro-micro_real).abs().mean().item():.3e}/"
+                f"{(zero_slope_micro-micro_real).abs().max().item():.3e} "
+                f"h_temporal={(zero_slope_temporal-temporal_real).abs().mean().item():.3e}/"
+                f"{(zero_slope_temporal-temporal_real).abs().max().item():.3e} "
+                f"prediction={zero_slope_prediction_diff.mean().item():.3e}/"
+                f"{zero_slope_prediction_diff.max().item():.3e}"
+            )
+            prediction_flipped_slope = model._switching_latent_transformer_forward(
+                x_batch, slope_scale=-1.0
+            )
+            flipped_z = branch.last_z_last.clone()
+            flipped_micro = branch.last_h_micro.clone()
+            flipped_temporal = branch.last_h_temporal.clone()
+            flipped_prediction_diff = (
+                prediction_flipped_slope - prediction_real
+            ).abs()
+            flipped_slope_prediction_mean_diff = (
+                flipped_prediction_diff.mean().item()
+            )
+            print(
+                "  [D0C flipped-slope trajectory] Z_T mean/max diff="
+                f"{(flipped_z-z_real).abs().mean().item():.3e}/"
+                f"{(flipped_z-z_real).abs().max().item():.3e} "
+                f"h_micro={(flipped_micro-micro_real).abs().mean().item():.3e}/"
+                f"{(flipped_micro-micro_real).abs().max().item():.3e} "
+                f"h_temporal={(flipped_temporal-temporal_real).abs().mean().item():.3e}/"
+                f"{(flipped_temporal-temporal_real).abs().max().item():.3e} "
+                f"prediction={flipped_prediction_diff.mean().item():.3e}/"
+                f"{flipped_prediction_diff.max().item():.3e}"
+            )
+            for scale in (0.5, 1.5):
+                scaled_prediction = model._switching_latent_transformer_forward(
+                    x_batch, slope_scale=scale
+                )
+                scaled_difference = (scaled_prediction - prediction_real).abs()
+                print(
+                    f"  [D0C slope magnitude {scale:.1f}x] prediction mean/max diff="
+                    f"{scaled_difference.mean().item():.3e}/"
+                    f"{scaled_difference.max().item():.3e}"
+                )
 
         prediction_zero_z = model._switching_latent_transformer_forward(
             x_batch, zero_readout_component="Z"
@@ -2397,6 +2642,10 @@ def _switching_latent_diagnostics(model, loaders, device):
         original_H = branch.last_long_memory.clone()
         original_p = branch.last_regime_probabilities.clone()
         original_Z = branch.last_latent_states.clone()
+        original_delta_h = (
+            branch.last_long_memory_slopes.clone()
+            if dynamic_slope else None
+        )
         original_M = branch.last_latent_memories.clone() if latent_memory else None
         original_memory_bias = (
             branch.last_regime_memory_biases.clone()
@@ -2432,6 +2681,10 @@ def _switching_latent_diagnostics(model, loaders, device):
             f" RPE bias diff={(original_memory_bias[:, :split] - branch.last_regime_memory_biases[:, :split]).abs().max().item():.3e}"
             if branch.use_regime_relative_memory else ""
         )
+        slope_causal_text = (
+            f" delta_H diff={(original_delta_h[:, :split] - branch.last_long_memory_slopes[:, :split]).abs().max().item():.3e}"
+            if dynamic_slope else ""
+        )
         print(
             f"  [{label} causality] E diff through t=10="
             f"{(original_E[:, :split] - branch.last_market_tokens[:, :split]).abs().max().item():.3e} "
@@ -2441,6 +2694,7 @@ def _switching_latent_diagnostics(model, loaders, device):
             f"Z diff={(original_Z[:, :split] - branch.last_latent_states[:, :split]).abs().max().item():.3e}"
             f"{memory_causal_text}"
             f"{regime_bias_causal_text}"
+            f"{slope_causal_text}"
             f"{balanced_causal_text}"
         )
 
@@ -2449,6 +2703,10 @@ def _switching_latent_diagnostics(model, loaders, device):
         H_batch = branch.last_long_memory.clone()
         p_batch = branch.last_regime_probabilities.clone()
         Z_batch = branch.last_latent_states.clone()
+        delta_h_batch = (
+            branch.last_long_memory_slopes.clone()
+            if dynamic_slope else None
+        )
         M_batch = branch.last_latent_memories.clone() if latent_memory else None
         bias_batch = (
             branch.last_regime_memory_biases.clone()
@@ -2472,6 +2730,10 @@ def _switching_latent_diagnostics(model, loaders, device):
                 if branch.use_regime_relative_memory else ""
             )
             + (
+                f"delta_H={(delta_h_batch[:1] - branch.last_long_memory_slopes).abs().max().item():.3e} "
+                if dynamic_slope else ""
+            )
+            + (
                 f"h_long={(h_long_batch[:1] - branch.last_h_long).abs().max().item():.3e} "
                 f"h_micro={(h_micro_batch[:1] - branch.last_h_micro).abs().max().item():.3e} "
                 if balanced else ""
@@ -2484,6 +2746,10 @@ def _switching_latent_diagnostics(model, loaders, device):
         H_reference = branch.last_long_memory.clone()
         p_reference = branch.last_regime_probabilities.clone()
         Z_reference = branch.last_latent_states.clone()
+        delta_h_reference = (
+            branch.last_long_memory_slopes.clone()
+            if dynamic_slope else None
+        )
         M_reference = branch.last_latent_memories.clone() if latent_memory else None
         bias_reference = (
             branch.last_regime_memory_biases.clone()
@@ -2525,6 +2791,10 @@ def _switching_latent_diagnostics(model, loaders, device):
                 + (
                     f"RPE_bias={(bias_reference - branch.last_regime_memory_biases).abs().max().item():.3e} "
                     if branch.use_regime_relative_memory else ""
+                )
+                + (
+                    f"delta_H={(delta_h_reference - branch.last_long_memory_slopes).abs().max().item():.3e} "
+                    if dynamic_slope else ""
                 )
                 + (
                     f"h_long={(h_long_reference - branch.last_h_long).abs().max().item():.3e} "
@@ -2571,6 +2841,16 @@ def _switching_latent_diagnostics(model, loaders, device):
         "regime_bias_abs_mean": regime_bias_abs_mean,
         "zero_regime_rpe_prediction_mean_diff": (
             zero_regime_rpe_prediction_mean_diff
+        ),
+        "slope_base_ratio_mean": slope_base_ratio_mean,
+        "mean_slope_pairwise_l1": mean_slope_pairwise_l1,
+        "zero_slope_prediction_mean_diff": zero_slope_prediction_mean_diff,
+        "flipped_slope_prediction_mean_diff": (
+            flipped_slope_prediction_mean_diff
+        ),
+        "slope_regime_interaction_std": (
+            float(np.std(slope_regime_interactions))
+            if slope_regime_interactions else float("nan")
         ),
     }
 
@@ -3009,6 +3289,7 @@ def print_diagnostics(model, variant, loaders, device):
     elif variant in (
         "switching_latent_transformer",
         "switching_latent_balanced_readout",
+        "switching_latent_dynamic_slope",
         "switching_latent_memory",
         "switching_active_latent_memory",
         "switching_regime_relative_latent_memory",
@@ -3266,6 +3547,7 @@ def run_variant(name, variant, args, device, data):
         print("  [S1/S1C forward RNG sanity] H_reg/p/r_real PASS")
     if variant in (
         "switching_latent_balanced_readout",
+        "switching_latent_dynamic_slope",
         "switching_latent_memory",
         "switching_active_latent_memory",
         "switching_regime_relative_latent_memory",
@@ -3273,7 +3555,9 @@ def run_variant(name, variant, args, device, data):
         with torch.random.fork_rng():
             torch.manual_seed(args.seed)
             reference_variant = (
-                "switching_active_latent_memory"
+                "switching_latent_balanced_readout"
+                if variant == "switching_latent_dynamic_slope"
+                else ("switching_active_latent_memory"
                 if variant == "switching_regime_relative_latent_memory"
                 else (
                     "switching_latent_memory"
@@ -3283,7 +3567,7 @@ def run_variant(name, variant, args, device, data):
                         if variant == "switching_latent_memory"
                         else "switching_latent_transformer"
                     )
-                )
+                ))
             )
             d0_reference = HeteroMixHopCMGM(
                 data["n_nodes"], data["n_commodities"],
@@ -3294,6 +3578,7 @@ def run_variant(name, variant, args, device, data):
                 "latent_transition",
             ]
             if variant in (
+                "switching_latent_dynamic_slope",
                 "switching_latent_memory",
                 "switching_active_latent_memory",
                 "switching_regime_relative_latent_memory",
@@ -3321,6 +3606,51 @@ def run_variant(name, variant, args, device, data):
                         balanced_state[parameter_name],
                         rtol=0.0, atol=0.0,
                     )
+            if variant == "switching_latent_dynamic_slope":
+                reference_state = d0_reference.state_dict()
+                dynamic_state = model.state_dict()
+                shared_keys = [
+                    key for key in dynamic_state
+                    if "slope_projections." not in key
+                ]
+                assert set(shared_keys) == set(reference_state)
+                for parameter_name in shared_keys:
+                    torch.testing.assert_close(
+                        reference_state[parameter_name],
+                        dynamic_state[parameter_name],
+                        rtol=0.0, atol=0.0,
+                    )
+                sanity_x = torch.randn(
+                    2, args.seq_len, data["n_nodes"], FEATURE_DIM
+                )
+                d0_reference.eval()
+                model.eval()
+                with torch.no_grad():
+                    reference_prediction = d0_reference(sanity_x)
+                    zero_slope_prediction = (
+                        model._switching_latent_transformer_forward(
+                            sanity_x, slope_scale=0.0
+                        )
+                    )
+                reference_branch = d0_reference.switching_latent_transformer
+                dynamic_branch = model.switching_latent_transformer
+                for attribute in (
+                    "last_latent_candidates", "last_latent_states",
+                    "last_h_temporal",
+                ):
+                    torch.testing.assert_close(
+                        getattr(reference_branch, attribute),
+                        getattr(dynamic_branch, attribute),
+                        rtol=0.0, atol=1e-7,
+                    )
+                torch.testing.assert_close(
+                    reference_prediction, zero_slope_prediction,
+                    rtol=0.0, atol=1e-7,
+                )
+                print(
+                    "  [D0C zero-slope initialization equivalence] "
+                    "candidates/Z/h_temporal/prediction PASS"
+                )
             if variant in (
                 "switching_latent_memory",
                 "switching_active_latent_memory",
@@ -3454,11 +3784,12 @@ def run_variant(name, variant, args, device, data):
                     f"{permutation_diff:.3e} PASS"
                 )
         comparison = (
-            "D1A2/D1" if variant == "switching_regime_relative_latent_memory"
+            "D0B/D0C" if variant == "switching_latent_dynamic_slope"
+            else ("D1A2/D1" if variant == "switching_regime_relative_latent_memory"
             else (
                 "D1A/D1A2" if variant == "switching_active_latent_memory"
                 else ("D0B/D1A" if variant == "switching_latent_memory" else "D0/D0B")
-            )
+            ))
         )
         print(f"  [{comparison} shared initialization] PASS")
 
@@ -3475,6 +3806,7 @@ def run_variant(name, variant, args, device, data):
     if variant in (
         "switching_latent_transformer",
         "switching_latent_balanced_readout",
+        "switching_latent_dynamic_slope",
         "switching_latent_memory",
         "switching_active_latent_memory",
         "switching_regime_relative_latent_memory",
@@ -3483,6 +3815,13 @@ def run_variant(name, variant, args, device, data):
             model.switching_latent_transformer.regime_filter.transition_logits
             .detach().cpu().clone()
         )
+        if variant == "switching_latent_dynamic_slope":
+            branch = model.switching_latent_transformer
+            branch._initial_slope_parameters = {
+                name: parameter.detach().cpu().clone()
+                for name, parameter in branch.named_parameters()
+                if name.startswith("slope_projections.")
+            }
         if variant in (
             "switching_latent_memory",
             "switching_active_latent_memory",
@@ -3601,6 +3940,7 @@ def run_variant(name, variant, args, device, data):
     elif variant in (
         "switching_latent_transformer",
         "switching_latent_balanced_readout",
+        "switching_latent_dynamic_slope",
         "switching_latent_memory",
         "switching_active_latent_memory",
         "switching_regime_relative_latent_memory",
@@ -3701,13 +4041,25 @@ def run_variant(name, variant, args, device, data):
                         f"regime-relative latent-memory RPE={regime_rpe_params:,}"
                     )
             else:
-                d0_total_params = (
-                    parameter_count - d0b_readout_params + d0_readout_params
-                )
-                print(
-                    f"  D0 params={d0_total_params:,}; D0B params={parameter_count:,}; "
-                    f"difference={parameter_count - d0_total_params:+,}"
-                )
+                if branch.use_dynamic_slope:
+                    slope_projection_params = [
+                        sum(parameter.numel() for parameter in projection.parameters())
+                        for projection in branch.slope_projections
+                    ]
+                    slope_params = sum(slope_projection_params)
+                    print(
+                        f"  D0B params={parameter_count - slope_params:,}; "
+                        f"D0C params={parameter_count:,}; difference={slope_params:+,}; "
+                        f"slope_projection_0/1/2={slope_projection_params}"
+                    )
+                else:
+                    d0_total_params = (
+                        parameter_count - d0b_readout_params + d0_readout_params
+                    )
+                    print(
+                        f"  D0 params={d0_total_params:,}; D0B params={parameter_count:,}; "
+                        f"difference={parameter_count - d0_total_params:+,}"
+                    )
             print(
                 f"  D0B readout params: long projection={long_readout_params:,}; "
                 f"micro projection={micro_readout_params:,}; "
@@ -3722,7 +4074,7 @@ def run_variant(name, variant, args, device, data):
                 f"D0-S0D increase={parameter_count - s0d_total_params:+,}"
             )
         print(
-            f"  {('D1' if branch.use_regime_relative_memory else ('D1A' if branch.zero_init_memory_projection else 'D1A2')) if branch.use_latent_memory else ('D0B' if branch.balanced_readout else 'D0')} temporal params: "
+            f"  {('D1' if branch.use_regime_relative_memory else ('D1A' if branch.zero_init_memory_projection else 'D1A2')) if branch.use_latent_memory else ('D0C' if branch.use_dynamic_slope else ('D0B' if branch.balanced_readout else 'D0'))} temporal params: "
             f"Market Encoder={market_encoder_params:,}; "
             f"LongMemory Transformer={long_memory_without_rpe:,}; "
             f"Base RPE={base_rpe_params:,}; regime evidence="
@@ -4081,6 +4433,64 @@ def _print_d0b_conclusion(results):
     print(f"\nD0B mechanism conclusion: [{case}] {conclusion}")
 
 
+def _print_d0c_conclusion(results):
+    result = next(
+        (
+            item for item in results
+            if item["variant"] == "D0C-DynamicSlopeTransition"
+        ),
+        None,
+    )
+    if result is None or not result.get("diagnostics"):
+        return
+    diagnostics = result["diagnostics"]
+    gradients = diagnostics["prediction_gradient_norms"]
+    slope_gradient = float(np.mean([
+        gradients[f"slope_projection_{state}"] for state in range(3)
+    ]))
+    slope_active = (
+        slope_gradient > 1e-12
+        and diagnostics["slope_base_ratio_mean"] > 1e-6
+        and diagnostics["zero_slope_prediction_mean_diff"] > 1e-8
+    )
+    regime_specific = (
+        diagnostics["mean_slope_pairwise_l1"] > 1e-6
+        and diagnostics["slope_regime_interaction_std"] > 1e-8
+    )
+    improves = result["MAE"] < 0.021995
+    near_d0b = abs(result["MAE"] - 0.021995) <= 0.021995 * 0.01
+
+    if slope_active and regime_specific and improves:
+        case = "Case A"
+        conclusion = (
+            "The active, regime-specific latent velocity path improves over D0B."
+        )
+    elif slope_active and near_d0b:
+        case = "Case B"
+        conclusion = (
+            "Slope changes the latent dynamics but adds limited incremental "
+            "forecast information."
+        )
+    elif slope_active and not improves:
+        case = "Case C"
+        conclusion = (
+            "Explicit latent velocity is active but worsens accuracy, consistent "
+            "with redundant or noisy information already represented in H_t."
+        )
+    elif not slope_active and improves:
+        case = "Case E"
+        conclusion = (
+            "Accuracy improves while the slope mechanism is inactive; do not "
+            "attribute the gain to DynamicSlopeTransition."
+        )
+    else:
+        case = "Case D"
+        conclusion = (
+            "The model effectively ignores explicit local long-memory velocity."
+        )
+    print(f"\nD0C mechanism conclusion: [{case}] {conclusion}")
+
+
 def _print_d1a_conclusion(results):
     result = next(
         (item for item in results if item["variant"] == "D1A-LatentMemory"),
@@ -4282,6 +4692,7 @@ def main():
     _print_s2f_conclusion(results)
     _print_d0_conclusion(results)
     _print_d0b_conclusion(results)
+    _print_d0c_conclusion(results)
     _print_d1a_conclusion(results)
     _print_d1a2_conclusion(results)
     _print_d1_conclusion(results)
