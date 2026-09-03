@@ -707,6 +707,7 @@ class HeteroMixHopCMGM(nn.Module):
             "switching_null_control",
             "switching_filter_rpe",
             "switching_latent_transformer",
+            "switching_latent_balanced_readout",
         }
         if variant not in supported_variants:
             supported = ", ".join(sorted(supported_variants))
@@ -757,7 +758,8 @@ class HeteroMixHopCMGM(nn.Module):
                                                "switching_transformer",
                                                "switching_null_control",
                                                "switching_filter_rpe",
-                                               "switching_latent_transformer")
+                                               "switching_latent_transformer",
+                                               "switching_latent_balanced_readout")
         self.use_edge_attn   = variant in ("edge_attn", "edge_attn_static", "temporal_attn",
                                            "diff_input", "hybrid_attn", "node_level",
                                            "comm_nodes", "batch_graph", "factor_res",
@@ -780,7 +782,8 @@ class HeteroMixHopCMGM(nn.Module):
                                            "switching_transformer",
                                            "switching_null_control",
                                            "switching_filter_rpe",
-                                           "switching_latent_transformer")
+                                           "switching_latent_transformer",
+                                           "switching_latent_balanced_readout")
         self.use_gate        = variant not in ("no_gate", "gcn_only", "lstm_only")
 
         # ── Multi-horizon output ──
@@ -1015,7 +1018,8 @@ class HeteroMixHopCMGM(nn.Module):
                              "adapter_orthogonal", "market_token_transformer",
                              "market_dispersion_transformer", "switching_transformer",
                              "switching_null_control", "switching_filter_rpe",
-                             "switching_latent_transformer"):
+                             "switching_latent_transformer",
+                             "switching_latent_balanced_readout"):
                 pass  # temporal branch is the transformer (no global LSTM)
             else:
                 # diff_input: concat first-order differences → 2× input size
@@ -1186,7 +1190,10 @@ class HeteroMixHopCMGM(nn.Module):
                 warmup_epochs=20,
             )
 
-        if variant == "switching_latent_transformer":
+        if variant in (
+            "switching_latent_transformer",
+            "switching_latent_balanced_readout",
+        ):
             self.temporal_score = nn.Linear(LSTM_HIDDEN_DIM, 1)
             self.switching_latent_transformer = SwitchingLatentTransformerBranch(
                 feat_dim=feat_dim,
@@ -1207,6 +1214,9 @@ class HeteroMixHopCMGM(nn.Module):
                 beta_max=5e-4,
                 warmup_epochs=20,
                 output_dim=LSTM_HIDDEN_DIM,
+                balanced_readout=(
+                    variant == "switching_latent_balanced_readout"
+                ),
             )
 
         # RegimeDynamicRPETransformer (F): modular regime → dynamics →
@@ -2523,7 +2533,10 @@ class HeteroMixHopCMGM(nn.Module):
             return self._switching_transformer_forward(x, debug)
         if self.variant == "switching_filter_rpe":
             return self._switching_filter_rpe_forward(x, debug)
-        if self.variant == "switching_latent_transformer":
+        if self.variant in (
+            "switching_latent_transformer",
+            "switching_latent_balanced_readout",
+        ):
             return self._switching_latent_transformer_forward(x, debug)
         if self.variant in ("regime_dynamic_transformer", "regime_dynamic_semantic",
                             "semantic_router", "loss_rebalance", "routing_strength",
@@ -2642,13 +2655,17 @@ class HeteroMixHopCMGM(nn.Module):
             "switching_null_control",
             "switching_filter_rpe",
             "switching_latent_transformer",
+            "switching_latent_balanced_readout",
         ):
             self.eval()
             with torch.no_grad():
                 h_spatial = self._temp_weighted_spatial(x)
                 temporal_branch = (
                     self.switching_latent_transformer
-                    if self.variant == "switching_latent_transformer"
+                    if self.variant in (
+                        "switching_latent_transformer",
+                        "switching_latent_balanced_readout",
+                    )
                     else (
                         self.switching_filter_rpe
                         if self.variant == "switching_filter_rpe"

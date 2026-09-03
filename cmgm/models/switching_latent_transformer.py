@@ -243,10 +243,12 @@ class SwitchingLatentTransformerBranch(nn.Module):
                  K: int = 3, z_dim: int = 64,
                  sticky_alpha: float = 0.5, tau: float = 1.0,
                  beta_max: float = 5e-4, warmup_epochs: int = 20,
-                 output_dim: int = 64):
+                 output_dim: int = 64,
+                 balanced_readout: bool = False):
         super().__init__()
         self.K = int(K)
         self.z_dim = int(z_dim)
+        self.balanced_readout = bool(balanced_readout)
         self.market_encoder = MarketAwareTemporalEncoder(
             feat_dim=feat_dim,
             n_stock=n_stock,
@@ -278,7 +280,16 @@ class SwitchingLatentTransformerBranch(nn.Module):
             hidden_dim=128,
             K=self.K,
         )
-        self.state_readout = nn.Linear(d_model + self.z_dim, output_dim)
+        if self.balanced_readout:
+            # D0B changes only the final H_T/Z_T readout.  The latent
+            # trajectories above remain byte-for-byte shared with D0.
+            self.long_memory_readout = nn.Linear(d_model, output_dim)
+            self.micro_state_readout = nn.Linear(self.z_dim, output_dim)
+            self.long_memory_norm = nn.LayerNorm(output_dim)
+            self.micro_state_norm = nn.LayerNorm(output_dim)
+            self.state_readout = nn.Linear(2 * output_dim, output_dim)
+        else:
+            self.state_readout = nn.Linear(d_model + self.z_dim, output_dim)
 
     def encode_market_tokens(self, x: torch.Tensor) -> torch.Tensor:
         return self.market_encoder(x)
@@ -364,13 +375,35 @@ class SwitchingLatentTransformerBranch(nn.Module):
                 zero_component: str = None) -> torch.Tensor:
         if zero_component not in (None, "H", "Z"):
             raise ValueError("zero_component must be None, 'H', or 'Z'")
-        h_effective = (
-            torch.zeros_like(h_last) if zero_component == "H" else h_last
-        )
-        z_effective = (
-            torch.zeros_like(z_last) if zero_component == "Z" else z_last
-        )
-        readout_input = torch.cat([h_effective, z_effective], dim=-1)
+        if self.balanced_readout:
+            h_long = self.long_memory_norm(
+                self.long_memory_readout(h_last)
+            )
+            h_micro = self.micro_state_norm(
+                self.micro_state_readout(z_last)
+            )
+            # D0B null interventions are deliberately post-normalization:
+            # zeroing raw inputs would leave projection/LN bias effects.
+            h_effective = (
+                torch.zeros_like(h_long) if zero_component == "H" else h_long
+            )
+            z_effective = (
+                torch.zeros_like(h_micro) if zero_component == "Z" else h_micro
+            )
+            readout_input = torch.cat([h_effective, z_effective], dim=-1)
+            self.last_h_long = h_long.detach()
+            self.last_h_micro = h_micro.detach()
+            self.last_h_long_effective = h_effective.detach()
+            self.last_h_micro_effective = z_effective.detach()
+            self.last_balanced_concat = readout_input.detach()
+        else:
+            h_effective = (
+                torch.zeros_like(h_last) if zero_component == "H" else h_last
+            )
+            z_effective = (
+                torch.zeros_like(z_last) if zero_component == "Z" else z_last
+            )
+            readout_input = torch.cat([h_effective, z_effective], dim=-1)
         output = self.state_readout(readout_input)
         self.last_readout_input = readout_input.detach()
         self.last_h_temporal = output.detach()

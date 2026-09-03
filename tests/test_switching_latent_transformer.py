@@ -11,7 +11,7 @@ from cmgm.models.switching_latent_transformer import (
 from cmgm.training.train import make_loss, train_epoch
 
 
-def _d0_branch(dropout=0.0, max_len=12):
+def _d0_branch(dropout=0.0, max_len=12, balanced_readout=False):
     return SwitchingLatentTransformerBranch(
         feat_dim=5,
         n_stock=4,
@@ -27,6 +27,7 @@ def _d0_branch(dropout=0.0, max_len=12):
         K=3,
         z_dim=8,
         output_dim=8,
+        balanced_readout=balanced_readout,
     )
 
 
@@ -92,7 +93,14 @@ def test_d0_branch_recursion_shapes_and_only_base_rpe():
     assert branch.last_latent_states.shape == (2, 7, 8)
     assert branch.last_latent_candidates.shape == (2, 7, 3, 8)
     assert branch.last_readout_input.shape == (2, 24)
+    torch.testing.assert_close(
+        output,
+        branch.state_readout(torch.cat([branch.last_h_last, branch.last_z_last], dim=-1)),
+    )
     assert branch.latent_transition.generators[0][0].in_features == 24
+    assert not branch.balanced_readout
+    assert not hasattr(branch, "long_memory_readout")
+    assert not hasattr(branch, "micro_state_readout")
     assert not hasattr(branch.long_memory, "regime_rpe")
     assert not hasattr(branch, "regime_embeddings")
     assert not hasattr(branch, "pool_score")
@@ -279,3 +287,105 @@ def test_d0_reuses_s0d_market_encoder_initialization():
     assert left.keys() == right.keys()
     for name in left:
         torch.testing.assert_close(left[name], right[name], rtol=0.0, atol=0.0)
+
+
+def test_d0b_balances_only_the_final_readout_and_preserves_shared_initialization():
+    torch.manual_seed(2011)
+    d0 = _d0_branch(max_len=7)
+    torch.manual_seed(2011)
+    d0b = _d0_branch(max_len=7, balanced_readout=True)
+
+    for module_name in (
+        "market_encoder", "long_memory", "regime_filter", "latent_transition"
+    ):
+        d0_state = getattr(d0, module_name).state_dict()
+        d0b_state = getattr(d0b, module_name).state_dict()
+        assert d0_state.keys() == d0b_state.keys()
+        for name in d0_state:
+            torch.testing.assert_close(
+                d0_state[name], d0b_state[name], rtol=0.0, atol=0.0
+            )
+
+    assert not d0.balanced_readout
+    assert d0b.balanced_readout
+    assert d0.state_readout.in_features == 24
+    assert d0b.long_memory_readout.in_features == 16
+    assert d0b.micro_state_readout.in_features == 8
+    assert d0b.state_readout.in_features == 16
+
+
+def test_d0b_post_projection_layer_norm_balances_scales_without_changing_latents():
+    torch.manual_seed(2012)
+    branch = _d0_branch(max_len=7, balanced_readout=True).eval()
+    x = torch.randn(3, 7, 9, 5)
+    output = branch(x)
+
+    assert output.shape == (3, 8)
+    assert branch.last_h_long.shape == (3, 8)
+    assert branch.last_h_micro.shape == (3, 8)
+    assert branch.last_balanced_concat.shape == (3, 16)
+    long_norm = branch.last_h_long.norm(dim=-1).mean()
+    micro_norm = branch.last_h_micro.norm(dim=-1).mean()
+    assert 0.8 < (micro_norm / long_norm).item() < 1.2
+
+    latent_reference = branch.last_latent_states.clone()
+    branch(x, zero_readout_component="Z")
+    torch.testing.assert_close(
+        latent_reference, branch.last_latent_states, rtol=0.0, atol=0.0
+    )
+    assert branch.last_h_micro.abs().sum() > 0
+    assert branch.last_h_micro_effective.abs().sum() == 0
+    branch(x, zero_readout_component="H")
+    torch.testing.assert_close(
+        latent_reference, branch.last_latent_states, rtol=0.0, atol=0.0
+    )
+    assert branch.last_h_long.abs().sum() > 0
+    assert branch.last_h_long_effective.abs().sum() == 0
+
+
+def test_d0b_prediction_gradients_reach_both_balanced_readout_paths():
+    torch.manual_seed(2013)
+    branch = _d0_branch(max_len=7, balanced_readout=True)
+    loss = branch(torch.randn(3, 7, 9, 5)).square().mean()
+    groups = (
+        branch.long_memory_readout,
+        branch.micro_state_readout,
+        branch.long_memory_norm,
+        branch.micro_state_norm,
+        branch.state_readout,
+    )
+    parameters = [parameter for group in groups for parameter in group.parameters()]
+    gradients = torch.autograd.grad(loss, parameters)
+    assert all(gradient.abs().sum() > 0 for gradient in gradients)
+
+
+def test_d0b_full_model_registration_and_parameter_delta():
+    common = dict(
+        num_nodes=6, n_commodities=2, n_stock=2, n_bond=2, feat_dim=5
+    )
+    torch.manual_seed(2014)
+    d0 = HeteroMixHopCMGM(variant="switching_latent_transformer", **common)
+    torch.manual_seed(2014)
+    d0b = HeteroMixHopCMGM(
+        variant="switching_latent_balanced_readout", **common
+    )
+    assert d0b.switching_latent_transformer.balanced_readout
+    assert d0b(torch.randn(2, 7, 6, 5)).shape == (2, d0b.n_horizons, 2)
+    expected_delta = (
+        sum(
+            parameter.numel()
+            for name in (
+                "long_memory_readout", "micro_state_readout",
+                "long_memory_norm", "micro_state_norm", "state_readout",
+            )
+            for parameter in getattr(d0b.switching_latent_transformer, name).parameters()
+        )
+        - sum(
+            parameter.numel()
+            for parameter in d0.switching_latent_transformer.state_readout.parameters()
+        )
+    )
+    assert (
+        sum(parameter.numel() for parameter in d0b.parameters())
+        - sum(parameter.numel() for parameter in d0.parameters())
+    ) == expected_delta

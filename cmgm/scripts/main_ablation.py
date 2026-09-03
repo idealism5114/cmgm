@@ -48,6 +48,7 @@ VARIANTS = [
     ("S1C-NullSwitchControl", "switching_null_control"),
     ("S2F-SwitchingFilterRPE", "switching_filter_rpe"),
     ("D0-SwitchingLatentTransformer", "switching_latent_transformer"),
+    ("D0B-BalancedLatentReadout", "switching_latent_balanced_readout"),
     ("F-RegimeDynamic", "regime_dynamic_transformer"),
     ("F2-RegimeSemantic", "regime_dynamic_semantic"),
     ("G-SemanticRouter", "semantic_router"),
@@ -62,7 +63,7 @@ VARIANTS = [
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
-            "HeteroMixHop A/B/C/S0/S0D/S1/S1C/S2F/D0 and retained F/F2/G/H/I/J/K/L ablations"
+            "HeteroMixHop A/B/C/S0/S0D/S1/S1C/S2F/D0/D0B and retained F/F2/G/H/I/J/K/L ablations"
         )
     )
     parser.add_argument("--epochs", type=int, default=NUM_EPOCHS)
@@ -1232,8 +1233,10 @@ def _switching_filter_rpe_diagnostics(model, loaders, device):
 
 
 def _switching_latent_diagnostics(model, loaders, device):
-    """Mechanism diagnostics for D0 long-memory and switching micro dynamics."""
+    """Mechanism diagnostics for D0/D0B switching latent dynamics."""
     branch = model.switching_latent_transformer
+    balanced = branch.balanced_readout
+    label = "D0B" if balanced else "D0"
     filtering = branch.regime_filter
     memory = branch.long_memory
     eps = filtering.eps
@@ -1243,6 +1246,9 @@ def _switching_latent_diagnostics(model, loaders, device):
             "E", "H", "p", "prior", "evidence", "Z", "candidates",
             "h_temporal", "base_bias", "qk",
         )
+    }
+    balanced_parts = {
+        name: [] for name in ("h_long", "h_micro", "balanced_concat")
     }
     dispersion_last = {
         name: [] for name in branch.market_encoder.MARKET_NAMES
@@ -1275,6 +1281,16 @@ def _switching_latent_diagnostics(model, loaders, device):
                     test_parts["h_temporal"].append(
                         branch.last_h_temporal.cpu()
                     )
+                    if balanced:
+                        balanced_parts["h_long"].append(
+                            branch.last_h_long.cpu()
+                        )
+                        balanced_parts["h_micro"].append(
+                            branch.last_h_micro.cpu()
+                        )
+                        balanced_parts["balanced_concat"].append(
+                            branch.last_balanced_concat.cpu()
+                        )
                     test_parts["base_bias"].append(
                         memory.last_base_relative_bias.cpu()
                     )
@@ -1297,13 +1313,13 @@ def _switching_latent_diagnostics(model, loaders, device):
             margin = margin_values[..., 0] - margin_values[..., 1]
             occupancy = probabilities.argmax(dim=-1)
             print(
-                f"  [D0 {split_name.upper()}] mean p="
+                f"  [{label} {split_name.upper()}] mean p="
                 f"{probabilities.mean(dim=(0, 1)).numpy().round(4)} "
                 f"entropy={entropy.mean().item():.6f} "
                 f"mean max p={probabilities.max(dim=-1).values.mean().item():.6f} "
                 f"margin={margin.mean().item():.6f}"
             )
-            print(f"  [D0 {split_name.upper()}] argmax occupancy")
+            print(f"  [{label} {split_name.upper()}] argmax occupancy")
             for state in range(branch.K):
                 print(
                     f"    state {state} = "
@@ -1311,19 +1327,23 @@ def _switching_latent_diagnostics(model, loaders, device):
                 )
             prior_entropy = -(priors * (priors + eps).log()).sum(dim=-1)
             print(
-                f"  [D0 {split_name.upper()} prior] entropy="
+                f"  [{label} {split_name.upper()} prior] entropy="
                 f"{prior_entropy.mean().item():.6f} mean max p="
                 f"{priors.max(dim=-1).values.mean().item():.6f}"
             )
 
     parts = {name: torch.cat(values) for name, values in test_parts.items()}
+    balanced_values = (
+        {name: torch.cat(values) for name, values in balanced_parts.items()}
+        if balanced else {}
+    )
     p = parts["p"]
     prior = parts["prior"]
     Z = parts["Z"]
     candidates = parts["candidates"]
     probability_error = (p.sum(dim=-1) - 1.0).abs().max()
     print(
-        f"  [D0 probability legality] min p={p.min().item():.6e} "
+        f"  [{label} probability legality] min p={p.min().item():.6e} "
         f"max probability-sum error={probability_error.item():.3e}"
     )
 
@@ -1335,26 +1355,26 @@ def _switching_latent_diagnostics(model, loaders, device):
     posterior_l1 = (p - prior).abs().sum(dim=-1)
     temporal_l1 = (p[:, 1:] - p[:, :-1]).abs().sum(dim=-1)
     print(
-        f"  [D0 prior/posterior] prior entropy={prior_entropy.mean().item():.6f} "
+        f"  [{label} prior/posterior] prior entropy={prior_entropy.mean().item():.6f} "
         f"posterior entropy={posterior_entropy.mean().item():.6f} "
         f"mean KL={posterior_kl.mean().item():.6f} "
         f"mean L1={posterior_l1.mean().item():.6f}"
     )
     print(
-        f"  [D0 regime dynamics] mean ||p_t-p_(t-1)||_1="
+        f"  [{label} regime dynamics] mean ||p_t-p_(t-1)||_1="
         f"{temporal_l1.mean().item():.6f}"
     )
     for step in range(0, min(p.shape[1], 20), 2):
-        print(f"  [D0 p t={step}] {p[:, step].mean(dim=0).numpy().round(4)}")
+        print(f"  [{label} p t={step}] {p[:, step].mean(dim=0).numpy().round(4)}")
 
     transition = branch.transition_matrix().detach().cpu()
     transition_entropy = -(
         transition * (transition + eps).log()
     ).sum(dim=-1)
     diagonal = transition.diagonal()
-    print(f"  [D0 transition matrix]\n{transition.numpy().round(6)}")
+    print(f"  [{label} transition matrix]\n{transition.numpy().round(6)}")
     print(
-        f"  [D0 transition] row sums="
+        f"  [{label} transition] row sums="
         f"{transition.sum(dim=-1).numpy().round(8)} diagonal="
         f"{diagonal.numpy().round(6)} mean persistence={diagonal.mean().item():.6f} "
         f"row entropy={transition_entropy.numpy().round(6)}"
@@ -1366,7 +1386,7 @@ def _switching_latent_diagnostics(model, loaders, device):
             filtering.transition_logits.detach().cpu() - initial_transition
         ).norm().item()
         print(
-            f"  [D0 transition] absolute transition_logits drift="
+            f"  [{label} transition] absolute transition_logits drift="
             f"{transition_drift:.3e}"
         )
 
@@ -1375,7 +1395,7 @@ def _switching_latent_diagnostics(model, loaders, device):
     qk_abs = parts["qk"].abs()[..., causal_entries].mean()
     base_abs = parts["base_bias"].abs()[..., causal_entries].mean()
     print(
-        f"  [D0 Base RPE] norm={memory.base_rpe.detach().norm().item():.6f} "
+        f"  [{label} Base RPE] norm={memory.base_rpe.detach().norm().item():.6f} "
         f"mean |QK/sqrt(d)|={qk_abs.item():.6e} "
         f"mean |base bias|={base_abs.item():.6e} "
         f"base/QK={(base_abs / (qk_abs + eps)).item():.6e}"
@@ -1387,7 +1407,7 @@ def _switching_latent_diagnostics(model, loaders, device):
             continue
         head_values = base_table[:, table_center + lag]
         print(
-            f"  [D0 Base RPE delta=+{lag}] heads="
+            f"  [{label} Base RPE delta=+{lag}] heads="
             f"{head_values.numpy().round(6)} mean={head_values.mean().item():.6f} "
             f"std={head_values.std(unbiased=False).item():.6f}"
         )
@@ -1396,7 +1416,7 @@ def _switching_latent_diagnostics(model, loaders, device):
     for state in range(branch.K):
         norms = candidate_norms[:, :, state]
         print(
-            f"  [D0 candidate state {state}] norm mean="
+            f"  [{label} candidate state {state}] norm mean="
             f"{norms.mean().item():.6f} std={norms.std(unbiased=False).item():.6f} "
             f"max={norms.max().item():.6f}"
         )
@@ -1412,29 +1432,39 @@ def _switching_latent_diagnostics(model, loaders, device):
         pairwise_l1_values.append(l1.item())
         pairwise_cosine_values.append(cosine.item())
         print(
-            f"  [D0 candidate pair {left}/{right}] mean L1={l1.item():.6f} "
+            f"  [{label} candidate pair {left}/{right}] mean L1={l1.item():.6f} "
             f"cosine={cosine.item():.6f}"
         )
 
     z_norm = Z.norm(dim=-1)
     z_previous = torch.cat([torch.zeros_like(Z[:, :1]), Z[:, :-1]], dim=1)
     z_change = (Z - z_previous).norm(dim=-1)
+    consecutive_z_cosine = F.cosine_similarity(
+        Z[:, 1:], Z[:, :-1], dim=-1, eps=eps
+    )
     print(
-        f"  [D0 Z trajectory] mean norm={z_norm.mean().item():.6f} "
+        f"  [{label} Z trajectory] mean norm={z_norm.mean().item():.6f} "
         f"max norm={z_norm.max().item():.6f} "
         f"mean ||Z_t-Z_(t-1)||_2={z_change.mean().item():.6f}"
+    )
+    print(
+        f"  [{label} Z direction] consecutive cosine mean/std="
+        f"{consecutive_z_cosine.mean().item():.6f}/"
+        f"{consecutive_z_cosine.std(unbiased=False).item():.6f} "
+        f"mean directional change="
+        f"{(1.0 - consecutive_z_cosine).mean().item():.6f}"
     )
     for step in (0, 5, 10, 15, 19):
         if step < Z.shape[1]:
             print(
-                f"  [D0 Z t={step}] mean norm="
+                f"  [{label} Z t={step}] mean norm="
                 f"{z_norm[:, step].mean().item():.6f}"
             )
     weighted_contributions = (
         p * candidate_norms
     ).mean(dim=(0, 1))
     print(
-        f"  [D0 weighted generator contributions] "
+        f"  [{label} weighted generator contributions] "
         f"{weighted_contributions.numpy().round(6)}"
     )
 
@@ -1447,21 +1477,38 @@ def _switching_latent_diagnostics(model, loaders, device):
     ).norm(dim=-1).mean()
     h_temporal_norm = parts["h_temporal"].norm(dim=-1).mean()
     print(
-        f"  [D0 representation scale] E={E_norm.item():.6f} "
+        f"  [{label} pre-balance scale] E={E_norm.item():.6f} "
         f"H={H_norm.item():.6f} Z={z_norm.mean().item():.6f} "
         f"H_T={H_last_norm.item():.6f} Z_T={Z_last_norm.item():.6f} "
+        f"Z_T/H_T={(Z_last_norm / (H_last_norm + eps)).item():.6e} "
         f"readout input={readout_input_norm.item():.6f} "
         f"h_temporal={h_temporal_norm.item():.6f}"
     )
     readout_weight = branch.state_readout.weight.detach().cpu()
-    h_weight_norm = readout_weight[:, :128].norm()
-    z_weight_norm = readout_weight[:, 128:].norm()
+    split_dim = readout_weight.shape[1] // 2 if balanced else 128
+    h_weight_norm = readout_weight[:, :split_dim].norm()
+    z_weight_norm = readout_weight[:, split_dim:].norm()
     readout_weight_ratio = (z_weight_norm / (h_weight_norm + eps)).item()
     print(
-        f"  [D0 readout weights] ||W_H||={h_weight_norm.item():.6f} "
-        f"||W_Z||={z_weight_norm.item():.6f} "
-        f"W_Z/W_H={readout_weight_ratio:.6f}"
+        f"  [{label} readout weights] ||W_long||={h_weight_norm.item():.6f} "
+        f"||W_micro||={z_weight_norm.item():.6f} "
+        f"W_micro/W_long={readout_weight_ratio:.6f}"
     )
+    post_balance_ratio = float("nan")
+    if balanced:
+        h_long_norm = balanced_values["h_long"].norm(dim=-1).mean()
+        h_micro_norm = balanced_values["h_micro"].norm(dim=-1).mean()
+        post_balance_ratio = (h_micro_norm / (h_long_norm + eps)).item()
+        balanced_concat_norm = balanced_values["balanced_concat"].norm(
+            dim=-1
+        ).mean()
+        print(
+            f"  [D0B post-balance scale] ||h_long||={h_long_norm.item():.6f} "
+            f"||h_micro||={h_micro_norm.item():.6f} "
+            f"micro/long={post_balance_ratio:.6f} "
+            f"balanced concat={balanced_concat_norm.item():.6f} "
+            f"h_temporal={h_temporal_norm.item():.6f}"
+        )
 
     p_last = p[:, -1]
     z_last_sample_norm = Z[:, -1].norm(dim=-1)
@@ -1474,12 +1521,18 @@ def _switching_latent_diagnostics(model, loaders, device):
         low_p = p_last[low_indices].mean(dim=0)
         high_p = p_last[high_indices].mean(dim=0)
         print(
-            f"  [D0 {market_name} dispersion sensitivity] high p="
+            f"  [{label} {market_name} dispersion sensitivity] high p="
             f"{high_p.numpy().round(4)} low p={low_p.numpy().round(4)} "
             f"L1={(high_p - low_p).abs().sum().item():.6f} "
             f"high/low ||Z_T||="
             f"{z_last_sample_norm[high_indices].mean().item():.6f}/"
             f"{z_last_sample_norm[low_indices].mean().item():.6f}"
+            + (
+                f" high/low ||h_micro||="
+                f"{balanced_values['h_micro'].norm(dim=-1)[high_indices].mean().item():.6f}/"
+                f"{balanced_values['h_micro'].norm(dim=-1)[low_indices].mean().item():.6f}"
+                if balanced else ""
+            )
         )
 
     x_batch, y_batch = next(iter(loaders["test"]))[:2]
@@ -1501,8 +1554,15 @@ def _switching_latent_diagnostics(model, loaders, device):
         "G0": list(branch.latent_transition.generators[0].parameters()),
         "G1": list(branch.latent_transition.generators[1].parameters()),
         "G2": list(branch.latent_transition.generators[2].parameters()),
-        "state readout": list(branch.state_readout.parameters()),
     }
+    if balanced:
+        gradient_groups.update({
+            "long_memory_readout": list(branch.long_memory_readout.parameters())
+            + list(branch.long_memory_norm.parameters()),
+            "micro_state_readout": list(branch.micro_state_readout.parameters())
+            + list(branch.micro_state_norm.parameters()),
+        })
+    gradient_groups["state readout"] = list(branch.state_readout.parameters())
     flat_parameters = [
         parameter for values in gradient_groups.values() for parameter in values
     ]
@@ -1516,20 +1576,48 @@ def _switching_latent_diagnostics(model, loaders, device):
         offset += len(parameters)
         norm = _aggregate_gradient_norm(parameters, selected)
         prediction_gradient_norms[name] = norm
-        print(f"  [D0 prediction-only grad] {name}={norm:.3e}")
-    total_loss.backward()
-    for name, parameters in gradient_groups.items():
-        print(
-            f"  [D0 total-loss grad] {name}="
-            f"{_aggregate_gradient_norm(parameters):.3e}"
-        )
-    print(f"  [D0 loss] L_return={return_loss.item():.6e}")
-    print(f"  [D0 loss] L_switch_raw={switch_raw.item():.6e}")
-    print(f"  [D0 loss] beta={filtering.current_beta:.6e}")
-    print(f"  [D0 loss] weighted_switch={weighted_switch.item():.6e}")
-    print(f"  [D0 loss] total={total_loss.item():.6e}")
+        print(f"  [{label} prediction-only grad] {name}={norm:.3e}")
+    generator_gradient_mean = float(np.mean([
+        prediction_gradient_norms[name] for name in ("G0", "G1", "G2")
+    ]))
+    long_memory_gradient = prediction_gradient_norms["LongMemory Transformer"]
     print(
-        f"  [D0 loss] switch_to_return_ratio="
+        f"  [{label} prediction-only grad ratio] generator/LongMemory="
+        f"{generator_gradient_mean / (long_memory_gradient + eps):.6e}"
+    )
+    if balanced:
+        print(
+            "  [D0B prediction-only grad ratio] "
+            "microReadout/longReadout="
+            f"{prediction_gradient_norms['micro_state_readout'] / (prediction_gradient_norms['long_memory_readout'] + eps):.6e}"
+        )
+    total_loss.backward()
+    total_gradient_norms = {}
+    for name, parameters in gradient_groups.items():
+        norm = _aggregate_gradient_norm(parameters)
+        total_gradient_norms[name] = norm
+        print(
+            f"  [{label} total-loss grad] {name}={norm:.3e}"
+        )
+    total_generator_gradient_mean = float(np.mean([
+        total_gradient_norms[name] for name in ("G0", "G1", "G2")
+    ]))
+    print(
+        f"  [{label} total-loss grad ratio] generator/LongMemory="
+        f"{total_generator_gradient_mean / (total_gradient_norms['LongMemory Transformer'] + eps):.6e}"
+    )
+    if balanced:
+        print(
+            "  [D0B total-loss grad ratio] microReadout/longReadout="
+            f"{total_gradient_norms['micro_state_readout'] / (total_gradient_norms['long_memory_readout'] + eps):.6e}"
+        )
+    print(f"  [{label} loss] L_return={return_loss.item():.6e}")
+    print(f"  [{label} loss] L_switch_raw={switch_raw.item():.6e}")
+    print(f"  [{label} loss] beta={filtering.current_beta:.6e}")
+    print(f"  [{label} loss] weighted_switch={weighted_switch.item():.6e}")
+    print(f"  [{label} loss] total={total_loss.item():.6e}")
+    print(
+        f"  [{label} loss] switch_to_return_ratio="
         f"{abs(weighted_switch.item()) / (return_loss.item() + eps):.6e}"
     )
 
@@ -1540,6 +1628,7 @@ def _switching_latent_diagnostics(model, loaders, device):
         prediction_real = model(x_batch)
         temporal_real = branch.last_h_temporal.clone()
         z_real = branch.last_z_last.clone()
+        micro_real = branch.last_h_micro.clone() if balanced else None
         for state in range(branch.K):
             forced = torch.zeros(branch.K, device=device)
             forced[state] = 1.0
@@ -1548,15 +1637,22 @@ def _switching_latent_diagnostics(model, loaders, device):
             )
             temporal_forced = branch.last_h_temporal
             z_forced = branch.last_z_last
+            micro_forced = branch.last_h_micro if balanced else None
             z_diff = (z_forced - z_real).abs()
             temporal_diff = (temporal_forced - temporal_real).abs()
             prediction_diff = (prediction_forced - prediction_real).abs()
             forced_z_diffs.append(z_diff.max().item())
             forced_prediction_diffs.append(prediction_diff.max().item())
             print(
-                f"  [D0 forced state {state}] Z_T mean/max diff="
+                f"  [{label} forced state {state}] Z_T mean/max diff="
                 f"{z_diff.mean().item():.3e}/{z_diff.max().item():.3e} "
-                f"h_temporal mean/max diff="
+                + (
+                    f"h_micro mean/max diff="
+                    f"{(micro_forced - micro_real).abs().mean().item():.3e}/"
+                    f"{(micro_forced - micro_real).abs().max().item():.3e} "
+                    if balanced else ""
+                )
+                + f"h_temporal mean/max diff="
                 f"{temporal_diff.mean().item():.3e}/{temporal_diff.max().item():.3e} "
                 f"prediction mean/max diff="
                 f"{prediction_diff.mean().item():.3e}/{prediction_diff.max().item():.3e}"
@@ -1572,34 +1668,74 @@ def _switching_latent_diagnostics(model, loaders, device):
         temporal_zero_h = branch.last_h_temporal.clone()
         zero_z_prediction_diff = (prediction_zero_z - prediction_real).abs()
         zero_h_prediction_diff = (prediction_zero_h - prediction_real).abs()
+        zero_z_temporal_diff = (temporal_zero_z - temporal_real).abs()
+        zero_h_temporal_diff = (temporal_zero_h - temporal_real).abs()
+        zero_label_z = "zero-balanced-micro" if balanced else "zero-Z"
+        zero_label_h = "zero-balanced-long" if balanced else "zero-H_last"
         print(
-            f"  [D0 zero-Z] h_temporal mean/max diff="
-            f"{(temporal_zero_z - temporal_real).abs().mean().item():.3e}/"
-            f"{(temporal_zero_z - temporal_real).abs().max().item():.3e} "
+            f"  [{label} {zero_label_z}] h_temporal mean/max diff="
+            f"{zero_z_temporal_diff.mean().item():.3e}/"
+            f"{zero_z_temporal_diff.max().item():.3e} "
             f"prediction mean/max diff={zero_z_prediction_diff.mean().item():.3e}/"
             f"{zero_z_prediction_diff.max().item():.3e}"
         )
         print(
-            f"  [D0 zero-H_last] h_temporal mean/max diff="
-            f"{(temporal_zero_h - temporal_real).abs().mean().item():.3e}/"
-            f"{(temporal_zero_h - temporal_real).abs().max().item():.3e} "
+            f"  [{label} {zero_label_h}] h_temporal mean/max diff="
+            f"{zero_h_temporal_diff.mean().item():.3e}/"
+            f"{zero_h_temporal_diff.max().item():.3e} "
             f"prediction mean/max diff={zero_h_prediction_diff.mean().item():.3e}/"
             f"{zero_h_prediction_diff.max().item():.3e}"
         )
+        prediction_impact_ratio = (
+            zero_z_prediction_diff.mean()
+            / (zero_h_prediction_diff.mean() + eps)
+        ).item()
+        print(
+            f"  [{label} zero-out impact] micro/long prediction-impact ratio="
+            f"{prediction_impact_ratio:.6e}"
+        )
+        if balanced:
+            print(
+                "  [D0B vs D0 zero-out reference] D0 zero-Z mean=7.417e-05 "
+                "D0 zero-H mean=1.112e-02 D0 ratio≈6.670e-03"
+            )
 
         split = min(11, x_batch.shape[1])
         branch(x_batch)
+        original_E = branch.last_market_tokens.clone()
         original_H = branch.last_long_memory.clone()
         original_p = branch.last_regime_probabilities.clone()
         original_Z = branch.last_latent_states.clone()
+        if balanced:
+            branch.readout(
+                original_H[:, split - 1], original_Z[:, split - 1]
+            )
+            original_h_long_boundary = branch.last_h_long.clone()
+            original_h_micro_boundary = branch.last_h_micro.clone()
+            original_temporal_boundary = branch.last_h_temporal.clone()
         perturbed = x_batch.clone()
         perturbed[:, split:] = torch.randn_like(perturbed[:, split:])
         branch(perturbed)
+        if balanced:
+            branch.readout(
+                branch.last_long_memory[:, split - 1],
+                branch.last_latent_states[:, split - 1],
+            )
+            balanced_causal_text = (
+                f" h_long@t10={(original_h_long_boundary - branch.last_h_long).abs().max().item():.3e}"
+                f" h_micro@t10={(original_h_micro_boundary - branch.last_h_micro).abs().max().item():.3e}"
+                f" h_temporal@t10={(original_temporal_boundary - branch.last_h_temporal).abs().max().item():.3e}"
+            )
+        else:
+            balanced_causal_text = ""
         print(
-            f"  [D0 causality] H diff through t=10="
+            f"  [{label} causality] E diff through t=10="
+            f"{(original_E[:, :split] - branch.last_market_tokens[:, :split]).abs().max().item():.3e} "
+            f"H diff="
             f"{(original_H[:, :split] - branch.last_long_memory[:, :split]).abs().max().item():.3e} "
             f"p diff={(original_p[:, :split] - branch.last_regime_probabilities[:, :split]).abs().max().item():.3e} "
             f"Z diff={(original_Z[:, :split] - branch.last_latent_states[:, :split]).abs().max().item():.3e}"
+            f"{balanced_causal_text}"
         )
 
         temporal_batch = branch(x_batch)
@@ -1607,14 +1743,21 @@ def _switching_latent_diagnostics(model, loaders, device):
         H_batch = branch.last_long_memory.clone()
         p_batch = branch.last_regime_probabilities.clone()
         Z_batch = branch.last_latent_states.clone()
+        h_long_batch = branch.last_h_long.clone() if balanced else None
+        h_micro_batch = branch.last_h_micro.clone() if balanced else None
         temporal_single = branch(x_batch[:1])
         print(
-            f"  [D0 batch independence] E="
+            f"  [{label} batch independence] E="
             f"{(E_batch[:1] - branch.last_market_tokens).abs().max().item():.3e} "
             f"H={(H_batch[:1] - branch.last_long_memory).abs().max().item():.3e} "
             f"p={(p_batch[:1] - branch.last_regime_probabilities).abs().max().item():.3e} "
             f"Z={(Z_batch[:1] - branch.last_latent_states).abs().max().item():.3e} "
-            f"h_temporal={(temporal_batch[:1] - temporal_single).abs().max().item():.3e}"
+            + (
+                f"h_long={(h_long_batch[:1] - branch.last_h_long).abs().max().item():.3e} "
+                f"h_micro={(h_micro_batch[:1] - branch.last_h_micro).abs().max().item():.3e} "
+                if balanced else ""
+            )
+            + f"h_temporal={(temporal_batch[:1] - temporal_single).abs().max().item():.3e}"
         )
 
         branch(x_batch)
@@ -1622,6 +1765,8 @@ def _switching_latent_diagnostics(model, loaders, device):
         H_reference = branch.last_long_memory.clone()
         p_reference = branch.last_regime_probabilities.clone()
         Z_reference = branch.last_latent_states.clone()
+        h_long_reference = branch.last_h_long.clone() if balanced else None
+        h_micro_reference = branch.last_h_micro.clone() if balanced else None
         temporal_reference = branch.last_h_temporal.clone()
         offsets = {
             "stock": (0, branch.market_encoder.market_sizes["stock"]),
@@ -1644,12 +1789,17 @@ def _switching_latent_diagnostics(model, loaders, device):
             )
             temporal_permuted = branch(permuted)
             print(
-                f"  [D0 {market_name} permutation] E="
+                f"  [{label} {market_name} permutation] E="
                 f"{(E_reference - branch.last_market_tokens).abs().max().item():.3e} "
                 f"H={(H_reference - branch.last_long_memory).abs().max().item():.3e} "
                 f"p={(p_reference - branch.last_regime_probabilities).abs().max().item():.3e} "
                 f"Z={(Z_reference - branch.last_latent_states).abs().max().item():.3e} "
-                f"h_temporal={(temporal_reference - temporal_permuted).abs().max().item():.3e}"
+                + (
+                    f"h_long={(h_long_reference - branch.last_h_long).abs().max().item():.3e} "
+                    f"h_micro={(h_micro_reference - branch.last_h_micro).abs().max().item():.3e} "
+                    if balanced else ""
+                )
+                + f"h_temporal={(temporal_reference - temporal_permuted).abs().max().item():.3e}"
             )
 
     return {
@@ -1663,7 +1813,13 @@ def _switching_latent_diagnostics(model, loaders, device):
         "max_forced_prediction_diff": max(forced_prediction_diffs),
         "zero_z_prediction_diff": zero_z_prediction_diff.max().item(),
         "zero_h_prediction_diff": zero_h_prediction_diff.max().item(),
+        "zero_z_prediction_mean_diff": zero_z_prediction_diff.mean().item(),
+        "zero_h_prediction_mean_diff": zero_h_prediction_diff.mean().item(),
         "readout_wz_wh_ratio": readout_weight_ratio,
+        "post_balance_micro_long_ratio": post_balance_ratio,
+        "micro_long_prediction_impact_ratio": prediction_impact_ratio,
+        "mean_consecutive_z_cosine": consecutive_z_cosine.mean().item(),
+        "mean_z_directional_change": (1.0 - consecutive_z_cosine).mean().item(),
         "prediction_gradient_norms": prediction_gradient_norms,
     }
 
@@ -2099,7 +2255,10 @@ def print_diagnostics(model, variant, loaders, device):
         return _switching_transformer_diagnostics(model, loaders, device)
     elif variant == "switching_filter_rpe":
         return _switching_filter_rpe_diagnostics(model, loaders, device)
-    elif variant == "switching_latent_transformer":
+    elif variant in (
+        "switching_latent_transformer",
+        "switching_latent_balanced_readout",
+    ):
         return _switching_latent_diagnostics(model, loaders, device)
     elif variant in ("market_token_transformer", "market_dispersion_transformer"):
         _market_token_diagnostics(model, test_loader, device)
@@ -2202,6 +2361,31 @@ def run_variant(name, variant, args, device, data):
                 torch.testing.assert_close(left, right, rtol=0.0, atol=0.0)
         print("  [S1/S1C shared initialization] PASS")
         print("  [S1/S1C forward RNG sanity] H_reg/p/r_real PASS")
+    if variant == "switching_latent_balanced_readout":
+        with torch.random.fork_rng():
+            torch.manual_seed(args.seed)
+            d0_reference = HeteroMixHopCMGM(
+                data["n_nodes"], data["n_commodities"],
+                variant="switching_latent_transformer", **model_kwargs,
+            )
+            for module_name in (
+                "market_encoder", "long_memory", "regime_filter",
+                "latent_transition",
+            ):
+                reference_state = getattr(
+                    d0_reference.switching_latent_transformer, module_name
+                ).state_dict()
+                balanced_state = getattr(
+                    model.switching_latent_transformer, module_name
+                ).state_dict()
+                assert reference_state.keys() == balanced_state.keys()
+                for parameter_name in reference_state:
+                    torch.testing.assert_close(
+                        reference_state[parameter_name],
+                        balanced_state[parameter_name],
+                        rtol=0.0, atol=0.0,
+                    )
+        print("  [D0/D0B shared initialization] PASS")
 
     model = model.to(device)
     if variant == "switching_null_control":
@@ -2213,7 +2397,10 @@ def run_variant(name, variant, args, device, data):
             model.switching_filter_rpe.regime_inference.transition_logits
             .detach().cpu().clone()
         )
-    if variant == "switching_latent_transformer":
+    if variant in (
+        "switching_latent_transformer",
+        "switching_latent_balanced_readout",
+    ):
         model.switching_latent_transformer._initial_transition_logits = (
             model.switching_latent_transformer.regime_filter.transition_logits
             .detach().cpu().clone()
@@ -2317,7 +2504,10 @@ def run_variant(name, variant, args, device, data):
             f"removed posterior heads={s1_posterior_params:,} and "
             f"regime embeddings={s1_embedding_params:,}"
         )
-    elif variant == "switching_latent_transformer":
+    elif variant in (
+        "switching_latent_transformer",
+        "switching_latent_balanced_readout",
+    ):
         branch = model.switching_latent_transformer
         market_encoder_params = sum(
             parameter.numel() for parameter in branch.market_encoder.parameters()
@@ -2346,13 +2536,49 @@ def run_variant(name, variant, args, device, data):
         # with attention pooling and a 128->64 output projection.
         s0d_temporal_params = market_encoder_params + 273_345
         s0d_total_params = parameter_count - d0_temporal_params + s0d_temporal_params
+        if branch.balanced_readout:
+            long_readout_params = sum(
+                parameter.numel()
+                for parameter in branch.long_memory_readout.parameters()
+            )
+            micro_readout_params = sum(
+                parameter.numel()
+                for parameter in branch.micro_state_readout.parameters()
+            )
+            long_norm_params = sum(
+                parameter.numel()
+                for parameter in branch.long_memory_norm.parameters()
+            )
+            micro_norm_params = sum(
+                parameter.numel()
+                for parameter in branch.micro_state_norm.parameters()
+            )
+            d0_readout_params = 192 * 64 + 64
+            d0b_readout_params = (
+                long_readout_params + micro_readout_params
+                + long_norm_params + micro_norm_params + readout_params
+            )
+            d0_total_params = parameter_count - d0b_readout_params + d0_readout_params
+            print(
+                f"  D0 params={d0_total_params:,}; D0B params={parameter_count:,}; "
+                f"difference={parameter_count - d0_total_params:+,}"
+            )
+            print(
+                f"  D0B readout params: long projection={long_readout_params:,}; "
+                f"micro projection={micro_readout_params:,}; "
+                f"long LayerNorm={long_norm_params:,}; "
+                f"micro LayerNorm={micro_norm_params:,}; "
+                f"final state_readout={readout_params:,}"
+            )
+        else:
+            print(
+                f"  S0D total params={s0d_total_params:,}; "
+                f"D0 total params={parameter_count:,}; "
+                f"D0-S0D increase={parameter_count - s0d_total_params:+,}"
+            )
         print(
-            f"  S0D total params={s0d_total_params:,}; "
-            f"D0 total params={parameter_count:,}; "
-            f"D0-S0D increase={parameter_count - s0d_total_params:+,}"
-        )
-        print(
-            f"  D0 temporal params: Market Encoder={market_encoder_params:,}; "
+            f"  {'D0B' if branch.balanced_readout else 'D0'} temporal params: "
+            f"Market Encoder={market_encoder_params:,}; "
             f"LongMemory Transformer={long_memory_without_rpe:,}; "
             f"Base RPE={base_rpe_params:,}; regime evidence="
             f"{regime_evidence_params:,}; transition={transition_params:,}; "
@@ -2628,6 +2854,69 @@ def _print_d0_conclusion(results):
     print(f"\nD0 mechanism conclusion: [{case}] {conclusion}")
 
 
+def _print_d0b_conclusion(results):
+    result = next(
+        (
+            item for item in results
+            if item["variant"] == "D0B-BalancedLatentReadout"
+        ),
+        None,
+    )
+    if result is None or not result.get("diagnostics"):
+        return
+    diagnostics = result["diagnostics"]
+    balanced = 0.2 <= diagnostics["post_balance_micro_long_ratio"] <= 5.0
+    micro_visible = (
+        diagnostics["zero_z_prediction_mean_diff"] > 7.417e-05
+        and diagnostics["max_forced_prediction_diff"] > 9.038e-05
+    )
+    final_weights_ignore_micro = (
+        diagnostics["readout_wz_wh_ratio"] < 0.1
+        and diagnostics["zero_z_prediction_mean_diff"] <= 7.417e-05
+    )
+    improves = result["MAE"] < 0.023090
+
+    if not balanced:
+        case = "Implementation check"
+        conclusion = (
+            "Post-normalization long/micro representations are still badly "
+            "imbalanced; inspect the D0B readout before attributing performance."
+        )
+    elif improves and micro_visible:
+        case = "Case A"
+        conclusion = (
+            "Balanced latent readout makes the micro state more prediction-visible "
+            "and improves over D0."
+        )
+    elif micro_visible and not improves:
+        case = "Case B" if result["MAE"] <= 0.023090 * 1.01 else "Case C"
+        conclusion = (
+            "Micro-state influence increased without an accuracy gain."
+            if case == "Case B" else
+            "Micro-state influence increased while accuracy worsened, suggesting "
+            "the current micro dynamics may add noise."
+        )
+    elif final_weights_ignore_micro:
+        case = "Case D"
+        conclusion = (
+            "Inputs are scale-balanced, but the learned final readout still "
+            "suppresses the micro-state path."
+        )
+    elif improves:
+        case = "Case E"
+        conclusion = (
+            "Accuracy improved without stronger micro-state diagnostics; do not "
+            "attribute the gain to the balancing mechanism."
+        )
+    else:
+        case = "Mixed"
+        conclusion = (
+            "The run does not cleanly match Case A-E; interpret scale, zero-out, "
+            "forced-state, gradient, and forecast diagnostics jointly."
+        )
+    print(f"\nD0B mechanism conclusion: [{case}] {conclusion}")
+
+
 def main():
     args = parse_args()
     variants = select_variants(args.variants)
@@ -2661,6 +2950,7 @@ def main():
     _print_s1c_control_comparison(results)
     _print_s2f_conclusion(results)
     _print_d0_conclusion(results)
+    _print_d0b_conclusion(results)
 
     ExperimentLogger().log_run(
         {
