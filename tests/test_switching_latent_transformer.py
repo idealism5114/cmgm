@@ -14,7 +14,8 @@ from cmgm.training.train import make_loss, train_epoch
 
 def _d0_branch(dropout=0.0, max_len=12, balanced_readout=False,
                use_latent_memory=False,
-               zero_init_memory_projection=True):
+               zero_init_memory_projection=True,
+               use_regime_relative_memory=False):
     return SwitchingLatentTransformerBranch(
         feat_dim=5,
         n_stock=4,
@@ -33,6 +34,7 @@ def _d0_branch(dropout=0.0, max_len=12, balanced_readout=False,
         balanced_readout=balanced_readout,
         use_latent_memory=use_latent_memory,
         zero_init_memory_projection=zero_init_memory_projection,
+        use_regime_relative_memory=use_regime_relative_memory,
     )
 
 
@@ -616,3 +618,193 @@ def test_d1a2_full_model_registration_and_parameter_equality():
     assert branch.use_latent_memory
     assert not branch.zero_init_memory_projection
     assert d1a2(torch.randn(2, 20, 6, 5)).shape == (2, d1a2.n_horizons, 2)
+
+
+def test_d1_regime_relative_rpe_shape_centering_lag_and_uniform_null():
+    branch = _d0_branch(
+        max_len=7, balanced_readout=True, use_latent_memory=True,
+        zero_init_memory_projection=False,
+        use_regime_relative_memory=True,
+    )
+    assert branch.regime_relative_lag_bias.shape == (3, 4, 6)
+    assert branch.regime_relative_lag_bias.abs().sum() == 0
+    with torch.no_grad():
+        branch.regime_relative_lag_bias[0, 0] = torch.arange(6).float()
+        branch.regime_relative_lag_bias[1, 0] = -torch.arange(6).float()
+    centered = branch.centered_regime_relative_lag_bias()
+    torch.testing.assert_close(
+        centered.mean(dim=0), torch.zeros_like(centered.mean(dim=0))
+    )
+    uniform = torch.full((2, 3), 1.0 / 3.0)
+    torch.testing.assert_close(
+        branch.regime_memory_bias(uniform, 4), torch.zeros(2, 4, 4),
+        atol=1e-7, rtol=0.0,
+    )
+    state_zero = torch.tensor([[1.0, 0.0, 0.0]])
+    selected = branch.regime_memory_bias(state_zero, 4)
+    torch.testing.assert_close(
+        selected[0, 0], centered[0, 0, torch.tensor([3, 2, 1, 0])]
+    )
+
+
+def test_d1_zero_init_matches_d1a2_and_adds_only_rpe_parameters():
+    kwargs = dict(
+        max_len=7, balanced_readout=True, use_latent_memory=True,
+        zero_init_memory_projection=False,
+    )
+    torch.manual_seed(2023)
+    d1a2 = _d0_branch(**kwargs)
+    torch.manual_seed(2023)
+    d1 = _d0_branch(**kwargs, use_regime_relative_memory=True)
+    assert sum(p.numel() for p in d1.parameters()) - sum(
+        p.numel() for p in d1a2.parameters()
+    ) == 3 * 4 * 6
+    d1_state = d1.state_dict()
+    for name, value in d1a2.state_dict().items():
+        torch.testing.assert_close(value, d1_state[name], rtol=0.0, atol=0.0)
+    x = torch.randn(2, 7, 9, 5)
+    d1a2.eval()
+    d1.eval()
+    with torch.no_grad():
+        expected = d1a2(x)
+        actual = d1(x)
+    torch.testing.assert_close(expected, actual, atol=1e-7, rtol=0.0)
+    torch.testing.assert_close(
+        d1a2.last_latent_memories, d1.last_latent_memories,
+        atol=1e-7, rtol=0.0,
+    )
+    torch.testing.assert_close(
+        d1a2.last_latent_states, d1.last_latent_states,
+        atol=1e-7, rtol=0.0,
+    )
+
+
+def test_d1_rpe_receives_prediction_gradient_at_zero_initialization():
+    torch.manual_seed(2024)
+    branch = _d0_branch(
+        max_len=7, balanced_readout=True, use_latent_memory=True,
+        zero_init_memory_projection=False,
+        use_regime_relative_memory=True,
+    )
+    output = branch(torch.randn(4, 7, 9, 5))
+    gradient = torch.autograd.grad(
+        output.square().mean(), branch.regime_relative_lag_bias
+    )[0]
+    assert gradient.isfinite().all()
+    assert gradient.abs().sum() > 0
+
+
+def test_d1_forced_rpe_and_zero_rpe_interventions_are_isolated():
+    torch.manual_seed(2025)
+    branch = _d0_branch(
+        max_len=7, balanced_readout=True, use_latent_memory=True,
+        zero_init_memory_projection=False,
+        use_regime_relative_memory=True,
+    ).eval()
+    with torch.no_grad():
+        branch.regime_relative_lag_bias.normal_(std=0.2)
+    x = torch.randn(3, 7, 9, 5)
+    with torch.no_grad():
+        baseline = branch(x)
+        p_baseline = branch.last_regime_probabilities.clone()
+        forced_rpe = branch(x, forced_rpe_probabilities=torch.tensor([1., 0., 0.]))
+        p_forced_rpe = branch.last_regime_probabilities.clone()
+        zero_rpe = branch(x, zero_regime_memory_bias=True)
+        uniform_rpe = branch(
+            x, forced_rpe_probabilities=torch.full((3,), 1.0 / 3.0)
+        )
+    torch.testing.assert_close(p_baseline, p_forced_rpe)
+    assert (forced_rpe - baseline).abs().max() > 0
+    torch.testing.assert_close(zero_rpe, uniform_rpe, atol=1e-6, rtol=1e-6)
+
+
+def test_d1_full_model_registration_and_parameter_delta():
+    common = dict(
+        num_nodes=6, n_commodities=2, n_stock=2, n_bond=2, feat_dim=5
+    )
+    torch.manual_seed(2026)
+    d1a2 = HeteroMixHopCMGM(
+        variant="switching_active_latent_memory", **common
+    )
+    torch.manual_seed(2026)
+    d1 = HeteroMixHopCMGM(
+        variant="switching_regime_relative_latent_memory", **common
+    )
+    assert sum(p.numel() for p in d1.parameters()) - sum(
+        p.numel() for p in d1a2.parameters()
+    ) == 3 * 4 * 19
+    assert d1(torch.randn(2, 20, 6, 5)).shape == (2, d1.n_horizons, 2)
+
+
+def test_d1_causality_batch_independence_and_market_permutation():
+    torch.manual_seed(2027)
+    branch = _d0_branch(
+        max_len=7, balanced_readout=True, use_latent_memory=True,
+        zero_init_memory_projection=False,
+        use_regime_relative_memory=True,
+    ).eval()
+    with torch.no_grad():
+        branch.regime_relative_lag_bias.normal_(std=0.1)
+        x = torch.randn(3, 7, 9, 5)
+        output = branch(x)
+        references = {
+            "E": branch.last_market_tokens.clone(),
+            "H": branch.last_long_memory.clone(),
+            "p": branch.last_regime_probabilities.clone(),
+            "Z": branch.last_latent_states.clone(),
+            "M": branch.last_latent_memories.clone(),
+            "bias": branch.last_regime_memory_biases.clone(),
+        }
+        perturbed = x.clone()
+        perturbed[:, 4:] = torch.randn_like(perturbed[:, 4:])
+        branch(perturbed)
+        for name, attribute in (
+            ("E", "last_market_tokens"),
+            ("H", "last_long_memory"),
+            ("p", "last_regime_probabilities"),
+            ("Z", "last_latent_states"),
+            ("M", "last_latent_memories"),
+            ("bias", "last_regime_memory_biases"),
+        ):
+            torch.testing.assert_close(
+                references[name][:, :4], getattr(branch, attribute)[:, :4],
+                atol=1e-6, rtol=1e-6,
+            )
+        single = branch(x[:1])
+        torch.testing.assert_close(output[:1], single, atol=1e-6, rtol=1e-6)
+        torch.testing.assert_close(
+            references["bias"][:1], branch.last_regime_memory_biases,
+            atol=1e-6, rtol=1e-6,
+        )
+        for start, end in ((0, 4), (4, 7), (7, 9)):
+            permuted = x.clone()
+            order = torch.arange(end - start - 1, -1, -1)
+            permuted[:, :, start:end] = x[:, :, start:end].index_select(2, order)
+            changed = branch(permuted)
+            torch.testing.assert_close(output, changed, atol=1e-6, rtol=1e-6)
+            torch.testing.assert_close(
+                references["bias"], branch.last_regime_memory_biases,
+                atol=1e-6, rtol=1e-6,
+            )
+
+
+def test_d1_paired_history_permutation_is_invariant_but_value_only_is_not():
+    torch.manual_seed(2028)
+    attention = LatentMemoryAttention(
+        query_dim=16, memory_dim=8, n_heads=4
+    ).eval()
+    query = torch.randn(2, 16)
+    history = torch.randn(2, 6, 8)
+    bias = torch.randn(2, 4, 6)
+    original, weights = attention(query, history, score_bias=bias)
+    order = torch.randperm(6)
+    paired, _ = attention(
+        query, history[:, order], score_bias=bias[:, :, order]
+    )
+    torch.testing.assert_close(original, paired, atol=1e-6, rtol=1e-6)
+    values = attention.v_proj(history).view(2, 6, 4, 2).transpose(1, 2)
+    value_only = torch.einsum(
+        "bhl,bhld->bhd", weights, values[:, :, order]
+    ).reshape(2, 8)
+    value_only = attention.out_proj(value_only)
+    assert (value_only - original).abs().max() > 1e-6

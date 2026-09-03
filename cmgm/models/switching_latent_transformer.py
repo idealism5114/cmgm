@@ -249,7 +249,9 @@ class LatentMemoryAttention(nn.Module):
         self.v_proj = nn.Linear(self.memory_dim, self.memory_dim)
         self.out_proj = nn.Linear(self.memory_dim, self.memory_dim)
 
-    def forward(self, query: torch.Tensor, history: torch.Tensor):
+    def forward(self, query: torch.Tensor, history: torch.Tensor,
+                score_bias: torch.Tensor = None,
+                use_content_scores: bool = True):
         if history.dim() != 3 or history.shape[1] == 0:
             raise ValueError("history must be non-empty with shape (B,L,D)")
         batch_size, history_length, _ = history.shape
@@ -262,7 +264,17 @@ class LatentMemoryAttention(nn.Module):
         v = self.v_proj(history).view(
             batch_size, history_length, self.n_heads, self.head_dim
         ).transpose(1, 2)
-        logits = torch.einsum("bhd,bhld->bhl", q, k) * self.scale
+        content_logits = torch.einsum("bhd,bhld->bhl", q, k) * self.scale
+        logits = content_logits if use_content_scores else torch.zeros_like(
+            content_logits
+        )
+        if score_bias is not None:
+            if score_bias.shape != logits.shape:
+                raise ValueError(
+                    "score_bias must match (B,H,L), got "
+                    f"{tuple(score_bias.shape)} vs {tuple(logits.shape)}"
+                )
+            logits = logits + score_bias
         attention = F.softmax(logits, dim=-1)
         memory = torch.einsum("bhl,bhld->bhd", attention, v).reshape(
             batch_size, self.memory_dim
@@ -270,6 +282,11 @@ class LatentMemoryAttention(nn.Module):
         self.last_query = q.detach()
         self.last_keys = k.detach()
         self.last_values = v.detach()
+        self.last_content_logits = content_logits.detach()
+        self.last_score_bias = (
+            torch.zeros_like(content_logits)
+            if score_bias is None else score_bias.detach()
+        )
         self.last_logits = logits.detach()
         return self.out_proj(memory), attention
 
@@ -288,7 +305,8 @@ class SwitchingLatentTransformerBranch(nn.Module):
                  output_dim: int = 64,
                  balanced_readout: bool = False,
                  use_latent_memory: bool = False,
-                 zero_init_memory_projection: bool = True):
+                 zero_init_memory_projection: bool = True,
+                 use_regime_relative_memory: bool = False):
         super().__init__()
         self.K = int(K)
         self.z_dim = int(z_dim)
@@ -297,8 +315,13 @@ class SwitchingLatentTransformerBranch(nn.Module):
         self.zero_init_memory_projection = bool(
             zero_init_memory_projection
         )
+        self.use_regime_relative_memory = bool(
+            use_regime_relative_memory
+        )
         if self.use_latent_memory and not self.balanced_readout:
             raise ValueError("latent memory requires the D0B balanced readout")
+        if self.use_regime_relative_memory and not self.use_latent_memory:
+            raise ValueError("regime-relative memory requires latent memory")
         self.market_encoder = MarketAwareTemporalEncoder(
             feat_dim=feat_dim,
             n_stock=n_stock,
@@ -354,13 +377,50 @@ class SwitchingLatentTransformerBranch(nn.Module):
             if self.zero_init_memory_projection:
                 for projection in self.memory_projections:
                     nn.init.zeros_(projection.weight)
+        if self.use_regime_relative_memory:
+            self.regime_relative_lag_bias = nn.Parameter(torch.zeros(
+                self.K,
+                self.latent_memory_attention.n_heads,
+                max_len - 1,
+            ))
+
+    def centered_regime_relative_lag_bias(self) -> torch.Tensor:
+        if not self.use_regime_relative_memory:
+            raise RuntimeError("regime-relative latent memory is disabled")
+        table = self.regime_relative_lag_bias
+        return table - table.mean(dim=0, keepdim=True)
+
+    def regime_memory_bias(self, probabilities: torch.Tensor,
+                           history_length: int,
+                           lag_indices: torch.Tensor = None) -> torch.Tensor:
+        """Return B_reg with lag=t-j and lag 1 stored at table index 0."""
+        if not self.use_regime_relative_memory:
+            return probabilities.new_zeros(
+                probabilities.shape[0], 0, history_length
+            )
+        if lag_indices is None:
+            lags = torch.arange(
+                history_length, 0, -1, device=probabilities.device
+            )
+            lag_indices = lags - 1
+        else:
+            lag_indices = lag_indices.to(probabilities.device)
+        if lag_indices.numel() != history_length:
+            raise ValueError("lag_indices length must equal history_length")
+        if lag_indices.min() < 0 or lag_indices.max() >= self.regime_relative_lag_bias.shape[-1]:
+            raise ValueError("lag index is outside the configured causal table")
+        centered = self.centered_regime_relative_lag_bias()
+        selected = centered.index_select(-1, lag_indices)
+        return torch.einsum("bk,khl->bhl", probabilities, selected)
 
     def encode_market_tokens(self, x: torch.Tensor) -> torch.Tensor:
         return self.market_encoder(x)
 
     def latent_forward(self, long_memory: torch.Tensor,
                        forced_probabilities: torch.Tensor = None,
-                       zero_latent_memory: bool = False):
+                       zero_latent_memory: bool = False,
+                       zero_regime_memory_bias: bool = False,
+                       forced_rpe_probabilities: torch.Tensor = None):
         batch_size, time_steps, _ = long_memory.shape
         transition = self.regime_filter.transition_matrix()
         p_prev = torch.full(
@@ -390,6 +450,21 @@ class SwitchingLatentTransformerBranch(nn.Module):
                 )
         else:
             forced = None
+        if forced_rpe_probabilities is not None:
+            forced_rpe = forced_rpe_probabilities.to(
+                device=long_memory.device, dtype=long_memory.dtype
+            )
+            if forced_rpe.dim() == 1:
+                forced_rpe = forced_rpe.view(1, 1, self.K).expand(
+                    batch_size, time_steps, -1
+                )
+            elif forced_rpe.shape != (batch_size, time_steps, self.K):
+                raise ValueError(
+                    "forced_rpe_probabilities must be (K,) or (B,T,K), got "
+                    f"{tuple(forced_rpe.shape)}"
+                )
+        else:
+            forced_rpe = None
 
         probabilities = []
         priors = []
@@ -406,6 +481,8 @@ class SwitchingLatentTransformerBranch(nn.Module):
         memory_query_norms = []
         memory_key_norms = []
         memory_value_norms = []
+        memory_content_scores = []
+        memory_regime_biases = []
         for step in range(time_steps):
             h_t = long_memory[:, step]
             prior_t, evidence_t, p_t, kl_t = self.regime_filter.step(
@@ -420,8 +497,24 @@ class SwitchingLatentTransformerBranch(nn.Module):
                     # z_history is intentionally non-detached and contains
                     # exactly Z_0,...,Z_(t-1), never the current or future Z.
                     history_t = torch.stack(z_history, dim=1)
+                    score_bias_t = None
+                    if self.use_regime_relative_memory:
+                        rpe_p_t = (
+                            forced_rpe[:, step]
+                            if forced_rpe is not None else p_for_z
+                        )
+                        if zero_regime_memory_bias:
+                            score_bias_t = long_memory.new_zeros(
+                                batch_size,
+                                self.latent_memory_attention.n_heads,
+                                step,
+                            )
+                        else:
+                            score_bias_t = self.regime_memory_bias(
+                                rpe_p_t, step
+                            )
                     memory_t, attention_t = self.latent_memory_attention(
-                        h_t, history_t
+                        h_t, history_t, score_bias=score_bias_t
                     )
                 transition_input = torch.cat([h_t, z_prev], dim=-1)
                 state_candidates = []
@@ -453,6 +546,12 @@ class SwitchingLatentTransformerBranch(nn.Module):
                     memory_scores.append(
                         self.latent_memory_attention.last_logits
                     )
+                    memory_content_scores.append(
+                        self.latent_memory_attention.last_content_logits
+                    )
+                    memory_regime_biases.append(
+                        self.latent_memory_attention.last_score_bias
+                    )
                     memory_query_norms.append(
                         self.latent_memory_attention.last_query.norm(dim=-1)
                     )
@@ -466,6 +565,9 @@ class SwitchingLatentTransformerBranch(nn.Module):
                 memory_injections.append(
                     torch.stack(state_injections, dim=1)
                 )
+                if attention_t is None:
+                    memory_content_scores.append(None)
+                    memory_regime_biases.append(None)
             else:
                 z_t, candidates_t = self.latent_transition(
                     h_t, z_prev, p_for_z
@@ -509,15 +611,27 @@ class SwitchingLatentTransformerBranch(nn.Module):
                 batch_size, time_steps, self.latent_memory_attention.n_heads,
                 time_steps,
             )
+            padded_content_scores = torch.zeros_like(padded_scores)
+            padded_regime_biases = torch.zeros_like(padded_scores)
             for step, attention_t in enumerate(memory_attentions):
                 if attention_t is not None:
                     padded_attention[:, step, :, :step] = attention_t.detach()
                     padded_scores[:, step, :, :step] = memory_scores[step]
+                    padded_content_scores[:, step, :, :step] = (
+                        memory_content_scores[step]
+                    )
+                    padded_regime_biases[:, step, :, :step] = (
+                        memory_regime_biases[step]
+                    )
             self.last_latent_memories = torch.stack(
                 memory_values, dim=1
             ).detach()
             self.last_latent_memory_attention = padded_attention.detach()
             self.last_latent_memory_scores = padded_scores.detach()
+            self.last_latent_memory_content_scores = (
+                padded_content_scores.detach()
+            )
+            self.last_regime_memory_biases = padded_regime_biases.detach()
             self.last_latent_memory_query_norms = torch.stack(
                 memory_query_norms, dim=1
             ).detach()
@@ -576,12 +690,16 @@ class SwitchingLatentTransformerBranch(nn.Module):
     def temporal_forward(self, tokens: torch.Tensor,
                          forced_probabilities: torch.Tensor = None,
                          zero_readout_component: str = None,
-                         zero_latent_memory: bool = False) -> torch.Tensor:
+                         zero_latent_memory: bool = False,
+                         zero_regime_memory_bias: bool = False,
+                         forced_rpe_probabilities: torch.Tensor = None) -> torch.Tensor:
         long_memory = self.long_memory(tokens)
         _, latent_states, _ = self.latent_forward(
             long_memory,
             forced_probabilities=forced_probabilities,
             zero_latent_memory=zero_latent_memory,
+            zero_regime_memory_bias=zero_regime_memory_bias,
+            forced_rpe_probabilities=forced_rpe_probabilities,
         )
         h_last = long_memory[:, -1]
         z_last = latent_states[:, -1]
@@ -597,13 +715,17 @@ class SwitchingLatentTransformerBranch(nn.Module):
     def forward(self, x: torch.Tensor,
                 forced_probabilities: torch.Tensor = None,
                 zero_readout_component: str = None,
-                zero_latent_memory: bool = False) -> torch.Tensor:
+                zero_latent_memory: bool = False,
+                zero_regime_memory_bias: bool = False,
+                forced_rpe_probabilities: torch.Tensor = None) -> torch.Tensor:
         tokens = self.encode_market_tokens(x)
         return self.temporal_forward(
             tokens,
             forced_probabilities=forced_probabilities,
             zero_readout_component=zero_readout_component,
             zero_latent_memory=zero_latent_memory,
+            zero_regime_memory_bias=zero_regime_memory_bias,
+            forced_rpe_probabilities=forced_rpe_probabilities,
         )
 
     def set_epoch(self, epoch: int) -> float:
