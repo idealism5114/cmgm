@@ -20,6 +20,7 @@ from torch.utils.data import DataLoader
 from cmgm import config
 from cmgm.data.data_loader import set_seed
 from cmgm.models.hetero_mixhop_model import HeteroMixHopCMGM
+from cmgm.training.target_scale_huber import VARIANT as TARGET_SCALE_VARIANT
 from cmgm.training.train import (
     FIVE_DAY_ONLY_VARIANT as VARIANT, FIVE_DAY_OBJECTIVE_MULTIPLIER,
     GROUPED_VARIANT, NO_SWITCH_KL_VARIANT,
@@ -45,7 +46,7 @@ TRACE_KEYS = ('E', 'H', 'prior', 'p', 'candidates', 'Z', 'h_long', 'h_micro',
 
 def assert_backbone(model):
     b = model.switching_latent_transformer
-    assert model.variant in (BASE_VARIANT, VARIANT, GROUPED_VARIANT, NO_SWITCH_KL_VARIANT)
+    assert model.variant in (BASE_VARIANT, VARIANT, GROUPED_VARIANT, NO_SWITCH_KL_VARIANT, TARGET_SCALE_VARIANT)
     assert b.balanced_readout and b.K == 3
     assert not any((b.use_dynamic_slope, b.use_balanced_transition_input,
                     b.use_latent_memory, b.use_regime_relative_memory,
@@ -147,8 +148,10 @@ def prediction_losses_from_arrays(prediction, target, batch_size):
             'aggregation': 'mean of batch means, matching existing validate_epoch; TRAIN evaluation includes tail'}
 
 
-def collect_model(model, payload, data, output, fixed, seed, label=PREFIX, extra_fixed=None):
+def collect_model(model, payload, data, output, fixed, seed, label=PREFIX, extra_fixed=None,
+                  controls=None, gradient_probe=None, sanity_probe=None):
     assert_backbone(model)
+    active_controls = CONTROLS if controls is None else controls
     output.mkdir(parents=True, exist_ok=True)
     device = next(model.parameters()).device
     with diagnostic_context(model):
@@ -156,7 +159,7 @@ def collect_model(model, payload, data, output, fixed, seed, label=PREFIX, extra
             native = full_reference(model, fixed[0].to(device))
             extra = extra_fixed(model, native) if extra_fixed is not None else {}
             fixed_controls = {}
-            for name, spec in CONTROLS.items():
+            for name, spec in active_controls.items():
                 altered = run_intervention(model, native['h_spatial'], native, spec, None, None)
                 torch.testing.assert_close(altered['p'],native['p'],rtol=0,atol=0)
                 fixed_controls[name] = impacts(altered,native)
@@ -173,7 +176,7 @@ def collect_model(model, payload, data, output, fixed, seed, label=PREFIX, extra
             full = DataLoader(loader.dataset,batch_size=loader.batch_size,shuffle=False,drop_last=False)
             # TRAIN native metrics/regime/candidates are available; controls are
             # needed on VAL/TEST only. An empty spec avoids TRAIN routing-only mode.
-            specs = {} if name == 'TRAIN' else CONTROLS
+            specs = {} if name == 'TRAIN' else active_controls
             print(f'[{label} {model.variant} {name}]', flush=True)
             result = evaluate_split(model,full,name,specs,device,seed,output)
             with np.load(output/f'{name.lower()}_predictions.npz') as values:
@@ -184,8 +187,9 @@ def collect_model(model, payload, data, output, fixed, seed, label=PREFIX, extra
                 'history': payload.get('history',{}), 'splits': splits,
                 'transition': transition_diagnostics(model,payload.get('metadata',{}).get('initial_transition_logits')),
                 'fixed': {'micro': micro, 'gate': gate_stats, 'controls': fixed_controls, **extra},
-                'sanity': fixed_sanity(model,fixed[0].to(device),label=label),
-                'gradients': horizon_gradients(model,fixed,label=label)}
+                'sanity': (fixed_sanity(model,fixed[0].to(device),label=label) if sanity_probe is None
+                           else sanity_probe(model,fixed[0].to(device))),
+                'gradients': horizon_gradients(model,fixed,label=label) if gradient_probe is None else gradient_probe(model,fixed)}
 
 
 def performance_comparison(models):
@@ -311,7 +315,7 @@ def run_five_day_only(args,device,data):
     report = checkpoint_report(model,payload,data,args.d0b_checkpoint,output,args.seed,initial,path)
     zero = compute_metrics(np.zeros_like(target),target)
     return {'variant':DISPLAY,'params':initial['5dOnly_params'],'time':time.time()-start,
-            'MAE':normalized['MAE'],'RMSE':normalized['RMSE'],'Hit_Ratio':normalized['Hit_Ratio'],
+            'MAE':normalized['MAE'],'MSE':normalized['MSE'],'RMSE':normalized['RMSE'],'Hit_Ratio':normalized['Hit_Ratio'],
             'vs_zero_pct':(normalized['MAE']/zero['MAE']-1)*100,'mn':normalized,'mo':original,
             'diagnostics':legacy,'report_path':str(output/'REPORT.md'),
             'case':report['case_assessment']['case']}

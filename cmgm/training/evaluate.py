@@ -19,6 +19,8 @@ from typing import Dict, Tuple, Optional
 import warnings
 warnings.filterwarnings('ignore', category=RuntimeWarning)
 
+from cmgm.training.metric_standard import population_metrics
+
 from cmgm.config import (
     CONFIDENCE_LEVEL, NUM_BOOTSTRAP_SAMPLES,
     TARGET_TYPE, TARGET_HORIZON, SEQ_LEN, MULTI_HORIZONS,
@@ -162,8 +164,10 @@ def compute_metrics(
         targets: Targets, shape (N, N_commodities)
 
     Returns:
-        dict: All metrics (averaged across commodities where applicable)
+        dict: Pooled MAE/MSE/RMSE and unmasked sign Hit; historical metrics explicitly labeled.
     """
+    preds, targets = np.asarray(preds, dtype=np.float64), np.asarray(targets, dtype=np.float64)
+    primary = population_metrics(preds, targets)
     residuals = targets - preds  # (N, N_commodities)
 
     # Section 4.4.1: MAE
@@ -176,7 +180,8 @@ def compute_metrics(
 
     # Section 4.4.3: RMSE
     rmse_per_asset = np.sqrt(mse_per_asset)
-    rmse = np.mean(rmse_per_asset)
+    rmse_legacy = np.mean(rmse_per_asset)
+    rmse = primary["RMSE"]
 
     # Section 4.4.4: Residual Mean (bias)
     residual_mean_per_asset = np.mean(residuals, axis=0)
@@ -204,13 +209,15 @@ def compute_metrics(
             )
 
     return {
-        'MAE': mae,
-        'MSE': mse,
+        'MAE': primary['MAE'],
+        'MSE': primary['MSE'],
         'RMSE': rmse,
         'Residual_Mean': residual_mean,
         'Residual_Std': residual_std,
         'Skewness': skewness,
-        'Hit_Ratio': hit_ratio,
+        'Hit_Ratio': primary['Hit'] if TARGET_TYPE == 'return' else float('nan'),
+        'RMSE_mean_asset_legacy': rmse_legacy,
+        'Hit_Ratio_masked_legacy': hit_ratio,
     }
 
 

@@ -1,10 +1,26 @@
 # Python
 __pycache__/
 *.py[cod]
-*.pyo
 *.egg-info/
 dist/
 build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Local Python environments
+.venv/
+venv/
+env/
+
+# Local configuration and secrets (keep example templates)
+.env
+.env.*
+!.env.example
+!.env.template
 
 # IDE
 .vscode/
@@ -14,12 +30,28 @@ build/
 .DS_Store
 Thumbs.db
 
-# Experiments (auto-generated)
-experiments/EXPERIMENTS.jsonl
-experiments/SUMMARY.md
+# Logs
+*.log
+*.log.*
+logs/
+nohup.out
+
+# Local datasets and generated experiment results
+# Keep source scripts in "fetch data/" and documentation in "docs/" tracked.
+/Data/
+/experiments/
 
 # Model checkpoints (large binary files)
+/checkpoints/
+*.pt
 *.pth
+*.ckpt
+*.safetensors
 
 # Jupyter
 .ipynb_checkpoints/
+
+# Editor temporary files
+*.swp
+*.swo
+*~

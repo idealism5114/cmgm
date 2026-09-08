@@ -50,6 +50,7 @@ VARIANTS = [
     ("S2F-SwitchingFilterRPE", "switching_filter_rpe"),
     ("D0-SwitchingLatentTransformer", "switching_latent_transformer"),
     ("D0B-BalancedLatentReadout", "switching_latent_balanced_readout"),
+    ("D0B-TargetScaleHuber", "switching_latent_balanced_readout_target_scale_huber"),
     ("D0B-NoSwitchKL", "switching_latent_balanced_readout_no_switch_kl"),
     ("D0B-5dOnlyObjective", "switching_latent_balanced_readout_5d_only"),
     ("D0B-MidLongGroupedObjective", "switching_latent_balanced_readout_5_10_20"),
@@ -72,6 +73,7 @@ VARIANTS = [
 D_SERIES_VARIANTS = frozenset({
     "switching_latent_transformer",
     "switching_latent_balanced_readout",
+    "switching_latent_balanced_readout_target_scale_huber",
     "switching_latent_balanced_readout_no_switch_kl",
     "switching_latent_balanced_readout_5d_only",
     "switching_latent_balanced_readout_5_10_20",
@@ -88,7 +90,7 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description=(
             "HeteroMixHop A/B/C/S0/S0D/S1/S1C/S2F/D0/D0B/D0B-5dOnlyObjective/D0E/D0D/D0C/D1A/D1A2/D1 "
-            "plus D0B-NoSwitchKL, D0B-MidLongGroupedObjective and retained F/F2/G/H/I/J/K/L ablations"
+            "plus D0B-TargetScaleHuber, D0B-NoSwitchKL, D0B-MidLongGroupedObjective and retained F/F2/G/H/I/J/K/L ablations"
         )
     )
     parser.add_argument("--epochs", type=int, default=NUM_EPOCHS)
@@ -103,14 +105,14 @@ def parse_args():
         default=Path("checkpoints"),
         help=(
             "Directory for best checkpoints of D0/D0B/D0B-5dOnlyObjective/D0E/D0D/D0C/D1A/D1A2/D1 "
-            "and D0B-NoSwitchKL/D0B-MidLongGroupedObjective (default: ./checkpoints). Other variants are not saved."
+            "and D0B-TargetScaleHuber/D0B-NoSwitchKL/D0B-MidLongGroupedObjective (default: ./checkpoints). Other variants are not saved."
         ),
     )
     parser.add_argument(
         "--variants",
         help=(
             "Comma-separated display or internal names; defaults to "
-            "A/B/C/S0/S0D/S1/S1C/S2F/D0/D0B/D0B-NoSwitchKL/D0B-5dOnlyObjective/D0B-MidLongGroupedObjective/D0E/D0D/D0C/D1A/D1A2/D1/F/F2/G/H/I/J/K/L"
+            "A/B/C/S0/S0D/S1/S1C/S2F/D0/D0B/D0B-TargetScaleHuber/D0B-NoSwitchKL/D0B-5dOnlyObjective/D0B-MidLongGroupedObjective/D0E/D0D/D0C/D1A/D1A2/D1/F/F2/G/H/I/J/K/L"
         ),
     )
     parser.add_argument('--d0b-checkpoint', type=Path,
@@ -122,6 +124,7 @@ def parse_args():
                         default=Path('checkpoints/switching_latent_balanced_readout_5d_only_best.pt'),
                         help='Existing 5d-only reference for grouped checkpoint comparison; never retrained')
     parser.add_argument('--grouped-report-dir', type=Path, default=Path('experiments/d0b_grouped'))
+    parser.add_argument('--target-scale-report-dir', type=Path, default=Path('experiments/d0b_target_scale_huber'))
     parser.add_argument('--no-switch-report-dir', type=Path, default=Path('experiments/d0b_no_switch_kl'))
     return parser.parse_args()
 
@@ -232,6 +235,24 @@ def build_data(args):
     data["descriptor_timeline_raw"] = descriptors_raw
     data["descriptor_stats"] = descriptor_stats
     return data
+
+
+@torch.no_grad()
+def evaluate_horizon_metrics(model, loader, device):
+    """Full-population four-metric reporting; never used for model selection."""
+    from cmgm.training.metric_standard import population_metrics
+    model.eval()
+    predictions, targets = [], []
+    for batch in loader:
+        x, y = batch[:2]
+        descriptor = batch[2].to(device) if len(batch) == 3 else None
+        predictions.append(model(x.to(device), market_descriptor=descriptor).cpu().numpy())
+        targets.append(y.numpy())
+    p, y = np.concatenate(predictions), np.concatenate(targets)
+    if p.ndim != 3:
+        return {str(TARGET_HORIZON): population_metrics(p, y)}
+    return {str(h): population_metrics(p[:, MULTI_HORIZONS.index(h)], y[:, MULTI_HORIZONS.index(h)])
+            for h in MULTI_HORIZONS}
 
 
 def evaluate_primary_horizon(model, loader, data, device):
@@ -1308,6 +1329,8 @@ def _switching_latent_diagnostics(model, loaders, device):
         label = 'D0B grouped'
     elif getattr(model, 'variant', None) == 'switching_latent_balanced_readout_no_switch_kl':
         label = 'D0B-NoSwitchKL'
+    elif getattr(model, 'variant', None) == 'switching_latent_balanced_readout_target_scale_huber':
+        label = 'D0B-TargetScaleHuber'
     elif branch.regime_filter.learnable_sticky_alpha:
         label = 'D0E'
     rpe_label = f"{label} LongMemory" if latent_memory else label
@@ -2154,6 +2177,10 @@ def _switching_latent_diagnostics(model, loaders, device):
         return_loss = training_prediction_loss(model, prediction, y_batch, make_loss())
         print(f"  [{label} legacy gradient probe] scaled_prediction_loss=4x raw_L5; "
               "unscaled eval-mode horizon gradients are saved in the objective comparison REPORT")
+    elif model.variant == 'switching_latent_balanced_readout_target_scale_huber':
+        from cmgm.training.train import _prediction_loss as training_prediction_loss
+        return_loss = training_prediction_loss(model, prediction, y_batch, make_loss())
+        print(f"  [{label} gradient probe] frozen TRAIN-scale weighted Huber; detailed eval autograd probes are in REPORT")
     elif model.variant == 'switching_latent_balanced_readout_5_10_20':
         from cmgm.training.train import _prediction_loss as training_prediction_loss
         return_loss = training_prediction_loss(model, prediction, y_batch, make_loss())
@@ -3362,6 +3389,7 @@ def print_diagnostics(model, variant, loaders, device):
     elif variant in (
         "switching_latent_transformer",
         "switching_latent_balanced_readout",
+        "switching_latent_balanced_readout_target_scale_huber",
         "switching_latent_balanced_readout_no_switch_kl",
         "switching_latent_balanced_readout_5d_only",
         "switching_latent_balanced_readout_5_10_20",
@@ -3622,6 +3650,9 @@ def _balanced_transition_input_diagnostic(model, batch, stage):
 
 
 def run_variant(name, variant, args, device, data):
+    if variant == "switching_latent_balanced_readout_target_scale_huber":
+        from cmgm.scripts.d0b_target_scale_huber import run_target_scale_huber
+        return run_target_scale_huber(args, device, data)
     if variant == 'switching_latent_balanced_readout_no_switch_kl':
         from cmgm.scripts.d0b_no_switch_kl_diagnostics import run_no_switch_kl
         return run_no_switch_kl(args, device, data)
@@ -4343,25 +4374,35 @@ def run_variant(name, variant, args, device, data):
     )
     diagnostics = print_diagnostics(model, variant, loaders, device)
 
+    performance_by_horizon = {}
+    print("  Mandatory performance metrics (pooled RMSE; unmasked sign Hit)")
+    print("  Split Horizon MAE MSE RMSE Hit%")
+    for split in ("val", "test"):
+        performance_by_horizon[split.upper()] = evaluate_horizon_metrics(model, loaders[split], device)
+        for horizon, metric in performance_by_horizon[split.upper()].items():
+            print(f"  {split.upper()} {horizon}d {metric['MAE']:.9f} {metric['MSE']:.9f} "
+                  f"{metric['RMSE']:.9f} {100 * metric['Hit']:.4f}%")
+
     zero_metrics = compute_metrics(np.zeros_like(target), target)
     versus_zero = (normalized["MAE"] - zero_metrics["MAE"]) / zero_metrics["MAE"] * 100
     elapsed = time.time() - started
     hit_ratio = normalized.get("Hit_Ratio", float("nan"))
     print(
-        f"  MAE={normalized['MAE']:.6f} RMSE={normalized['RMSE']:.6f} "
+        f"  MAE={normalized['MAE']:.6f} MSE={normalized['MSE']:.9f} RMSE={normalized['RMSE']:.6f} "
         f"Hit={hit_ratio * 100:.1f}% vs-zero={versus_zero:+.2f}% ({elapsed:.0f}s)"
     )
     return {
         "variant": name,
         "params": parameter_count,
         "time": elapsed,
-        "MAE": normalized["MAE"],
+        "MAE": normalized["MAE"], "MSE": normalized["MSE"],
         "RMSE": normalized["RMSE"],
         "Hit_Ratio": hit_ratio,
         "vs_zero_pct": versus_zero,
         "mn": normalized,
         "mo": original,
         "diagnostics": diagnostics,
+        "performance_by_horizon": performance_by_horizon,
     }
 
 
@@ -4951,16 +4992,16 @@ def main():
     )
     results = [run_variant(name, variant, args, device, data) for name, variant in variants]
 
-    print("\nRetained ablation summary")
+    print("\nRetained ablation summary (TEST primary horizon = 5d; pooled RMSE, unmasked Hit)")
     print(
         f"{'Variant':<20} {'Params':>12} {'Train Time':>12} {'MAE':>10} "
-        f"{'RMSE':>10} {'Hit%':>8} {'vs Zero':>10}"
+        f"{'MSE':>12} {'RMSE':>10} {'Hit%':>8} {'vs Zero':>10}"
     )
     for result in results:
         print(
             f"{result['variant']:<20} {result['params']:>12,d} "
             f"{result['time']:>11.0f}s "
-            f"{result['MAE']:>10.6f} {result['RMSE']:>10.6f} "
+            f"{result['MAE']:>10.6f} {result['MSE']:>12.9f} {result['RMSE']:>10.6f} "
             f"{result['Hit_Ratio'] * 100:>7.1f}% {result['vs_zero_pct']:>+9.2f}%"
         )
 
@@ -4977,6 +5018,7 @@ def main():
     ExperimentLogger().log_run(
         {
             "version": "retained-ablation-v1",
+            "metric_standard": "pooled MAE/MSE/RMSE; RMSE=sqrt(MSE); unmasked sign Hit; TEST primary horizon",
             "epochs": args.epochs,
             "seed": args.seed,
             "target": TARGET_TYPE,

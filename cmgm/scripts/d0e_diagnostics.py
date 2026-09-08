@@ -195,7 +195,7 @@ def transition_diagnostics(model, initial_logits=None):
                 "decomposition_max_error": (A - A0 - alpha_effect - logits_effect).abs().max().item()}
 
 
-def fixed_sanity(model, x, label="D0E"):
+def fixed_sanity(model, x, label="D0E", raise_on_failure=True):
     """Causal temporal prefixes, batch independence, and node relabeling."""
     branch = model.switching_latent_transformer
     cutoff = x.shape[1] // 2
@@ -233,7 +233,7 @@ def fixed_sanity(model, x, label="D0E"):
             node_order[start:start + size] = node_order[start:start + size].flip(0)
             permuted = trajectory(x[:, :, node_order])
             temporal = max(difference(before[key], permuted[key])["max"] for key in before)
-            relabeled = HeteroMixHopCMGM(variant=model.variant, **model_arguments(model)).to(x.device).eval()
+            relabeled = HeteroMixHopCMGM(variant=model.variant, **model_arguments(model)).to(device=x.device, dtype=x.dtype).eval()
             state = {key: v.clone() for key, v in model.state_dict().items()}
             for key in ("graph_learner.E1", "graph_learner.E2"):
                 state[key] = state[key][node_order]
@@ -246,7 +246,7 @@ def fixed_sanity(model, x, label="D0E"):
                   "single_sample_max": single, "within_market": market_checks,
                   "readout_note": "Readout applied to H_t/Z_t at each t; full-window spatial pooling is not a prefix forecast",
                   "PASS": max(values) <= 3e-6}
-        if not result["PASS"]:
+        if not result["PASS"] and raise_on_failure:
             raise AssertionError(f"{label} invariance check failed: {result}")
         print(f"[{label} causality/batch/market sanity]", json.dumps(result), flush=True)
         return result
@@ -360,13 +360,13 @@ def write_report(report, path):
     def metric(item, split, horizon="5", mode=None):
         source = item["splits"][split]
         m = source["native_metrics"][horizon] if mode is None else source["modes"][mode]["metrics"][horizon]
-        return [m["MAE"], m["RMSE"], m["Hit"] * 100]
+        return [m["MAE"], m["MSE"], m["RMSE"], m["Hit"] * 100]
     heading("来源与初始化校验")
     table(["字段", "值"], [[k, v] for k, v in report.items() if k != "models"])
     paragraph("Checkpoint final_learned_alpha 指恢复 best epoch 后保存在权重中的 alpha；last_training_epoch_alpha 为 early stopping 前最后一轮，两者分开记录。"
               "D0B 按本次实际加载 checkpoint 计算，不使用 inference override 作为训练目标。")
     heading("表 1：Performance（primary 5d）")
-    table(["Variant", "Params", "BestEpoch", "Alpha", "VAL MAE/RMSE/Hit%", "TEST MAE/RMSE/Hit%"],
+    table(["Variant", "Params", "BestEpoch", "Alpha", "VAL MAE/MSE/RMSE/Hit%", "TEST MAE/MSE/RMSE/Hit%"],
           [[label, m["params"], m["best_epoch"], m["transition"]["alpha"], metric(m,"VAL"), metric(m,"TEST")] for label,m in models.items()])
     heading("表 2：Alpha trajectory")
     rows=[]
@@ -391,13 +391,13 @@ def write_report(report, path):
           [[label,split]+functional_values(m,split) for label,m in models.items() for split in ("VAL","TEST")])
     paragraph("D0B 既有 RoutingFraction reference：TEST≈2.09%，VAL≈2.32%；实际对照以上方重新加载结果为准。"
               "RoutingFraction 是非线性干预响应比，不是可加性贡献。Uniform 仅在诊断中替换 generator weighting，p 递推不变，Z 完整递推。")
-    table(["Variant","Split","uniform VAL/TEST 5d MAE/RMSE/Hit%","uniform prediction mean/max diff"],
+    table(["Variant","Split","uniform VAL/TEST 5d MAE/MSE/RMSE/Hit%","uniform prediction mean/max diff"],
           [[label,split,metric(m,split,mode="uniform"),m["splits"][split]["modes"]["uniform"]["impact"]["prediction"]]
            for label,m in models.items() for split in ("VAL","TEST")])
     heading("表 5：Per horizon")
     for split in ("VAL","TEST"):
         paragraph(split)
-        table(["Horizon","D0B MAE/RMSE/Hit%","D0E MAE/RMSE/Hit%","MAE delta E-B","zero-micro E","zero-long E","micro/long E","routing impact E","RoutingFraction E"],
+        table(["Horizon","D0B MAE/MSE/RMSE/Hit%","D0E MAE/MSE/RMSE/Hit%","MAE delta E-B","zero-micro E","zero-long E","micro/long E","routing impact E","RoutingFraction E"],
               [[h,metric(models["D0B"],split,str(h)),metric(models["D0E"],split,str(h)),
                 metric(models["D0E"],split,str(h))[0]-metric(models["D0B"],split,str(h))[0]] + functional_values(models["D0E"],split,h)
                for h in config.MULTI_HORIZONS])
@@ -493,7 +493,7 @@ def run_d0e(args, device, data):
     from cmgm.training.evaluate import compute_metrics
     zero = compute_metrics(np.zeros_like(target), target)
     return {"variant": DISPLAY, "params": initial["D0E_params"], "time": time.time() - started,
-            "MAE": normalized["MAE"], "RMSE": normalized["RMSE"], "Hit_Ratio": normalized["Hit_Ratio"],
+            "MAE": normalized["MAE"], "MSE": normalized["MSE"], "RMSE": normalized["RMSE"], "Hit_Ratio": normalized["Hit_Ratio"],
             "vs_zero_pct": (normalized["MAE"] / zero["MAE"] - 1) * 100,
             "mn": normalized, "mo": original, "diagnostics": legacy,
             "report_path": str(output / "REPORT.md"), "alpha": report["models"]["D0E"]["transition"]["alpha"]}

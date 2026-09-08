@@ -19,7 +19,7 @@ def write_report(report,path):
         lines.append('| '+' | '.join('---' for _ in headers)+' |')
         lines.extend('| '+' | '.join(fmt(v) for v in row)+' |' for row in rows);lines.append('')
     def metric(m,s,h='5'):
-        v=m['splits'][s]['native_metrics'][h];return [v['MAE'],v['RMSE'],100*v['Hit']]
+        v=m['splits'][s]['native_metrics'][h];return [v['MAE'],v['MSE'],v['RMSE'],100*v['Hit']]
     def functional(m,s,h=None):return functional_values(m,s,h)
     def regime(m,s,k):return m['splits'][s]['normal_regime'][k]
     def change(key):return {s:regime(models['NoSwitchKL'],s,key)-regime(models['D0B'],s,key) for s in ('TRAIN','VAL','TEST')}
@@ -34,13 +34,13 @@ def write_report(report,path):
     paragraph('初始 TRAIN/TEST forward、prediction loss 均独立比较。总损失差检查包括 epoch1（原 beta=0）与 epoch20（原 beta=5e-4），'
               '避免只验证一个平凡的零差。Epoch20只是初始化下的 loss sanity，不执行训练、不更改参数，随后恢复epoch。')
     heading('Performance：5d primary')
-    table(['Variant','Params','BestEpoch','VAL MAE/RMSE/Hit%','TEST MAE/RMSE/Hit%'],
+    table(['Variant','Params','BestEpoch','VAL MAE/MSE/RMSE/Hit%','TEST MAE/MSE/RMSE/Hit%'],
           [[k,m['params'],m['best_epoch'],metric(m,'VAL'),metric(m,'TEST')] for k,m in models.items()])
-    paragraph('D0B 为同环境重新加载的实际 checkpoint。历史 TEST MAE≈.0219948、RMSE≈.0284856、Hit≈49.05%仅作核对。'
-              'RMSE沿用mean(asset-wise RMSE)，Hit以百分比表示，误差在收益率空间计算。')
+    paragraph('D0B 为同环境重新加载的实际 checkpoint。历史 TEST MAE≈.0219948、RMSE≈.0284856、Hit≈49.05%仅作核对；历史RMSE/Hit口径不同，不用其差值判定模型变化。'
+              'RMSE使用pooled sqrt(MSE)，Hit为不掩码sign一致率，Hit以百分比表示，误差在收益率空间计算。')
     for s in ('TRAIN','VAL','TEST'):
         heading(s+' full horizon metrics')
-        table(['Horizon','D0B MAE/RMSE/Hit%','NoSwitchKL MAE/RMSE/Hit%','ΔMAE','RelativeChange%'],
+        table(['Horizon','D0B MAE/MSE/RMSE/Hit%','NoSwitchKL MAE/MSE/RMSE/Hit%','ΔMAE','RelativeChange%'],
               [[h,metric(models['D0B'],s,h),metric(models['NoSwitchKL'],s,h),v['delta_MAE'],
                 100*v['relative_change'] if v['relative_change'] is not None else None] for h,v in comparison[s].items()])
     heading('训练 KL trajectory / actual loss')

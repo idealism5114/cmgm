@@ -258,12 +258,8 @@ def specialization(candidates, p):
 
 
 def metrics(pred, target):
-    # Match repository point metrics: RMSE is mean(asset-wise RMSE).
-    residual = target - pred
-    valid = np.abs(target) > 1e-8
-    return {"MAE": float(np.abs(residual).mean(axis=0).mean()),
-            "RMSE": float(np.sqrt(np.square(residual).mean(axis=0)).mean()),
-            "Hit": float((np.sign(pred[valid]) == np.sign(target[valid])).mean())}
+    from cmgm.training.metric_standard import population_metrics
+    return population_metrics(pred, target)
 
 
 def horizon_metrics(pred, target):
@@ -447,9 +443,10 @@ def write_markdown_report(report, destination):
     paragraph("Batch shuffle 按用户明确授权作为**非日历时间因果的压力测试**：固定随机循环置换，同一相对 t，"
               "每批固定 donor，p 的递推仍使用 recipient 自己的 p。不得把此对照解释为可部署的因果模型。")
     heading("2. 本次 native baseline（全部 horizon）")
-    table(["Split", "样本数", "Horizon", "MAE", "RMSE", "Hit%"],
-          [[split, splits[split]["samples"], h, m["MAE"], m["RMSE"], m["Hit"] * 100]
+    table(["Split", "样本数", "Horizon", "MAE", "MSE", "RMSE", "Hit%"],
+          [[split, splits[split]["samples"], h, m["MAE"], m["MSE"], m["RMSE"], m["Hit"] * 100]
            for split in ("VAL", "TEST") for h, m in splits[split]["native_metrics"].items()])
+    paragraph("本轮起 pooled RMSE=sqrt(MSE)、Hit 不掩码；历史 reference 使用商品平均 RMSE 和掩码 Hit，二者差值不能解释为模型变化。")
     reference = provenance["published_primary_reference"]
     observed = splits["TEST"]["native_metrics"]["5"]
     table(["5d TEST", "给定 reference", "本次 checkpoint", "本次减 reference"],
@@ -610,7 +607,7 @@ def main():
               "horizons": MULTI_HORIZONS, "torch": torch.__version__, "device": str(device),
               "threads": args.threads, "shuffle_mode": args.shuffle_mode, "model_source_sha256": source_hashes,
               "published_primary_reference": {"MAE": 0.021995, "RMSE": 0.028486, "Hit": 0.491},
-              "aggregation": "sample-weighted; RMSE mean of asset-wise RMSE; entropy natural log; overlapping windows included",
+              "aggregation": "sample-weighted; pooled RMSE=sqrt(MSE); unmasked sign Hit; entropy natural log; overlapping windows included",
               "preprocessing_note": "Reuses checkpoint-era preprocessing including existing ffill/bfill; intervention causality does not certify historical preprocessing."},
               "fixed": {}, "splits": {}}
     with torch.no_grad():

@@ -10,6 +10,7 @@ Implements:
 """
 
 import copy
+import json
 import time
 import torch
 import torch.nn as nn
@@ -22,6 +23,12 @@ from cmgm.config import (
     NUM_EPOCHS, PATIENCE,
     LOSS_TYPE, HUBER_DELTA,
     MULTI_HORIZONS, TARGET_HORIZON,
+)
+
+from cmgm.training.target_scale_huber import (
+    VARIANT as TARGET_SCALE_VARIANT, OBJECTIVE as TARGET_SCALE_OBJECTIVE,
+    TargetScaleHuber, horizon_terms as _target_scale_terms,
+    detached_terms as _target_scale_detached_terms,
 )
 
 FIVE_DAY_ONLY_VARIANT = 'switching_latent_balanced_readout_5d_only'
@@ -56,8 +63,23 @@ def _is_five_day_only(model):
     return getattr(model, 'variant', None) == FIVE_DAY_ONLY_VARIANT
 
 
+def _target_scale_huber_prediction_loss(prediction, target, horizons, target_scales,
+                                         reference_horizon=5, reference_delta=.02):
+    if reference_horizon != 5 or reference_delta != .02:
+        raise ValueError('TargetScaleHuber permits only the 5d/.02 anchor')
+    calibration = (target_scales if isinstance(target_scales, TargetScaleHuber)
+                   else TargetScaleHuber(tuple(target_scales), tuple(horizons), reference_horizon, reference_delta))
+    _, weighted = _target_scale_terms(prediction, target, calibration, horizons)
+    return sum(weighted.values())
+
+
 def _prediction_loss(model, prediction, target, criterion):
     """Shared train/validation objectives; default variants retain sum_h L_h."""
+    if getattr(model, 'variant', None) == TARGET_SCALE_VARIANT:
+        calibration = getattr(model, 'target_scale_huber', None)
+        if not isinstance(calibration, TargetScaleHuber):
+            raise ValueError('TargetScaleHuber requires frozen TRAIN scales before loss computation')
+        return _target_scale_huber_prediction_loss(prediction, target, MULTI_HORIZONS, calibration)
     if getattr(model, 'variant', None) == GROUPED_VARIANT:
         if (len(MULTI_HORIZONS) != 4 or set(MULTI_HORIZONS) != {1, 5, 10, 20}
                 or prediction.dim() != 3 or prediction.size(1) != 4
@@ -141,6 +163,10 @@ def train_epoch(
     objective_sums = dict(raw_L5=0., scaled_prediction_loss=0., switch_loss=0., total_loss=0.)
     grouped = getattr(model, 'variant', None) == GROUPED_VARIANT
     no_switch = getattr(model, 'variant', None) == NO_SWITCH_KL_VARIANT
+    target_scale = getattr(model, 'variant', None) == TARGET_SCALE_VARIANT
+    if target_scale:
+        objective_sums = {f'{kind}_huber_{h}': 0. for kind in ('raw','weighted') for h in MULTI_HORIZONS}
+        objective_sums.update(prediction_loss=0., switch_loss=0., total_loss=0.)
     if no_switch:
         objective_sums = dict(prediction_loss=0., raw_KL=0., posterior_entropy=0.,
                               prior_entropy=0., posterior_prior_L1=0., weighted_switch_loss=0.,
@@ -190,6 +216,9 @@ def train_epoch(
 
         # Compute loss — supports multi-horizon (B,H,Nc) or single (B,Nc)
         loss = _prediction_loss(model, pred, y_batch, criterion)
+        if target_scale:
+            target_scale_values = _target_scale_detached_terms(pred, y_batch, model.target_scale_huber, MULTI_HORIZONS)
+            target_scale_values['prediction_loss'] = loss.detach().item()
         if no_switch:
             prediction_value = loss.detach().item()
         if five_only:
@@ -246,6 +275,11 @@ def train_epoch(
             objective_sums['weighted_switch_loss'] += switch_loss.item()
             objective_sums['total_loss'] += loss.detach().item()
 
+        if target_scale:
+            target_scale_values.update(switch_loss=switch_loss.detach().item(), total_loss=loss.detach().item())
+            for key,value in target_scale_values.items():
+                objective_sums[key] += value
+
         # Backward pass
         loss.backward()
         optimizer.step()
@@ -253,7 +287,7 @@ def train_epoch(
         total_loss += loss.item()
         num_batches += 1
 
-    if five_only or grouped or no_switch:
+    if five_only or grouped or no_switch or target_scale:
         model._last_train_objective = {k: v / max(num_batches, 1) for k, v in objective_sums.items()}
     return total_loss / max(num_batches, 1)
 
@@ -287,6 +321,9 @@ def validate_epoch(
     five_only = _is_five_day_only(model)
     horizon_sums = {str(h): 0. for h in MULTI_HORIZONS}
     grouped = getattr(model, 'variant', None) == GROUPED_VARIANT
+    target_scale = getattr(model, 'variant', None) == TARGET_SCALE_VARIANT
+    target_sums = {f'{kind}_huber_{h}': 0. for kind in ('raw','weighted') for h in MULTI_HORIZONS}
+    primary_abs, primary_squared, primary_count = 0., 0., 0
 
     for batch in loader:
         market_descriptor = None
@@ -317,6 +354,15 @@ def validate_epoch(
         else:
             pred = model(X_batch, cur_ei, cur_ew, debug=False)
         loss = _prediction_loss(model, pred, y_batch, criterion)
+        if target_scale:
+            values = _target_scale_detached_terms(pred, y_batch, model.target_scale_huber, MULTI_HORIZONS)
+            for key,value in values.items():
+                target_sums[key] += value
+            idx = MULTI_HORIZONS.index(5)
+            residual = pred[:,idx].double() - y_batch[:,idx].double()
+            primary_abs += residual.abs().sum().item()
+            primary_squared += residual.square().sum().item()
+            primary_count += residual.numel()
         if five_only or grouped:
             for h, value in _horizon_loss_values(pred, y_batch, criterion).items():
                 horizon_sums[h] += value
@@ -350,6 +396,10 @@ def validate_epoch(
             'aux_multi_horizon_loss': sum(horizon_means.values()),
             'per_horizon': horizon_means,
         }
+    if target_scale:
+        model._last_val_objective = {k:v/max(num_batches,1) for k,v in target_sums.items()}
+        model._last_val_objective.update(prediction_loss=total_loss/max(num_batches,1),
+                                         MAE_5d=primary_abs/primary_count, MSE_5d=primary_squared/primary_count)
     return total_loss / max(num_batches, 1)
 
 
@@ -402,6 +452,13 @@ def train(
     print(f"Learning rate: {lr}, Weight decay: {weight_decay}")
     print(f"{'=' * 60}")
 
+    target_scale = getattr(model, 'variant', None) == TARGET_SCALE_VARIANT
+    if target_scale:
+        if not isinstance(getattr(model, 'target_scale_huber', None), TargetScaleHuber):
+            raise ValueError('Frozen TRAIN scales are required before optimizer construction')
+        if getattr(model, 'disable_switch_kl', False):
+            raise ValueError('TargetScaleHuber must retain switching KL')
+
     t0 = time.time()
 
     # Move model to device
@@ -445,6 +502,11 @@ def train(
     if grouped:
         history['objective'] = GROUPED_OBJECTIVE
         history['objective_history'] = []
+    if target_scale:
+        history['objective'] = TARGET_SCALE_OBJECTIVE
+        history['objective_history'] = []
+        history['scale_metadata'] = model.target_scale_huber.metadata()
+        history['switch_kl_enabled'] = True
     persistence_branch = _switching_branch(model)
     persistence_filter = (
         getattr(persistence_branch, 'regime_filter', None)
@@ -524,6 +586,12 @@ def train(
             history['objective_history'].append(row)
             values = ' '.join(f'{k}={v:.9g}' for k,v in row['train'].items())
             print(f"  [D0B-NoSwitchKL epoch {epoch}] {values} val_prediction_loss={val_loss:.9g}")
+        if target_scale:
+            row = {'epoch':epoch, 'train':dict(model._last_train_objective),
+                   'val':dict(model._last_val_objective), 'val_prediction_loss':val_loss,
+                   'lr':current_lr, 'switch_beta':current_switch_beta}
+            history['objective_history'].append(row)
+            print('[D0B-TargetScaleHuber epoch] ' + json.dumps(row), flush=True)
         diagnostic_epochs = (1, 5, 10, 20) if no_switch else (1, 5, 10)
         if epoch_diagnostic is not None and epoch in diagnostic_epochs:
             history['epoch_diagnostics'][f'epoch{epoch}'] = (
@@ -570,11 +638,11 @@ def train(
                       f"at epoch {history['best_epoch']}")
                 break
 
-    if five_only or grouped or no_switch:
+    if five_only or grouped or no_switch or target_scale:
         history['final_epoch'] = len(history['objective_history'])
     if no_switch and epoch_diagnostic is not None:
         history['epoch_diagnostics']['final'] = epoch_diagnostic(model, f"final(epoch {history['final_epoch']})")
-    if grouped:
+    if grouped or target_scale:
         # Persist the elapsed training-loop time before checkpoint diagnostics.
         history['training_elapsed_seconds'] = time.time() - t0
     if learnable_persistence and history['alpha_history']:
@@ -647,6 +715,19 @@ def train(
                 'raw_val_5d_loss': best_row['val']['raw_L5'],
                 'parameter_count': sum(p.numel() for p in model.parameters()),
                 'training_elapsed_seconds': history['training_elapsed_seconds'],
+            })
+        if target_scale:
+            best_row = history['objective_history'][history['best_epoch']-1]
+            checkpoint.setdefault('metadata', {}).update({
+                **model.target_scale_huber.metadata(), 'variant':model.variant,
+                'best_epoch':history['best_epoch'],
+                'parameter_count':sum(p.numel() for p in model.parameters()),
+                'best_val_scale_aware_prediction_loss':best_val_loss,
+                'best_val_5d_MAE':best_row['val']['MAE_5d'],
+                'best_val_5d_MSE':best_row['val']['MSE_5d'],
+                'training_elapsed_seconds':history['training_elapsed_seconds'],
+                'switch_kl_enabled':True,
+                'metric_standard':'pooled MAE/MSE/RMSE; RMSE=sqrt(MSE); unmasked sign Hit',
             })
         if no_switch:
             checkpoint.setdefault('metadata', {}).update({

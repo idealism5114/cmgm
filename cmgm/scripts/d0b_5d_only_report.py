@@ -25,7 +25,7 @@ def write_report(report, path):
         lines.append('')
     def metric(m,s,h='5'):
         v=m['splits'][s]['native_metrics'][h]
-        return [v['MAE'],v['RMSE'],100*v['Hit']]
+        return [v['MAE'],v['MSE'],v['RMSE'],100*v['Hit']]
     def functional(m,s,h=5):
         return functional_values(m,s,h)
     def pairs(m,s):
@@ -37,21 +37,21 @@ def write_report(report, path):
     paragraph('唯一干预是 **scale-matched 5d-only diagnostic objective**：训练 prediction loss 为固定 4×L5；'
               '总损失为 4×L5 + 原 switch loss；验证、scheduler、early stopping 和 best checkpoint selection 使用 4×L5。'
               '四 horizon 输出和 D0B 模型结构完全保留，alpha 固定 .5。乘数不依据初始 ratio 调整。')
-    paragraph('全部指标为原收益率空间。RMSE 沿用 mean(asset-wise RMSE)，Hit 以下以百分比表示；'
+    paragraph('全部指标为原收益率空间。RMSE 使用 pooled sqrt(MSE)，Hit 为不掩码 sign 一致率，Hit 以下以百分比表示；'
               'TRAIN 包括完整尾 batch。训练/选模 loss 沿用 mean of batch means；性能指标按完整样本计算。'
               'VAL/TEST 和全部 horizons 均保留，不自动替换 D0B。')
     heading('来源与初始化')
     table(['Field','Value'],[[k,v] for k,v in report.items() if k in
                             ('checkpoint_paths','checkpoint_sha256','metadata','seed','fixed_TEST_batch_shape','initialization','integrity')])
-    paragraph('D0B reference 来自本次实际加载的 checkpoint。历史 TEST 5d MAE≈.0219948、RMSE≈.0284856、Hit≈49.05% 仅供核对。'
+    paragraph('D0B reference 来自本次实际加载的 checkpoint。历史 TEST 5d MAE≈.0219948、RMSE≈.0284856、Hit≈49.05% 仅供核对；历史RMSE/Hit口径不同，不用其差值判定模型变化。'
               '初始化 scale ratio 来自同 seed、同固定 TRAIN batch、eval 模式，不代表全训练期的梯度范数严格匹配。')
     heading('Performance：primary 5d')
-    table(['Variant','Params','BestEpoch','VAL MAE/RMSE/Hit%','TEST MAE/RMSE/Hit%'],
+    table(['Variant','Params','BestEpoch','VAL MAE/MSE/RMSE/Hit%','TEST MAE/MSE/RMSE/Hit%'],
           [[k,m['params'],m['best_epoch'],metric(m,'VAL'),metric(m,'TEST')] for k,m in models.items()])
     heading('各 horizon 的完整 TRAIN / VAL / TEST 指标与 relative delta')
     for s in ('TRAIN','VAL','TEST'):
         paragraph(s)
-        table(['Horizon','D0B MAE/RMSE/Hit%','5dOnly MAE/RMSE/Hit%','ΔMAE (new−D0B)','RelativeChange%'],
+        table(['Horizon','D0B MAE/MSE/RMSE/Hit%','5dOnly MAE/MSE/RMSE/Hit%','ΔMAE (new−D0B)','RelativeChange%'],
               [[h,metric(models['D0B'],s,h),metric(models['5dOnly'],s,h),v['delta_MAE'],
                 100*v['relative_change'] if v['relative_change'] is not None else None]
                for h,v in comparisons[s].items()])

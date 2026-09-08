@@ -54,6 +54,7 @@ class ExperimentLogger:
                     'MAE': float(mn['MAE']),
                     'MSE': float(mn['MSE']),
                     'RMSE': float(mn['RMSE']),
+                    'Hit_Ratio': float(mn.get('Hit_Ratio', float('nan'))),
                     'Residual_Mean': float(mn['Residual_Mean']),
                     'Residual_Std': float(mn['Residual_Std']),
                     'Skewness': float(mn['Skewness']),
@@ -87,10 +88,10 @@ class ExperimentLogger:
             f.write(f'\n---\n')
             f.write(f'### Run {run_id}{tag_str}\n\n')
             f.write(f'**Config:** `{json.dumps(config, ensure_ascii=False)}`\n\n')
-            f.write(f'| Model | Time | MAE (norm) | MSE (norm) | RMSE (norm) | MAE (orig) | MSE (orig) | RMSE (orig) |\n')
-            f.write(f'|-------|------|------------|------------|-------------|------------|------------|-------------|\n')
+            f.write(f'| Model | Time | MAE (norm) | MSE (norm) | RMSE (norm) | Hit% (norm) | MAE (orig) | MSE (orig) | RMSE (orig) |\n')
+            f.write(f'|-------|------|------------|------------|-------------|-------------|------------|------------|-------------|\n')
             for name, t, mn, mo in results:
-                f.write(f'| {name} | {t:.1f}s | {mn["MAE"]:.6f} | {mn["MSE"]:.6f} | {mn["RMSE"]:.6f} | {mo["MAE"]:.2f} | {mo["MSE"]:.2f} | {mo["RMSE"]:.2f} |\n')
+                f.write(f'| {name} | {t:.1f}s | {mn["MAE"]:.6f} | {mn["MSE"]:.9f} | {mn["RMSE"]:.6f} | {100*mn.get("Hit_Ratio", float("nan")):.4f} | {mo["MAE"]:.2f} | {mo["MSE"]:.2f} | {mo["RMSE"]:.2f} |\n')
             f.write('\n')
 
     def _write_summary_header(self):

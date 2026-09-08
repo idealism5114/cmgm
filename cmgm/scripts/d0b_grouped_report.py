@@ -21,7 +21,7 @@ def write_report(report,path):
         lines.append('')
     def metric(m,s,h='5'):
         v=m['splits'][s]['native_metrics'][h]
-        return [v['MAE'],v['RMSE'],100*v['Hit']]
+        return [v['MAE'],v['MSE'],v['RMSE'],100*v['Hit']]
     def regime(m,s,key):return m['splits'][s]['normal_regime'][key]
     def functional(m,s,h=5):return functional_values(m,s,h)
     def between(key,source):
@@ -31,20 +31,20 @@ def write_report(report,path):
     paragraph('唯一新训练目标为 **scale-matched grouped-objective diagnostic**：固定 (4/3)×(L5+L10+L20)，'
               '总损失加原 switch loss；validation / scheduler / early stopping / checkpoint selection 使用相同 grouped prediction objective。'
               'head 保留四 horizons；D0B architecture、固定 alpha=.5、routing、optimizer 与数据协议保持原样。')
-    paragraph('D0B 和 5d-only 均重新加载已有 checkpoint，仅作对照。性能以收益率空间报告；RMSE 沿用 mean(asset-wise RMSE)，'
+    paragraph('D0B 和 5d-only 均重新加载已有 checkpoint，仅作对照。性能以收益率空间报告；RMSE 使用 pooled sqrt(MSE)，Hit 为不掩码 sign 一致率，'
               'Hit 以百分比显示。TRAIN 指 best checkpoint 的完整 TRAIN loader eval，包含尾 batch。')
     heading('Provenance / shared initialization / loss-scale sanity')
     table(['Field','Value'],[[k,report[k]] for k in ('checkpoint_paths','checkpoint_sha256','metadata','seed','fixed_TEST_batch_shape','initialization','integrity')])
     paragraph('初始化 scale ratio 使用同 seed、同固定 TRAIN batch、eval 模式；乘数始终4/3，不根据 ratio 调整。'
               '共享初始化检查涵盖所有参数与 E/H/prior/p/candidates/Z/h_long/h_micro/h_temporal/h_spatial/gate/prediction。')
     heading('Primary performance：5d')
-    table(['Variant','Params','BestEpoch','Train time seconds','VAL 5d MAE/RMSE/Hit%','TEST 5d MAE/RMSE/Hit%'],
+    table(['Variant','Params','BestEpoch','Train time seconds','VAL 5d MAE/MSE/RMSE/Hit%','TEST 5d MAE/MSE/RMSE/Hit%'],
           [[k,m['params'],m['best_epoch'],m['train_time_seconds'],metric(m,'VAL'),metric(m,'TEST')] for k,m in models.items()])
     table(['Variant','Timing provenance'],[[k,m['train_time_note']] for k,m in models.items()])
     heading('完整 TRAIN / VAL / TEST 四 horizon performance')
     for s in ('TRAIN','VAL','TEST'):
         paragraph(s)
-        table(['Horizon','D0B MAE/RMSE/Hit%','5dOnly MAE/RMSE/Hit%','Grouped MAE/RMSE/Hit%',
+        table(['Horizon','D0B MAE/MSE/RMSE/Hit%','5dOnly MAE/MSE/RMSE/Hit%','Grouped MAE/MSE/RMSE/Hit%',
                'Grouped−D0B ΔMAE','relative change%','Grouped−5dOnly ΔMAE','relative change%'],
               [[h]+[metric(models[k],s,h) for k in ('D0B','5dOnly','Grouped')]
                +[v for k in ('D0B','5dOnly') for v in (row['grouped_vs'][k]['delta_MAE'],

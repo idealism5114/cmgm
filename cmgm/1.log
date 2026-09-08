@@ -1,2 +1,0 @@
-nohup: 忽略输入
-/home/yangxiaotong/miniconda3/bin/python: Error while finding module specification for 'cmgm.scripts.main_ablation' (ModuleNotFoundError: No module named 'cmgm')

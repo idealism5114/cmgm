@@ -260,7 +260,7 @@ def run_grouped(args,device,data):
     report=checkpoint_report(model,payload,data,args.d0b_checkpoint,args.five_day_checkpoint,output,args.seed,initial,path)
     zero=compute_metrics(np.zeros_like(target),target)
     return {'variant':DISPLAY,'params':initial['Grouped_params'],'time':time.time()-start,
-            'MAE':normalized['MAE'],'RMSE':normalized['RMSE'],'Hit_Ratio':normalized['Hit_Ratio'],
+            'MAE':normalized['MAE'],'MSE':normalized['MSE'],'RMSE':normalized['RMSE'],'Hit_Ratio':normalized['Hit_Ratio'],
             'vs_zero_pct':(normalized['MAE']/zero['MAE']-1)*100,'mn':normalized,'mo':original,
             'diagnostics':legacy,'report_path':str(output/'REPORT.md'),'case':report['assessment']['case']}
 
