@@ -1,0 +1,236 @@
+nohup: 忽略输入
+[Config] Device: cuda  |  Epochs: 200  |  Batch: 64
+[Config] Feature dim: 21  |  Target: return  |  Horizons: [1, 5, 10, 20]  |  Norm: per-asset z-score
+============================================================
+CMGM Data Loading Pipeline
+============================================================
+
+[Step 1] Loading raw price data...
+
+[Step 2] Aligning markets to common date range...
+[DataLoader] Stock date range: 2015-01-05 00:00:00 to 2025-06-30 00:00:00 (2548 days)
+[DataLoader] Bond date range: 2017-01-17 00:00:00 to 2025-12-31 00:00:00 (2176 days)
+[DataLoader] Commodity date range: 2015-01-05 00:00:00 to 2025-12-31 00:00:00 (2679 days)
+[DataLoader] Common date range: 2017-01-17 00:00:00 to 2025-06-30 00:00:00 (2050 days)
+[DataLoader] Combined price matrix shape: (2050, 284)
+[DataLoader] Market split: stocks=248, bonds=12, commodities=24
+
+[Step 3] Temporal train/val/test split...
+[DataLoader] Temporal split: train=1435, val=307, test=308
+
+[Step 4] Per-asset z-score normalization...
+[DataLoader] Per-asset z-score normalization fitted on training data only
+[DataLoader] mean range: [0.9803, 173055.7656]
+[DataLoader] std  range: [0.000000, 55160.3203]
+[DataLoader] Z-scored train range: [-11.3746, 91.5527]
+
+[Step 6] Computing returns for graph construction...
+     Training returns shape: (1434, 284)
+
+[Step 7] Creating sliding window datasets...
+
+[Done] Dataset sizes: train=1356, val=228, test=229
+[Done] Total nodes: 284
+[Done] Commodity nodes (output dim): 24
+[Features] Computed 21 features: price, ret_1d, ret_5d, ret_10d, ret_20d, vol_5d, vol_10d, vol_20d, zscore_5d, zscore_10d, zscore_20d, price_ma5, price_ma10, price_ma20, price_ma60, rsi_14, bb_position, skewness_20d, kurtosis_20d, roc_10d, percentile_20d
+[Features] Shape: (T=2050, N=284, F=21)  range: [-4.4721, 391400.0000]
+[Features] Per-asset per-channel z-score on 1435 train samples → range: [-2602.1177, 99999.9688]
+Params: 1,684,761
+Types: stock=248, bond=12, future=24
+Features: 21-dim (21 technical indicators from feature_builder)
+
+============================================================
+CMGM Training
+============================================================
+Device: cuda
+Epochs: 200 (early stopping patience=10)
+Learning rate: 0.0001, Weight decay: 1e-05
+============================================================
+  [variant=edge_attn] GCN→([64, 64]) || LSTM→([64, 64]) → head → ([64, 4, 24])
+  Epoch   1/200 | Train Loss: 0.005390 | Val Loss: 0.005211 | LR: 1.00e-04 | Best: inf
+  Epoch   2/200 | Train Loss: 0.004456 | Val Loss: 0.004870 | LR: 1.00e-04 | Best: 0.005211
+  Epoch   3/200 | Train Loss: 0.004103 | Val Loss: 0.004615 | LR: 1.00e-04 | Best: 0.004870
+  Epoch   4/200 | Train Loss: 0.003812 | Val Loss: 0.004392 | LR: 1.00e-04 | Best: 0.004615
+  Epoch   5/200 | Train Loss: 0.003544 | Val Loss: 0.004208 | LR: 1.00e-04 | Best: 0.004392
+  Epoch   6/200 | Train Loss: 0.003293 | Val Loss: 0.004028 | LR: 1.00e-04 | Best: 0.004208
+  Epoch   7/200 | Train Loss: 0.003068 | Val Loss: 0.003811 | LR: 1.00e-04 | Best: 0.004028
+  Epoch   8/200 | Train Loss: 0.002891 | Val Loss: 0.003604 | LR: 1.00e-04 | Best: 0.003811
+  Epoch   9/200 | Train Loss: 0.002739 | Val Loss: 0.003417 | LR: 1.00e-04 | Best: 0.003604
+  Epoch  10/200 | Train Loss: 0.002613 | Val Loss: 0.003281 | LR: 1.00e-04 | Best: 0.003417
+  Gate   | mean=0.501 std=0.042 [0.381, 0.638] → 偏向LSTM
+  Epoch  11/200 | Train Loss: 0.002513 | Val Loss: 0.003177 | LR: 1.00e-04 | Best: 0.003281
+  Epoch  12/200 | Train Loss: 0.002442 | Val Loss: 0.003113 | LR: 1.00e-04 | Best: 0.003177
+  Epoch  13/200 | Train Loss: 0.002412 | Val Loss: 0.003194 | LR: 1.00e-04 | Best: 0.003113
+  Epoch  14/200 | Train Loss: 0.002355 | Val Loss: 0.003269 | LR: 1.00e-04 | Best: 0.003113
+  Epoch  15/200 | Train Loss: 0.002352 | Val Loss: 0.003266 | LR: 1.00e-04 | Best: 0.003113
+  Epoch  16/200 | Train Loss: 0.002293 | Val Loss: 0.003223 | LR: 1.00e-04 | Best: 0.003113
+  Epoch  17/200 | Train Loss: 0.002241 | Val Loss: 0.003101 | LR: 1.00e-04 | Best: 0.003113
+  Epoch  18/200 | Train Loss: 0.002231 | Val Loss: 0.002960 | LR: 1.00e-04 | Best: 0.003101
+  Epoch  19/200 | Train Loss: 0.002121 | Val Loss: 0.002944 | LR: 1.00e-04 | Best: 0.002960
+  Epoch  20/200 | Train Loss: 0.002080 | Val Loss: 0.002923 | LR: 1.00e-04 | Best: 0.002944
+  Gate   | mean=0.504 std=0.039 [0.385, 0.634] → 偏向LSTM
+  Epoch  21/200 | Train Loss: 0.002056 | Val Loss: 0.002887 | LR: 1.00e-04 | Best: 0.002923
+  Epoch  22/200 | Train Loss: 0.002026 | Val Loss: 0.002840 | LR: 1.00e-04 | Best: 0.002887
+  Epoch  23/200 | Train Loss: 0.002008 | Val Loss: 0.002773 | LR: 1.00e-04 | Best: 0.002840
+  Epoch  24/200 | Train Loss: 0.001983 | Val Loss: 0.002711 | LR: 1.00e-04 | Best: 0.002773
+  Epoch  25/200 | Train Loss: 0.001968 | Val Loss: 0.002668 | LR: 1.00e-04 | Best: 0.002711
+  Epoch  26/200 | Train Loss: 0.001942 | Val Loss: 0.002623 | LR: 1.00e-04 | Best: 0.002668
+  Epoch  27/200 | Train Loss: 0.001921 | Val Loss: 0.002602 | LR: 1.00e-04 | Best: 0.002623
+  Epoch  28/200 | Train Loss: 0.001914 | Val Loss: 0.002568 | LR: 1.00e-04 | Best: 0.002602
+  Epoch  29/200 | Train Loss: 0.001891 | Val Loss: 0.002543 | LR: 1.00e-04 | Best: 0.002568
+  Epoch  30/200 | Train Loss: 0.001877 | Val Loss: 0.002529 | LR: 1.00e-04 | Best: 0.002543
+  Gate   | mean=0.504 std=0.034 [0.389, 0.611] → 偏向LSTM
+  Epoch  31/200 | Train Loss: 0.001867 | Val Loss: 0.002502 | LR: 1.00e-04 | Best: 0.002529
+  Epoch  32/200 | Train Loss: 0.001850 | Val Loss: 0.002458 | LR: 1.00e-04 | Best: 0.002502
+  Epoch  33/200 | Train Loss: 0.001842 | Val Loss: 0.002406 | LR: 1.00e-04 | Best: 0.002458
+  Epoch  34/200 | Train Loss: 0.001828 | Val Loss: 0.002366 | LR: 1.00e-04 | Best: 0.002406
+  Epoch  35/200 | Train Loss: 0.001815 | Val Loss: 0.002321 | LR: 1.00e-04 | Best: 0.002366
+  Epoch  36/200 | Train Loss: 0.001812 | Val Loss: 0.002302 | LR: 1.00e-04 | Best: 0.002321
+  Epoch  37/200 | Train Loss: 0.001797 | Val Loss: 0.002263 | LR: 1.00e-04 | Best: 0.002302
+  Epoch  38/200 | Train Loss: 0.001807 | Val Loss: 0.002243 | LR: 1.00e-04 | Best: 0.002263
+  Epoch  39/200 | Train Loss: 0.001805 | Val Loss: 0.002228 | LR: 1.00e-04 | Best: 0.002243
+  Epoch  40/200 | Train Loss: 0.001828 | Val Loss: 0.002195 | LR: 1.00e-04 | Best: 0.002228
+  Gate   | mean=0.506 std=0.032 [0.398, 0.597] → 偏向LSTM
+  Epoch  41/200 | Train Loss: 0.001807 | Val Loss: 0.002187 | LR: 1.00e-04 | Best: 0.002195
+  Epoch  42/200 | Train Loss: 0.001790 | Val Loss: 0.002180 | LR: 1.00e-04 | Best: 0.002187
+  Epoch  43/200 | Train Loss: 0.001767 | Val Loss: 0.002151 | LR: 1.00e-04 | Best: 0.002180
+  Epoch  44/200 | Train Loss: 0.001737 | Val Loss: 0.002128 | LR: 1.00e-04 | Best: 0.002151
+  Epoch  45/200 | Train Loss: 0.001725 | Val Loss: 0.002107 | LR: 1.00e-04 | Best: 0.002128
+  Epoch  46/200 | Train Loss: 0.001710 | Val Loss: 0.002099 | LR: 1.00e-04 | Best: 0.002107
+  Epoch  47/200 | Train Loss: 0.001704 | Val Loss: 0.002084 | LR: 1.00e-04 | Best: 0.002099
+  Epoch  48/200 | Train Loss: 0.001695 | Val Loss: 0.002066 | LR: 1.00e-04 | Best: 0.002084
+  Epoch  49/200 | Train Loss: 0.001685 | Val Loss: 0.002037 | LR: 1.00e-04 | Best: 0.002066
+  Epoch  50/200 | Train Loss: 0.001689 | Val Loss: 0.002009 | LR: 1.00e-04 | Best: 0.002037
+  Gate   | mean=0.508 std=0.029 [0.417, 0.602] → 偏向LSTM
+  Epoch  51/200 | Train Loss: 0.001706 | Val Loss: 0.001995 | LR: 1.00e-04 | Best: 0.002009
+  Epoch  52/200 | Train Loss: 0.001707 | Val Loss: 0.001989 | LR: 1.00e-04 | Best: 0.001995
+  Epoch  53/200 | Train Loss: 0.001735 | Val Loss: 0.001962 | LR: 1.00e-04 | Best: 0.001989
+  Epoch  54/200 | Train Loss: 0.001706 | Val Loss: 0.001964 | LR: 1.00e-04 | Best: 0.001962
+  Epoch  55/200 | Train Loss: 0.001687 | Val Loss: 0.001974 | LR: 1.00e-04 | Best: 0.001962
+  Epoch  56/200 | Train Loss: 0.001685 | Val Loss: 0.001947 | LR: 1.00e-04 | Best: 0.001962
+  Epoch  57/200 | Train Loss: 0.001685 | Val Loss: 0.001934 | LR: 1.00e-04 | Best: 0.001947
+  Epoch  58/200 | Train Loss: 0.001656 | Val Loss: 0.001928 | LR: 1.00e-04 | Best: 0.001934
+  Epoch  59/200 | Train Loss: 0.001635 | Val Loss: 0.001919 | LR: 1.00e-04 | Best: 0.001928
+  Epoch  60/200 | Train Loss: 0.001624 | Val Loss: 0.001910 | LR: 1.00e-04 | Best: 0.001919
+  Gate   | mean=0.512 std=0.026 [0.448, 0.593] → 偏向LSTM
+  Epoch  61/200 | Train Loss: 0.001609 | Val Loss: 0.001893 | LR: 1.00e-04 | Best: 0.001910
+  Epoch  62/200 | Train Loss: 0.001609 | Val Loss: 0.001883 | LR: 1.00e-04 | Best: 0.001893
+  Epoch  63/200 | Train Loss: 0.001613 | Val Loss: 0.001872 | LR: 1.00e-04 | Best: 0.001883
+  Epoch  64/200 | Train Loss: 0.001609 | Val Loss: 0.001868 | LR: 1.00e-04 | Best: 0.001872
+  Epoch  65/200 | Train Loss: 0.001639 | Val Loss: 0.001825 | LR: 1.00e-04 | Best: 0.001868
+  Epoch  66/200 | Train Loss: 0.001637 | Val Loss: 0.001816 | LR: 1.00e-04 | Best: 0.001825
+  Epoch  67/200 | Train Loss: 0.001610 | Val Loss: 0.001828 | LR: 1.00e-04 | Best: 0.001816
+  Epoch  68/200 | Train Loss: 0.001601 | Val Loss: 0.001801 | LR: 1.00e-04 | Best: 0.001816
+  Epoch  69/200 | Train Loss: 0.001572 | Val Loss: 0.001798 | LR: 1.00e-04 | Best: 0.001801
+  Epoch  70/200 | Train Loss: 0.001557 | Val Loss: 0.001795 | LR: 1.00e-04 | Best: 0.001798
+  Gate   | mean=0.536 std=0.039 [0.438, 0.636] → 偏向LSTM
+  Epoch  71/200 | Train Loss: 0.001555 | Val Loss: 0.001793 | LR: 1.00e-04 | Best: 0.001795
+  Epoch  72/200 | Train Loss: 0.001541 | Val Loss: 0.001796 | LR: 1.00e-04 | Best: 0.001793
+  Epoch  73/200 | Train Loss: 0.001541 | Val Loss: 0.001790 | LR: 1.00e-04 | Best: 0.001793
+  Epoch  74/200 | Train Loss: 0.001546 | Val Loss: 0.001784 | LR: 1.00e-04 | Best: 0.001790
+  Epoch  75/200 | Train Loss: 0.001540 | Val Loss: 0.001792 | LR: 1.00e-04 | Best: 0.001784
+  Epoch  76/200 | Train Loss: 0.001542 | Val Loss: 0.001775 | LR: 1.00e-04 | Best: 0.001784
+  Epoch  77/200 | Train Loss: 0.001554 | Val Loss: 0.001744 | LR: 1.00e-04 | Best: 0.001775
+  Epoch  78/200 | Train Loss: 0.001575 | Val Loss: 0.001743 | LR: 1.00e-04 | Best: 0.001744
+  Epoch  79/200 | Train Loss: 0.001554 | Val Loss: 0.001735 | LR: 1.00e-04 | Best: 0.001743
+  Epoch  80/200 | Train Loss: 0.001564 | Val Loss: 0.001708 | LR: 1.00e-04 | Best: 0.001735
+  Gate   | mean=0.543 std=0.040 [0.429, 0.647] → 偏向LSTM
+  Epoch  81/200 | Train Loss: 0.001546 | Val Loss: 0.001697 | LR: 1.00e-04 | Best: 0.001708
+  Epoch  82/200 | Train Loss: 0.001522 | Val Loss: 0.001677 | LR: 1.00e-04 | Best: 0.001697
+  Epoch  83/200 | Train Loss: 0.001515 | Val Loss: 0.001664 | LR: 1.00e-04 | Best: 0.001677
+  Epoch  84/200 | Train Loss: 0.001506 | Val Loss: 0.001648 | LR: 1.00e-04 | Best: 0.001664
+  Epoch  85/200 | Train Loss: 0.001499 | Val Loss: 0.001633 | LR: 1.00e-04 | Best: 0.001648
+  Epoch  86/200 | Train Loss: 0.001496 | Val Loss: 0.001618 | LR: 1.00e-04 | Best: 0.001633
+  Epoch  87/200 | Train Loss: 0.001493 | Val Loss: 0.001626 | LR: 1.00e-04 | Best: 0.001618
+  Epoch  88/200 | Train Loss: 0.001502 | Val Loss: 0.001614 | LR: 1.00e-04 | Best: 0.001618
+  Epoch  89/200 | Train Loss: 0.001497 | Val Loss: 0.001603 | LR: 1.00e-04 | Best: 0.001614
+  Epoch  90/200 | Train Loss: 0.001492 | Val Loss: 0.001611 | LR: 1.00e-04 | Best: 0.001603
+  Gate   | mean=0.548 std=0.039 [0.442, 0.651] → 偏向LSTM
+  Epoch  91/200 | Train Loss: 0.001514 | Val Loss: 0.001591 | LR: 1.00e-04 | Best: 0.001603
+  Epoch  92/200 | Train Loss: 0.001508 | Val Loss: 0.001587 | LR: 1.00e-04 | Best: 0.001591
+  Epoch  93/200 | Train Loss: 0.001498 | Val Loss: 0.001585 | LR: 1.00e-04 | Best: 0.001587
+  Epoch  94/200 | Train Loss: 0.001492 | Val Loss: 0.001584 | LR: 1.00e-04 | Best: 0.001585
+  Epoch  95/200 | Train Loss: 0.001478 | Val Loss: 0.001578 | LR: 1.00e-04 | Best: 0.001584
+  Epoch  96/200 | Train Loss: 0.001471 | Val Loss: 0.001564 | LR: 1.00e-04 | Best: 0.001578
+  Epoch  97/200 | Train Loss: 0.001458 | Val Loss: 0.001565 | LR: 1.00e-04 | Best: 0.001564
+  Epoch  98/200 | Train Loss: 0.001448 | Val Loss: 0.001570 | LR: 1.00e-04 | Best: 0.001564
+  Epoch  99/200 | Train Loss: 0.001448 | Val Loss: 0.001565 | LR: 1.00e-04 | Best: 0.001564
+  Epoch 100/200 | Train Loss: 0.001444 | Val Loss: 0.001561 | LR: 1.00e-04 | Best: 0.001564
+  Gate   | mean=0.554 std=0.039 [0.442, 0.658] → 偏向LSTM
+  Epoch 101/200 | Train Loss: 0.001438 | Val Loss: 0.001574 | LR: 1.00e-04 | Best: 0.001561
+  Epoch 102/200 | Train Loss: 0.001443 | Val Loss: 0.001553 | LR: 1.00e-04 | Best: 0.001561
+  Epoch 103/200 | Train Loss: 0.001445 | Val Loss: 0.001563 | LR: 1.00e-04 | Best: 0.001553
+  Epoch 104/200 | Train Loss: 0.001433 | Val Loss: 0.001567 | LR: 1.00e-04 | Best: 0.001553
+  Epoch 105/200 | Train Loss: 0.001439 | Val Loss: 0.001569 | LR: 1.00e-04 | Best: 0.001553
+  Epoch 106/200 | Train Loss: 0.001456 | Val Loss: 0.001574 | LR: 1.00e-04 | Best: 0.001553
+  Epoch 107/200 | Train Loss: 0.001452 | Val Loss: 0.001559 | LR: 1.00e-04 | Best: 0.001553
+  Epoch 108/200 | Train Loss: 0.001440 | Val Loss: 0.001556 | LR: 5.00e-05 | Best: 0.001553
+  Epoch 109/200 | Train Loss: 0.001432 | Val Loss: 0.001570 | LR: 5.00e-05 | Best: 0.001553
+  Epoch 110/200 | Train Loss: 0.001401 | Val Loss: 0.001555 | LR: 5.00e-05 | Best: 0.001553
+  Gate   | mean=0.560 std=0.040 [0.446, 0.667] → 偏向LSTM
+  Epoch 111/200 | Train Loss: 0.001392 | Val Loss: 0.001559 | LR: 5.00e-05 | Best: 0.001553
+  Epoch 112/200 | Train Loss: 0.001391 | Val Loss: 0.001557 | LR: 5.00e-05 | Best: 0.001553
+
+[Early Stopping] No improvement for 10 epochs. Stopping at epoch 112.
+[Early Stopping] Best validation loss: 0.001553 at epoch 102
+
+[Checkpoint] Restored best model from epoch 102
+============================================================
+
+
+============================================================
+HeteroMixHop Evaluation (Section 4.4)
+============================================================
+
+[Step 1] Generating predictions...
+       Predictions shape: (229, 24)
+
+[Step 2] Computing metrics in TARGET space (Return)...
+
+──────────────────────────────────────────────────
+  Target Space Metrics (Return)
+──────────────────────────────────────────────────
+  MAE                0.021905
+  MSE                0.000932
+  RMSE               0.028473
+  Residual_Mean      -0.002727
+  Residual_Std       0.027615
+  Skewness           0.024213
+  Hit_Ratio          0.509625
+──────────────────────────────────────────────────
+
+[Step 3] Computing metrics in ORIGINAL price space...
+
+──────────────────────────────────────────────────
+  Original Price Space Metrics (for interpretability)
+──────────────────────────────────────────────────
+  MAE                546.3856
+  MSE                3901197.0000
+  RMSE               713.8581
+  Residual_Mean      23.0443
+  Residual_Std       708.4788
+  Skewness           -0.0049
+  Hit_Ratio          1.0000
+──────────────────────────────────────────────────
+
+[Step 4] Bootstrap confidence intervals (normalized space)...
+
+───────────────────────────────────────────────────────
+  Metric           95% CI (normalized)
+───────────────────────────────────────────────────────
+  MAE                [0.021345, 0.022451]
+  MSE                [0.000874, 0.000994]
+  RMSE               [0.029568, 0.031535]
+  Residual_Mean      [-0.003549, -0.001891]
+  Residual_Std       [0.029445, 0.031444]
+  Skewness           [-0.240062, 0.465073]
+───────────────────────────────────────────────────────
+
+============================================================
+
+
+Best val: 0.001553
+Test MSE: 0.000932
+Gate:     mean=0.563  mixhop_diff=27.03
+
+📋 Experiment 20260815_150321 logged to /home/yangxiaotong/projects/myresearch/Commedities/experiments/EXPERIMENTS.jsonl

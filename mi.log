@@ -1,0 +1,274 @@
+nohup: 忽略输入
+Device: cuda  |  Epochs: 300  |  Seed: 42
+Target: return  |  Primary horizon: 5d  |  Multi-horizons: [1, 5, 10, 20]
+Filtered to 2 variants: ['+MambaTemporal', '+InformerTemporal']
+
+[Data] Building 21-dim feature pipeline...
+============================================================
+CMGM Data Loading Pipeline
+============================================================
+
+[Step 1] Loading raw price data...
+
+[Step 2] Aligning markets to common date range...
+[DataLoader] Stock date range: 2015-01-05 00:00:00 to 2025-06-30 00:00:00 (2548 days)
+[DataLoader] Bond date range: 2017-01-17 00:00:00 to 2025-12-31 00:00:00 (2176 days)
+[DataLoader] Commodity date range: 2015-01-05 00:00:00 to 2025-12-31 00:00:00 (2679 days)
+[DataLoader] Common date range: 2017-01-17 00:00:00 to 2025-06-30 00:00:00 (2050 days)
+[DataLoader] Combined price matrix shape: (2050, 284)
+[DataLoader] Market split: stocks=248, bonds=12, commodities=24
+
+[Step 3] Temporal train/val/test split...
+[DataLoader] Temporal split: train=1435, val=307, test=308
+
+[Step 4] Per-asset z-score normalization...
+[DataLoader] Per-asset z-score normalization fitted on training data only
+[DataLoader] mean range: [0.9803, 173055.7656]
+[DataLoader] std  range: [0.000000, 55160.3203]
+[DataLoader] Z-scored train range: [-11.3746, 91.5527]
+
+[Step 6] Computing returns for graph construction...
+     Training returns shape: (1434, 284)
+
+[Step 7] Creating sliding window datasets...
+
+[Done] Dataset sizes: train=1396, val=268, test=269
+[Done] Total nodes: 284
+[Done] Commodity nodes (output dim): 24
+[Features] Computed 21 features: price, ret_1d, ret_5d, ret_10d, ret_20d, vol_5d, vol_10d, vol_20d, zscore_5d, zscore_10d, zscore_20d, price_ma5, price_ma10, price_ma20, price_ma60, rsi_14, bb_position, skewness_20d, kurtosis_20d, roc_10d, percentile_20d
+[Features] Shape: (T=2050, N=284, F=21)  range: [-4.4721, 391400.0000]
+
+[Data] Building 7-dim feature pipeline...
+============================================================
+CMGM Data Loading Pipeline
+============================================================
+
+[Step 1] Loading raw price data...
+
+[Step 2] Aligning markets to common date range...
+[DataLoader] Stock date range: 2015-01-05 00:00:00 to 2025-06-30 00:00:00 (2548 days)
+[DataLoader] Bond date range: 2017-01-17 00:00:00 to 2025-12-31 00:00:00 (2176 days)
+[DataLoader] Commodity date range: 2015-01-05 00:00:00 to 2025-12-31 00:00:00 (2679 days)
+[DataLoader] Common date range: 2017-01-17 00:00:00 to 2025-06-30 00:00:00 (2050 days)
+[DataLoader] Combined price matrix shape: (2050, 284)
+[DataLoader] Market split: stocks=248, bonds=12, commodities=24
+
+[Step 3] Temporal train/val/test split...
+[DataLoader] Temporal split: train=1435, val=307, test=308
+
+[Step 4] Per-asset z-score normalization...
+[DataLoader] Per-asset z-score normalization fitted on training data only
+[DataLoader] mean range: [0.9803, 173055.7656]
+[DataLoader] std  range: [0.000000, 55160.3203]
+[DataLoader] Z-scored train range: [-11.3746, 91.5527]
+
+[Step 6] Computing returns for graph construction...
+     Training returns shape: (1434, 284)
+
+[Step 7] Creating sliding window datasets...
+
+[Done] Dataset sizes: train=1396, val=268, test=269
+[Done] Total nodes: 284
+[Done] Commodity nodes (output dim): 24
+[Features] Computed 7 features from RAW prices: price, return, ma5_ratio, ma20_ratio, volatility, rsi_14, macd
+[Features] Shape: (T=2050, N=284, F=7)  range: [-21915.3594, 391400.0000]
+
+==========================================================================================
+  ABLATION: +MambaTemporal  (variant=mamba_temporal, feat_dim=21, {})
+==========================================================================================
+
+[FAILED] +MambaTemporal: Neither 'mamba-ssm' (CUDA, Linux) nor 'mamba' (pure PyTorch, pip install git+https://github.com/alxndrTL/mamba.py.git) is installed.
+Traceback (most recent call last):
+  File "/home/yangxiaotong/projects/myresearch/Commedities/cmgm/models/hetero_mixhop_model.py", line 290, in __init__
+    from mamba_ssm import Mamba
+ModuleNotFoundError: No module named 'mamba_ssm'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/yangxiaotong/projects/myresearch/Commedities/cmgm/models/hetero_mixhop_model.py", line 293, in __init__
+    from mamba import Mamba
+ModuleNotFoundError: No module named 'mamba'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/yangxiaotong/projects/myresearch/Commedities/cmgm/scripts/main_ablation.py", line 338, in main
+    r = run_variant(name, variant, feat_dim, kwargs, args, device, data21, data7)
+  File "/home/yangxiaotong/projects/myresearch/Commedities/cmgm/scripts/main_ablation.py", line 248, in run_variant
+    model = HeteroMixHopCMGM(data['n_nodes'], data['n_commodities'],
+            ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                             n_stock=n_stock, n_bond=n_bond,
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                             variant=variant, feat_dim=feat_dim, **kwargs).to(device)
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yangxiaotong/projects/myresearch/Commedities/cmgm/models/hetero_mixhop_model.py", line 542, in __init__
+    self.mamba = _MambaTemporal(in_dim=num_nodes * feat_dim)
+                 ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yangxiaotong/projects/myresearch/Commedities/cmgm/models/hetero_mixhop_model.py", line 295, in __init__
+    raise ImportError(
+    ...<2 lines>...
+        "mamba.py.git) is installed.")
+ImportError: Neither 'mamba-ssm' (CUDA, Linux) nor 'mamba' (pure PyTorch, pip install git+https://github.com/alxndrTL/mamba.py.git) is installed.
+
+==========================================================================================
+  ABLATION: +InformerTemporal  (variant=informer_temporal, feat_dim=21, {})
+==========================================================================================
+  Params: 1,114,073
+
+============================================================
+CMGM Training
+============================================================
+Device: cuda
+Epochs: 300 (early stopping patience=10)
+Learning rate: 0.0001, Weight decay: 1e-05
+============================================================
+  [variant=informer_temporal] GCN→([64, 64]) || LSTM→([64, 64]) → head → ([64, 4, 24])
+  Epoch   1/300 | Train Loss: 0.005212 | Val Loss: 0.004754 | LR: 1.00e-04 | Best: inf
+  Epoch   2/300 | Train Loss: 0.004412 | Val Loss: 0.004455 | LR: 1.00e-04 | Best: 0.004754
+  Epoch   3/300 | Train Loss: 0.004085 | Val Loss: 0.004161 | LR: 1.00e-04 | Best: 0.004455
+  Epoch   4/300 | Train Loss: 0.003855 | Val Loss: 0.004011 | LR: 1.00e-04 | Best: 0.004161
+  Epoch   5/300 | Train Loss: 0.003680 | Val Loss: 0.003853 | LR: 1.00e-04 | Best: 0.004011
+  Epoch   6/300 | Train Loss: 0.003606 | Val Loss: 0.003863 | LR: 1.00e-04 | Best: 0.003853
+  Epoch   7/300 | Train Loss: 0.003547 | Val Loss: 0.003601 | LR: 1.00e-04 | Best: 0.003853
+  Epoch   8/300 | Train Loss: 0.003302 | Val Loss: 0.003384 | LR: 1.00e-04 | Best: 0.003601
+  Epoch   9/300 | Train Loss: 0.003092 | Val Loss: 0.003433 | LR: 1.00e-04 | Best: 0.003384
+  Epoch  10/300 | Train Loss: 0.003037 | Val Loss: 0.003473 | LR: 1.00e-04 | Best: 0.003384
+  Gate   | mean=0.483 std=0.090 [0.254, 0.787] → 偏向GCN
+  Epoch  11/300 | Train Loss: 0.003146 | Val Loss: 0.003196 | LR: 1.00e-04 | Best: 0.003384
+  Epoch  12/300 | Train Loss: 0.002871 | Val Loss: 0.003059 | LR: 1.00e-04 | Best: 0.003196
+  Epoch  13/300 | Train Loss: 0.002693 | Val Loss: 0.003013 | LR: 1.00e-04 | Best: 0.003059
+  Epoch  14/300 | Train Loss: 0.002593 | Val Loss: 0.003011 | LR: 1.00e-04 | Best: 0.003013
+  Epoch  15/300 | Train Loss: 0.002515 | Val Loss: 0.002944 | LR: 1.00e-04 | Best: 0.003011
+  Epoch  16/300 | Train Loss: 0.002538 | Val Loss: 0.002770 | LR: 1.00e-04 | Best: 0.002944
+  Epoch  17/300 | Train Loss: 0.002404 | Val Loss: 0.002746 | LR: 1.00e-04 | Best: 0.002770
+  Epoch  18/300 | Train Loss: 0.002362 | Val Loss: 0.002820 | LR: 1.00e-04 | Best: 0.002746
+  Epoch  19/300 | Train Loss: 0.002364 | Val Loss: 0.002760 | LR: 1.00e-04 | Best: 0.002746
+  Epoch  20/300 | Train Loss: 0.002359 | Val Loss: 0.002578 | LR: 1.00e-04 | Best: 0.002746
+  Gate   | mean=0.479 std=0.078 [0.276, 0.761] → 偏向GCN
+  Epoch  21/300 | Train Loss: 0.002261 | Val Loss: 0.002586 | LR: 1.00e-04 | Best: 0.002578
+  Epoch  22/300 | Train Loss: 0.002190 | Val Loss: 0.002571 | LR: 1.00e-04 | Best: 0.002578
+  Epoch  23/300 | Train Loss: 0.002164 | Val Loss: 0.002552 | LR: 1.00e-04 | Best: 0.002571
+  Epoch  24/300 | Train Loss: 0.002116 | Val Loss: 0.002533 | LR: 1.00e-04 | Best: 0.002552
+  Epoch  25/300 | Train Loss: 0.002130 | Val Loss: 0.002514 | LR: 1.00e-04 | Best: 0.002533
+  Epoch  26/300 | Train Loss: 0.002066 | Val Loss: 0.002451 | LR: 1.00e-04 | Best: 0.002514
+  Epoch  27/300 | Train Loss: 0.002066 | Val Loss: 0.002454 | LR: 1.00e-04 | Best: 0.002451
+  Epoch  28/300 | Train Loss: 0.002031 | Val Loss: 0.002494 | LR: 1.00e-04 | Best: 0.002451
+  Epoch  29/300 | Train Loss: 0.002021 | Val Loss: 0.002443 | LR: 1.00e-04 | Best: 0.002451
+  Epoch  30/300 | Train Loss: 0.001998 | Val Loss: 0.002392 | LR: 1.00e-04 | Best: 0.002443
+  Gate   | mean=0.483 std=0.069 [0.308, 0.738] → 偏向GCN
+  Epoch  31/300 | Train Loss: 0.001993 | Val Loss: 0.002378 | LR: 1.00e-04 | Best: 0.002392
+  Epoch  32/300 | Train Loss: 0.001974 | Val Loss: 0.002416 | LR: 1.00e-04 | Best: 0.002378
+  Epoch  33/300 | Train Loss: 0.001983 | Val Loss: 0.002403 | LR: 1.00e-04 | Best: 0.002378
+  Epoch  34/300 | Train Loss: 0.001967 | Val Loss: 0.002361 | LR: 1.00e-04 | Best: 0.002378
+  Epoch  35/300 | Train Loss: 0.001934 | Val Loss: 0.002295 | LR: 1.00e-04 | Best: 0.002361
+  Epoch  36/300 | Train Loss: 0.001988 | Val Loss: 0.002299 | LR: 1.00e-04 | Best: 0.002295
+  Epoch  37/300 | Train Loss: 0.001920 | Val Loss: 0.002297 | LR: 1.00e-04 | Best: 0.002295
+  Epoch  38/300 | Train Loss: 0.001911 | Val Loss: 0.002275 | LR: 1.00e-04 | Best: 0.002295
+  Epoch  39/300 | Train Loss: 0.001901 | Val Loss: 0.002209 | LR: 1.00e-04 | Best: 0.002275
+  Epoch  40/300 | Train Loss: 0.001868 | Val Loss: 0.002180 | LR: 1.00e-04 | Best: 0.002209
+  Gate   | mean=0.485 std=0.063 [0.316, 0.735] → 偏向GCN
+  Epoch  41/300 | Train Loss: 0.001882 | Val Loss: 0.002219 | LR: 1.00e-04 | Best: 0.002180
+  Epoch  42/300 | Train Loss: 0.001855 | Val Loss: 0.002188 | LR: 1.00e-04 | Best: 0.002180
+  Epoch  43/300 | Train Loss: 0.001860 | Val Loss: 0.002142 | LR: 1.00e-04 | Best: 0.002180
+  Epoch  44/300 | Train Loss: 0.001846 | Val Loss: 0.002102 | LR: 1.00e-04 | Best: 0.002142
+  Epoch  45/300 | Train Loss: 0.001822 | Val Loss: 0.002138 | LR: 1.00e-04 | Best: 0.002102
+  Epoch  46/300 | Train Loss: 0.001813 | Val Loss: 0.002122 | LR: 1.00e-04 | Best: 0.002102
+  Epoch  47/300 | Train Loss: 0.001787 | Val Loss: 0.002053 | LR: 1.00e-04 | Best: 0.002102
+  Epoch  48/300 | Train Loss: 0.001793 | Val Loss: 0.002046 | LR: 1.00e-04 | Best: 0.002053
+  Epoch  49/300 | Train Loss: 0.001781 | Val Loss: 0.002110 | LR: 1.00e-04 | Best: 0.002046
+  Epoch  50/300 | Train Loss: 0.001809 | Val Loss: 0.002049 | LR: 1.00e-04 | Best: 0.002046
+  Gate   | mean=0.487 std=0.059 [0.310, 0.724] → 偏向GCN
+  Epoch  51/300 | Train Loss: 0.001772 | Val Loss: 0.002004 | LR: 1.00e-04 | Best: 0.002046
+  Epoch  52/300 | Train Loss: 0.001761 | Val Loss: 0.002051 | LR: 1.00e-04 | Best: 0.002004
+  Epoch  53/300 | Train Loss: 0.001751 | Val Loss: 0.002000 | LR: 1.00e-04 | Best: 0.002004
+  Epoch  54/300 | Train Loss: 0.001711 | Val Loss: 0.001996 | LR: 1.00e-04 | Best: 0.002000
+  Epoch  55/300 | Train Loss: 0.001704 | Val Loss: 0.002021 | LR: 1.00e-04 | Best: 0.001996
+  Epoch  56/300 | Train Loss: 0.001694 | Val Loss: 0.001990 | LR: 1.00e-04 | Best: 0.001996
+  Epoch  57/300 | Train Loss: 0.001677 | Val Loss: 0.001962 | LR: 1.00e-04 | Best: 0.001990
+  Epoch  58/300 | Train Loss: 0.001671 | Val Loss: 0.001976 | LR: 1.00e-04 | Best: 0.001962
+  Epoch  59/300 | Train Loss: 0.001670 | Val Loss: 0.001971 | LR: 1.00e-04 | Best: 0.001962
+  Epoch  60/300 | Train Loss: 0.001667 | Val Loss: 0.001960 | LR: 1.00e-04 | Best: 0.001962
+  Gate   | mean=0.489 std=0.056 [0.325, 0.715] → 偏向GCN
+  Epoch  61/300 | Train Loss: 0.001681 | Val Loss: 0.001919 | LR: 1.00e-04 | Best: 0.001960
+  Epoch  62/300 | Train Loss: 0.001704 | Val Loss: 0.001959 | LR: 1.00e-04 | Best: 0.001919
+  Epoch  63/300 | Train Loss: 0.001664 | Val Loss: 0.001953 | LR: 1.00e-04 | Best: 0.001919
+  Epoch  64/300 | Train Loss: 0.001659 | Val Loss: 0.001902 | LR: 1.00e-04 | Best: 0.001919
+  Epoch  65/300 | Train Loss: 0.001646 | Val Loss: 0.001910 | LR: 1.00e-04 | Best: 0.001902
+  Epoch  66/300 | Train Loss: 0.001621 | Val Loss: 0.001908 | LR: 1.00e-04 | Best: 0.001902
+  Epoch  67/300 | Train Loss: 0.001636 | Val Loss: 0.001871 | LR: 1.00e-04 | Best: 0.001902
+  Epoch  68/300 | Train Loss: 0.001667 | Val Loss: 0.001899 | LR: 1.00e-04 | Best: 0.001871
+  Epoch  69/300 | Train Loss: 0.001632 | Val Loss: 0.001864 | LR: 1.00e-04 | Best: 0.001871
+  Epoch  70/300 | Train Loss: 0.001628 | Val Loss: 0.001863 | LR: 1.00e-04 | Best: 0.001864
+  Gate   | mean=0.491 std=0.053 [0.333, 0.702] → 偏向GCN
+  Epoch  71/300 | Train Loss: 0.001585 | Val Loss: 0.001871 | LR: 1.00e-04 | Best: 0.001863
+  Epoch  72/300 | Train Loss: 0.001579 | Val Loss: 0.001861 | LR: 1.00e-04 | Best: 0.001863
+  Epoch  73/300 | Train Loss: 0.001564 | Val Loss: 0.001847 | LR: 1.00e-04 | Best: 0.001861
+  Epoch  74/300 | Train Loss: 0.001564 | Val Loss: 0.001853 | LR: 1.00e-04 | Best: 0.001847
+  Epoch  75/300 | Train Loss: 0.001552 | Val Loss: 0.001838 | LR: 1.00e-04 | Best: 0.001847
+  Epoch  76/300 | Train Loss: 0.001535 | Val Loss: 0.001833 | LR: 1.00e-04 | Best: 0.001838
+  Epoch  77/300 | Train Loss: 0.001557 | Val Loss: 0.001846 | LR: 1.00e-04 | Best: 0.001833
+  Epoch  78/300 | Train Loss: 0.001553 | Val Loss: 0.001839 | LR: 1.00e-04 | Best: 0.001833
+  Epoch  79/300 | Train Loss: 0.001533 | Val Loss: 0.001815 | LR: 1.00e-04 | Best: 0.001833
+  Epoch  80/300 | Train Loss: 0.001569 | Val Loss: 0.001833 | LR: 1.00e-04 | Best: 0.001815
+  Gate   | mean=0.494 std=0.050 [0.347, 0.676] → 偏向GCN
+  Epoch  81/300 | Train Loss: 0.001559 | Val Loss: 0.001820 | LR: 1.00e-04 | Best: 0.001815
+  Epoch  82/300 | Train Loss: 0.001520 | Val Loss: 0.001818 | LR: 1.00e-04 | Best: 0.001815
+  Epoch  83/300 | Train Loss: 0.001493 | Val Loss: 0.001807 | LR: 1.00e-04 | Best: 0.001815
+  Epoch  84/300 | Train Loss: 0.001495 | Val Loss: 0.001789 | LR: 1.00e-04 | Best: 0.001807
+  Epoch  85/300 | Train Loss: 0.001498 | Val Loss: 0.001793 | LR: 1.00e-04 | Best: 0.001789
+  Epoch  86/300 | Train Loss: 0.001488 | Val Loss: 0.001780 | LR: 1.00e-04 | Best: 0.001789
+  Epoch  87/300 | Train Loss: 0.001487 | Val Loss: 0.001779 | LR: 1.00e-04 | Best: 0.001780
+  Epoch  88/300 | Train Loss: 0.001478 | Val Loss: 0.001781 | LR: 1.00e-04 | Best: 0.001779
+  Epoch  89/300 | Train Loss: 0.001463 | Val Loss: 0.001770 | LR: 1.00e-04 | Best: 0.001779
+  Epoch  90/300 | Train Loss: 0.001461 | Val Loss: 0.001779 | LR: 1.00e-04 | Best: 0.001770
+  Gate   | mean=0.497 std=0.045 [0.365, 0.655] → 偏向GCN
+  Epoch  91/300 | Train Loss: 0.001463 | Val Loss: 0.001758 | LR: 1.00e-04 | Best: 0.001770
+  Epoch  92/300 | Train Loss: 0.001465 | Val Loss: 0.001761 | LR: 1.00e-04 | Best: 0.001758
+  Epoch  93/300 | Train Loss: 0.001474 | Val Loss: 0.001769 | LR: 1.00e-04 | Best: 0.001758
+  Epoch  94/300 | Train Loss: 0.001496 | Val Loss: 0.001753 | LR: 1.00e-04 | Best: 0.001758
+  Epoch  95/300 | Train Loss: 0.001502 | Val Loss: 0.001761 | LR: 1.00e-04 | Best: 0.001753
+  Epoch  96/300 | Train Loss: 0.001461 | Val Loss: 0.001754 | LR: 1.00e-04 | Best: 0.001753
+  Epoch  97/300 | Train Loss: 0.001429 | Val Loss: 0.001747 | LR: 1.00e-04 | Best: 0.001753
+  Epoch  98/300 | Train Loss: 0.001428 | Val Loss: 0.001758 | LR: 1.00e-04 | Best: 0.001747
+  Epoch  99/300 | Train Loss: 0.001415 | Val Loss: 0.001741 | LR: 1.00e-04 | Best: 0.001747
+  Epoch 100/300 | Train Loss: 0.001409 | Val Loss: 0.001750 | LR: 1.00e-04 | Best: 0.001741
+  Gate   | mean=0.501 std=0.042 [0.380, 0.645] → 偏向LSTM
+  Epoch 101/300 | Train Loss: 0.001412 | Val Loss: 0.001741 | LR: 1.00e-04 | Best: 0.001741
+  Epoch 102/300 | Train Loss: 0.001395 | Val Loss: 0.001744 | LR: 1.00e-04 | Best: 0.001741
+  Epoch 103/300 | Train Loss: 0.001402 | Val Loss: 0.001739 | LR: 1.00e-04 | Best: 0.001741
+  Epoch 104/300 | Train Loss: 0.001403 | Val Loss: 0.001745 | LR: 1.00e-04 | Best: 0.001739
+  Epoch 105/300 | Train Loss: 0.001394 | Val Loss: 0.001749 | LR: 1.00e-04 | Best: 0.001739
+  Epoch 106/300 | Train Loss: 0.001402 | Val Loss: 0.001738 | LR: 1.00e-04 | Best: 0.001739
+  Epoch 107/300 | Train Loss: 0.001401 | Val Loss: 0.001776 | LR: 1.00e-04 | Best: 0.001738
+  Epoch 108/300 | Train Loss: 0.001415 | Val Loss: 0.001746 | LR: 1.00e-04 | Best: 0.001738
+  Epoch 109/300 | Train Loss: 0.001403 | Val Loss: 0.001755 | LR: 1.00e-04 | Best: 0.001738
+  Epoch 110/300 | Train Loss: 0.001391 | Val Loss: 0.001779 | LR: 1.00e-04 | Best: 0.001738
+  Gate   | mean=0.504 std=0.039 [0.387, 0.635] → 偏向LSTM
+  Epoch 111/300 | Train Loss: 0.001398 | Val Loss: 0.001758 | LR: 1.00e-04 | Best: 0.001738
+  Epoch 112/300 | Train Loss: 0.001375 | Val Loss: 0.001774 | LR: 5.00e-05 | Best: 0.001738
+  Epoch 113/300 | Train Loss: 0.001348 | Val Loss: 0.001775 | LR: 5.00e-05 | Best: 0.001738
+  Epoch 114/300 | Train Loss: 0.001339 | Val Loss: 0.001775 | LR: 5.00e-05 | Best: 0.001738
+  Epoch 115/300 | Train Loss: 0.001329 | Val Loss: 0.001776 | LR: 5.00e-05 | Best: 0.001738
+  Epoch 116/300 | Train Loss: 0.001324 | Val Loss: 0.001779 | LR: 5.00e-05 | Best: 0.001738
+
+[Early Stopping] No improvement for 10 epochs. Stopping at epoch 116.
+[Early Stopping] Best validation loss: 0.001738 at epoch 106
+
+[Checkpoint] Restored best model from epoch 106
+============================================================
+
+
+  ── Result ──
+  MAE: 0.023180  RMSE: 0.029470  Hit%: 49.1  vs Zero: +8.96%  [119s]
+
+====================================================================================================
+ABLATION STUDY — 5-day Return Space
+====================================================================================================
+Variant                Params    Time        MAE       RMSE    Hit%    vs Zero
+----------------------------------------------------------------------------------------------------
++MambaTemporal              0      0s        nan        nan     nan       nan
++InformerTemporal   1,114,073    119s   0.023180   0.029470   49.1     +8.96%
+====================================================================================================
+
+📋 Experiment 20260817_174250 logged to /home/yangxiaotong/projects/myresearch/Commedities/experiments/EXPERIMENTS.jsonl

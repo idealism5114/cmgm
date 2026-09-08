@@ -1,0 +1,148 @@
+nohup: 忽略输入
+Device: cuda  |  Epochs: 300  |  Seed: 42
+Target: return  |  Primary horizon: 5d  |  Multi-horizons: [1, 5, 10, 20]
+Filtered to 1 variants: ['+BatchGraph']
+
+[Data] Building 21-dim feature pipeline...
+============================================================
+CMGM Data Loading Pipeline
+============================================================
+
+[Step 1] Loading raw price data...
+
+[Step 2] Aligning markets to common date range...
+[DataLoader] Stock date range: 2015-01-05 00:00:00 to 2025-06-30 00:00:00 (2548 days)
+[DataLoader] Bond date range: 2017-01-17 00:00:00 to 2025-12-31 00:00:00 (2176 days)
+[DataLoader] Commodity date range: 2015-01-05 00:00:00 to 2025-12-31 00:00:00 (2679 days)
+[DataLoader] Common date range: 2017-01-17 00:00:00 to 2025-06-30 00:00:00 (2050 days)
+[DataLoader] Combined price matrix shape: (2050, 284)
+[DataLoader] Market split: stocks=248, bonds=12, commodities=24
+
+[Step 3] Temporal train/val/test split...
+[DataLoader] Temporal split: train=1435, val=307, test=308
+
+[Step 4] Per-asset z-score normalization...
+[DataLoader] Per-asset z-score normalization fitted on training data only
+[DataLoader] mean range: [0.9803, 173055.7656]
+[DataLoader] std  range: [0.000000, 55160.3203]
+[DataLoader] Z-scored train range: [-11.3746, 91.5527]
+
+[Step 6] Computing returns for graph construction...
+     Training returns shape: (1434, 284)
+
+[Step 7] Creating sliding window datasets...
+
+[Done] Dataset sizes: train=1396, val=268, test=269
+[Done] Total nodes: 284
+[Done] Commodity nodes (output dim): 24
+[Features] Computed 21 features: price, ret_1d, ret_5d, ret_10d, ret_20d, vol_5d, vol_10d, vol_20d, zscore_5d, zscore_10d, zscore_20d, price_ma5, price_ma10, price_ma20, price_ma60, rsi_14, bb_position, skewness_20d, kurtosis_20d, roc_10d, percentile_20d
+[Features] Shape: (T=2050, N=284, F=21)  range: [-4.4721, 391400.0000]
+
+[Data] Building 7-dim feature pipeline...
+============================================================
+CMGM Data Loading Pipeline
+============================================================
+
+[Step 1] Loading raw price data...
+
+[Step 2] Aligning markets to common date range...
+[DataLoader] Stock date range: 2015-01-05 00:00:00 to 2025-06-30 00:00:00 (2548 days)
+[DataLoader] Bond date range: 2017-01-17 00:00:00 to 2025-12-31 00:00:00 (2176 days)
+[DataLoader] Commodity date range: 2015-01-05 00:00:00 to 2025-12-31 00:00:00 (2679 days)
+[DataLoader] Common date range: 2017-01-17 00:00:00 to 2025-06-30 00:00:00 (2050 days)
+[DataLoader] Combined price matrix shape: (2050, 284)
+[DataLoader] Market split: stocks=248, bonds=12, commodities=24
+
+[Step 3] Temporal train/val/test split...
+[DataLoader] Temporal split: train=1435, val=307, test=308
+
+[Step 4] Per-asset z-score normalization...
+[DataLoader] Per-asset z-score normalization fitted on training data only
+[DataLoader] mean range: [0.9803, 173055.7656]
+[DataLoader] std  range: [0.000000, 55160.3203]
+[DataLoader] Z-scored train range: [-11.3746, 91.5527]
+
+[Step 6] Computing returns for graph construction...
+     Training returns shape: (1434, 284)
+
+[Step 7] Creating sliding window datasets...
+
+[Done] Dataset sizes: train=1396, val=268, test=269
+[Done] Total nodes: 284
+[Done] Commodity nodes (output dim): 24
+[Features] Computed 7 features from RAW prices: price, return, ma5_ratio, ma20_ratio, volatility, rsi_14, macd
+[Features] Shape: (T=2050, N=284, F=7)  range: [-21915.3594, 391400.0000]
+
+==========================================================================================
+  ABLATION: +BatchGraph  (variant=batch_graph, feat_dim=21, {})
+==========================================================================================
+  Params: 1,686,905
+
+============================================================
+CMGM Training
+============================================================
+Device: cuda
+Epochs: 300 (early stopping patience=10)
+Learning rate: 0.0001, Weight decay: 1e-05
+============================================================
+  [batch_graph] gcn_comm→[64, 24, 64] lstm→[64, 24, 64] → body → heads → [64, 4, 24]
+  Epoch   1/300 | Train Loss: 0.009828 | Val Loss: 0.007544 | LR: 1.00e-04 | Best: inf
+  Epoch   2/300 | Train Loss: 0.005500 | Val Loss: 0.006695 | LR: 1.00e-04 | Best: 0.007544
+  Epoch   3/300 | Train Loss: 0.004523 | Val Loss: 0.006200 | LR: 1.00e-04 | Best: 0.006695
+  Epoch   4/300 | Train Loss: 0.004251 | Val Loss: 0.005929 | LR: 1.00e-04 | Best: 0.006200
+  Epoch   5/300 | Train Loss: 0.004049 | Val Loss: 0.005694 | LR: 1.00e-04 | Best: 0.005929
+  Epoch   6/300 | Train Loss: 0.003836 | Val Loss: 0.005458 | LR: 1.00e-04 | Best: 0.005694
+  Epoch   7/300 | Train Loss: 0.003633 | Val Loss: 0.005232 | LR: 1.00e-04 | Best: 0.005458
+  Epoch   8/300 | Train Loss: 0.003435 | Val Loss: 0.005012 | LR: 1.00e-04 | Best: 0.005232
+  Epoch   9/300 | Train Loss: 0.003263 | Val Loss: 0.004833 | LR: 1.00e-04 | Best: 0.005012
+  Epoch  10/300 | Train Loss: 0.003094 | Val Loss: 0.004674 | LR: 1.00e-04 | Best: 0.004833
+  Epoch  11/300 | Train Loss: 0.002964 | Val Loss: 0.004513 | LR: 1.00e-04 | Best: 0.004674
+  Epoch  12/300 | Train Loss: 0.002833 | Val Loss: 0.004406 | LR: 1.00e-04 | Best: 0.004513
+  Epoch  13/300 | Train Loss: 0.002727 | Val Loss: 0.004300 | LR: 1.00e-04 | Best: 0.004406
+  Epoch  14/300 | Train Loss: 0.002628 | Val Loss: 0.004238 | LR: 1.00e-04 | Best: 0.004300
+  Epoch  15/300 | Train Loss: 0.002548 | Val Loss: 0.004149 | LR: 1.00e-04 | Best: 0.004238
+  Epoch  16/300 | Train Loss: 0.002485 | Val Loss: 0.004106 | LR: 1.00e-04 | Best: 0.004149
+  Epoch  17/300 | Train Loss: 0.002421 | Val Loss: 0.004053 | LR: 1.00e-04 | Best: 0.004106
+  Epoch  18/300 | Train Loss: 0.002363 | Val Loss: 0.003986 | LR: 1.00e-04 | Best: 0.004053
+  Epoch  19/300 | Train Loss: 0.002312 | Val Loss: 0.003927 | LR: 1.00e-04 | Best: 0.003986
+  Epoch  20/300 | Train Loss: 0.002287 | Val Loss: 0.003872 | LR: 1.00e-04 | Best: 0.003927
+  Epoch  21/300 | Train Loss: 0.002254 | Val Loss: 0.003794 | LR: 1.00e-04 | Best: 0.003872
+  Epoch  22/300 | Train Loss: 0.002245 | Val Loss: 0.003738 | LR: 1.00e-04 | Best: 0.003794
+  Epoch  23/300 | Train Loss: 0.002283 | Val Loss: 0.003660 | LR: 1.00e-04 | Best: 0.003738
+  Epoch  24/300 | Train Loss: 0.002250 | Val Loss: 0.003697 | LR: 1.00e-04 | Best: 0.003660
+  Epoch  25/300 | Train Loss: 0.002233 | Val Loss: 0.003737 | LR: 1.00e-04 | Best: 0.003660
+  Epoch  26/300 | Train Loss: 0.002303 | Val Loss: 0.003468 | LR: 1.00e-04 | Best: 0.003660
+  Epoch  27/300 | Train Loss: 0.002159 | Val Loss: 0.003464 | LR: 1.00e-04 | Best: 0.003468
+  Epoch  28/300 | Train Loss: 0.002163 | Val Loss: 0.003405 | LR: 1.00e-04 | Best: 0.003464
+  Epoch  29/300 | Train Loss: 0.002122 | Val Loss: 0.003428 | LR: 1.00e-04 | Best: 0.003405
+  Epoch  30/300 | Train Loss: 0.002011 | Val Loss: 0.003393 | LR: 1.00e-04 | Best: 0.003405
+  Epoch  31/300 | Train Loss: 0.001998 | Val Loss: 0.003434 | LR: 1.00e-04 | Best: 0.003393
+  Epoch  32/300 | Train Loss: 0.001979 | Val Loss: 0.003438 | LR: 1.00e-04 | Best: 0.003393
+  Epoch  33/300 | Train Loss: 0.001949 | Val Loss: 0.003422 | LR: 1.00e-04 | Best: 0.003393
+  Epoch  34/300 | Train Loss: 0.001920 | Val Loss: 0.003415 | LR: 1.00e-04 | Best: 0.003393
+  Epoch  35/300 | Train Loss: 0.001913 | Val Loss: 0.003409 | LR: 1.00e-04 | Best: 0.003393
+  Epoch  36/300 | Train Loss: 0.001900 | Val Loss: 0.003468 | LR: 5.00e-05 | Best: 0.003393
+  Epoch  37/300 | Train Loss: 0.001879 | Val Loss: 0.003515 | LR: 5.00e-05 | Best: 0.003393
+  Epoch  38/300 | Train Loss: 0.001868 | Val Loss: 0.003472 | LR: 5.00e-05 | Best: 0.003393
+  Epoch  39/300 | Train Loss: 0.001847 | Val Loss: 0.003476 | LR: 5.00e-05 | Best: 0.003393
+  Epoch  40/300 | Train Loss: 0.001838 | Val Loss: 0.003505 | LR: 5.00e-05 | Best: 0.003393
+
+[Early Stopping] No improvement for 10 epochs. Stopping at epoch 40.
+[Early Stopping] Best validation loss: 0.003393 at epoch 30
+
+[Checkpoint] Restored best model from epoch 30
+============================================================
+
+
+  ── Result ──
+  MAE: 0.050632  RMSE: 0.061253  Hit%: 48.8  vs Zero: +138.01%  [75s]
+
+====================================================================================================
+ABLATION STUDY — 5-day Return Space
+====================================================================================================
+Variant                Params    Time        MAE       RMSE    Hit%    vs Zero
+----------------------------------------------------------------------------------------------------
++BatchGraph         1,686,905     75s   0.050632   0.061253   48.8   +138.01%
+====================================================================================================
+
+📋 Experiment 20260818_211859 logged to /home/yangxiaotong/projects/myresearch/Commedities/experiments/EXPERIMENTS.jsonl

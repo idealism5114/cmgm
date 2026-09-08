@@ -1,0 +1,431 @@
+nohup: 忽略输入
+Device: cuda  |  Epochs: 300  |  Seed: 42
+Target: return  |  Primary horizon: 5d  |  Multi-horizons: [1, 5, 10, 20]
+Filtered to 2 variants: ['F-RegimeDynamic', 'F2-RegimeSemantic']
+
+[Data] Building 21-dim feature pipeline...
+============================================================
+CMGM Data Loading Pipeline
+============================================================
+
+[Step 1] Loading raw price data...
+
+[Step 2] Aligning markets to common date range...
+[DataLoader] Stock date range: 2015-01-05 00:00:00 to 2025-06-30 00:00:00 (2548 days)
+[DataLoader] Bond date range: 2017-01-17 00:00:00 to 2025-12-31 00:00:00 (2176 days)
+[DataLoader] Commodity date range: 2015-01-05 00:00:00 to 2025-12-31 00:00:00 (2679 days)
+[DataLoader] Common date range: 2017-01-17 00:00:00 to 2025-06-30 00:00:00 (2050 days)
+[DataLoader] Combined price matrix shape: (2050, 284)
+[DataLoader] Market split: stocks=248, bonds=12, commodities=24
+
+[Step 3] Temporal train/val/test split...
+[DataLoader] Temporal split: train=1435, val=307, test=308
+
+[Step 4] Per-asset z-score normalization...
+[DataLoader] Per-asset z-score normalization fitted on training data only
+[DataLoader] mean range: [0.9803, 173055.7656]
+[DataLoader] std  range: [0.000000, 55160.3203]
+[DataLoader] Z-scored train range: [-11.3746, 91.5527]
+
+[Step 6] Computing returns for graph construction...
+     Training returns shape: (1434, 284)
+
+[Step 7] Creating sliding window datasets...
+
+[Done] Dataset sizes: train=1396, val=268, test=269
+[Done] Total nodes: 284
+[Done] Commodity nodes (output dim): 24
+[Features] Computed 21 features: price, ret_1d, ret_5d, ret_10d, ret_20d, vol_5d, vol_10d, vol_20d, zscore_5d, zscore_10d, zscore_20d, price_ma5, price_ma10, price_ma20, price_ma60, rsi_14, bb_position, skewness_20d, kurtosis_20d, roc_10d, percentile_20d
+[Features] Shape: (T=2050, N=284, F=21)  range: [-4.4721, 391400.0000]
+
+[Data] Building 7-dim feature pipeline...
+============================================================
+CMGM Data Loading Pipeline
+============================================================
+
+[Step 1] Loading raw price data...
+
+[Step 2] Aligning markets to common date range...
+[DataLoader] Stock date range: 2015-01-05 00:00:00 to 2025-06-30 00:00:00 (2548 days)
+[DataLoader] Bond date range: 2017-01-17 00:00:00 to 2025-12-31 00:00:00 (2176 days)
+[DataLoader] Commodity date range: 2015-01-05 00:00:00 to 2025-12-31 00:00:00 (2679 days)
+[DataLoader] Common date range: 2017-01-17 00:00:00 to 2025-06-30 00:00:00 (2050 days)
+[DataLoader] Combined price matrix shape: (2050, 284)
+[DataLoader] Market split: stocks=248, bonds=12, commodities=24
+
+[Step 3] Temporal train/val/test split...
+[DataLoader] Temporal split: train=1435, val=307, test=308
+
+[Step 4] Per-asset z-score normalization...
+[DataLoader] Per-asset z-score normalization fitted on training data only
+[DataLoader] mean range: [0.9803, 173055.7656]
+[DataLoader] std  range: [0.000000, 55160.3203]
+[DataLoader] Z-scored train range: [-11.3746, 91.5527]
+
+[Step 6] Computing returns for graph construction...
+     Training returns shape: (1434, 284)
+
+[Step 7] Creating sliding window datasets...
+
+[Done] Dataset sizes: train=1396, val=268, test=269
+[Done] Total nodes: 284
+[Done] Commodity nodes (output dim): 24
+[Features] Computed 7 features from RAW prices: price, return, ma5_ratio, ma20_ratio, volatility, rsi_14, macd
+[Features] Shape: (T=2050, N=284, F=7)  range: [-21915.3594, 391400.0000]
+
+==========================================================================================
+  ABLATION: F-RegimeDynamic  (variant=regime_dynamic_transformer, feat_dim=21, {})
+==========================================================================================
+  Params: 1,213,719
+
+============================================================
+CMGM Training
+============================================================
+Device: cuda
+Epochs: 300 (early stopping patience=10)
+Learning rate: 0.0001, Weight decay: 1e-05
+============================================================
+  [regime_dynamic] h_spatial=[64, 64] h_temporal=[64, 64] → [64, 4, 24]
+  Epoch   1/300 | Train Loss: 0.004713 | Val Loss: 0.005100 | LR: 1.00e-04 | Best: inf
+  Epoch   2/300 | Train Loss: 0.004058 | Val Loss: 0.004567 | LR: 1.00e-04 | Best: 0.005100
+  Epoch   3/300 | Train Loss: 0.003669 | Val Loss: 0.004436 | LR: 1.00e-04 | Best: 0.004567
+  Epoch   4/300 | Train Loss: 0.003364 | Val Loss: 0.004410 | LR: 1.00e-04 | Best: 0.004436
+  Epoch   5/300 | Train Loss: 0.003215 | Val Loss: 0.004179 | LR: 1.00e-04 | Best: 0.004410
+  Epoch   6/300 | Train Loss: 0.003039 | Val Loss: 0.003957 | LR: 1.00e-04 | Best: 0.004179
+  Epoch   7/300 | Train Loss: 0.002881 | Val Loss: 0.003589 | LR: 1.00e-04 | Best: 0.003957
+  Epoch   8/300 | Train Loss: 0.002776 | Val Loss: 0.003387 | LR: 1.00e-04 | Best: 0.003589
+  Epoch   9/300 | Train Loss: 0.002653 | Val Loss: 0.003456 | LR: 1.00e-04 | Best: 0.003387
+  Epoch  10/300 | Train Loss: 0.002432 | Val Loss: 0.003334 | LR: 1.00e-04 | Best: 0.003387
+  Epoch  11/300 | Train Loss: 0.002325 | Val Loss: 0.003169 | LR: 1.00e-04 | Best: 0.003334
+  Epoch  12/300 | Train Loss: 0.002273 | Val Loss: 0.003084 | LR: 1.00e-04 | Best: 0.003169
+  Epoch  13/300 | Train Loss: 0.002242 | Val Loss: 0.003106 | LR: 1.00e-04 | Best: 0.003084
+  Epoch  14/300 | Train Loss: 0.002185 | Val Loss: 0.003220 | LR: 1.00e-04 | Best: 0.003084
+  Epoch  15/300 | Train Loss: 0.002101 | Val Loss: 0.003053 | LR: 1.00e-04 | Best: 0.003084
+  Epoch  16/300 | Train Loss: 0.001939 | Val Loss: 0.002915 | LR: 1.00e-04 | Best: 0.003053
+  Epoch  17/300 | Train Loss: 0.001853 | Val Loss: 0.002872 | LR: 1.00e-04 | Best: 0.002915
+  Epoch  18/300 | Train Loss: 0.001799 | Val Loss: 0.002823 | LR: 1.00e-04 | Best: 0.002872
+  Epoch  19/300 | Train Loss: 0.001738 | Val Loss: 0.002786 | LR: 1.00e-04 | Best: 0.002823
+  Epoch  20/300 | Train Loss: 0.001713 | Val Loss: 0.002782 | LR: 1.00e-04 | Best: 0.002786
+  Epoch  21/300 | Train Loss: 0.001704 | Val Loss: 0.002755 | LR: 1.00e-04 | Best: 0.002782
+  Epoch  22/300 | Train Loss: 0.001727 | Val Loss: 0.002701 | LR: 1.00e-04 | Best: 0.002755
+  Epoch  23/300 | Train Loss: 0.001725 | Val Loss: 0.002695 | LR: 1.00e-04 | Best: 0.002701
+  Epoch  24/300 | Train Loss: 0.001716 | Val Loss: 0.002559 | LR: 1.00e-04 | Best: 0.002695
+  Epoch  25/300 | Train Loss: 0.001642 | Val Loss: 0.002497 | LR: 1.00e-04 | Best: 0.002559
+  Epoch  26/300 | Train Loss: 0.001609 | Val Loss: 0.002514 | LR: 1.00e-04 | Best: 0.002497
+  Epoch  27/300 | Train Loss: 0.001549 | Val Loss: 0.002605 | LR: 1.00e-04 | Best: 0.002497
+  Epoch  28/300 | Train Loss: 0.001520 | Val Loss: 0.002609 | LR: 1.00e-04 | Best: 0.002497
+  Epoch  29/300 | Train Loss: 0.001520 | Val Loss: 0.002543 | LR: 1.00e-04 | Best: 0.002497
+  Epoch  30/300 | Train Loss: 0.001476 | Val Loss: 0.002497 | LR: 1.00e-04 | Best: 0.002497
+  Epoch  31/300 | Train Loss: 0.001463 | Val Loss: 0.002451 | LR: 1.00e-04 | Best: 0.002497
+  Epoch  32/300 | Train Loss: 0.001492 | Val Loss: 0.002400 | LR: 1.00e-04 | Best: 0.002451
+  Epoch  33/300 | Train Loss: 0.001466 | Val Loss: 0.002386 | LR: 1.00e-04 | Best: 0.002400
+  Epoch  34/300 | Train Loss: 0.001426 | Val Loss: 0.002436 | LR: 1.00e-04 | Best: 0.002386
+  Epoch  35/300 | Train Loss: 0.001459 | Val Loss: 0.002427 | LR: 1.00e-04 | Best: 0.002386
+  Epoch  36/300 | Train Loss: 0.001402 | Val Loss: 0.002407 | LR: 1.00e-04 | Best: 0.002386
+  Epoch  37/300 | Train Loss: 0.001362 | Val Loss: 0.002366 | LR: 1.00e-04 | Best: 0.002386
+  Epoch  38/300 | Train Loss: 0.001366 | Val Loss: 0.002322 | LR: 1.00e-04 | Best: 0.002366
+  Epoch  39/300 | Train Loss: 0.001379 | Val Loss: 0.002311 | LR: 1.00e-04 | Best: 0.002322
+  Epoch  40/300 | Train Loss: 0.001345 | Val Loss: 0.002304 | LR: 1.00e-04 | Best: 0.002311
+  Epoch  41/300 | Train Loss: 0.001336 | Val Loss: 0.002296 | LR: 1.00e-04 | Best: 0.002304
+  Epoch  42/300 | Train Loss: 0.001313 | Val Loss: 0.002274 | LR: 1.00e-04 | Best: 0.002296
+  Epoch  43/300 | Train Loss: 0.001328 | Val Loss: 0.002258 | LR: 1.00e-04 | Best: 0.002274
+  Epoch  44/300 | Train Loss: 0.001312 | Val Loss: 0.002227 | LR: 1.00e-04 | Best: 0.002258
+  Epoch  45/300 | Train Loss: 0.001305 | Val Loss: 0.002181 | LR: 1.00e-04 | Best: 0.002227
+  Epoch  46/300 | Train Loss: 0.001313 | Val Loss: 0.002162 | LR: 1.00e-04 | Best: 0.002181
+  Epoch  47/300 | Train Loss: 0.001278 | Val Loss: 0.002176 | LR: 1.00e-04 | Best: 0.002162
+  Epoch  48/300 | Train Loss: 0.001250 | Val Loss: 0.002150 | LR: 1.00e-04 | Best: 0.002162
+  Epoch  49/300 | Train Loss: 0.001234 | Val Loss: 0.002124 | LR: 1.00e-04 | Best: 0.002150
+  Epoch  50/300 | Train Loss: 0.001260 | Val Loss: 0.002097 | LR: 1.00e-04 | Best: 0.002124
+  Epoch  51/300 | Train Loss: 0.001232 | Val Loss: 0.002063 | LR: 1.00e-04 | Best: 0.002097
+  Epoch  52/300 | Train Loss: 0.001230 | Val Loss: 0.002044 | LR: 1.00e-04 | Best: 0.002063
+  Epoch  53/300 | Train Loss: 0.001228 | Val Loss: 0.002074 | LR: 1.00e-04 | Best: 0.002044
+  Epoch  54/300 | Train Loss: 0.001236 | Val Loss: 0.002063 | LR: 1.00e-04 | Best: 0.002044
+  Epoch  55/300 | Train Loss: 0.001198 | Val Loss: 0.002027 | LR: 1.00e-04 | Best: 0.002044
+  Epoch  56/300 | Train Loss: 0.001178 | Val Loss: 0.001994 | LR: 1.00e-04 | Best: 0.002027
+  Epoch  57/300 | Train Loss: 0.001195 | Val Loss: 0.002016 | LR: 1.00e-04 | Best: 0.001994
+  Epoch  58/300 | Train Loss: 0.001211 | Val Loss: 0.002005 | LR: 1.00e-04 | Best: 0.001994
+  Epoch  59/300 | Train Loss: 0.001229 | Val Loss: 0.001948 | LR: 1.00e-04 | Best: 0.001994
+  Epoch  60/300 | Train Loss: 0.001215 | Val Loss: 0.001996 | LR: 1.00e-04 | Best: 0.001948
+  Epoch  61/300 | Train Loss: 0.001270 | Val Loss: 0.001927 | LR: 1.00e-04 | Best: 0.001948
+  Epoch  62/300 | Train Loss: 0.001183 | Val Loss: 0.001902 | LR: 1.00e-04 | Best: 0.001927
+  Epoch  63/300 | Train Loss: 0.001142 | Val Loss: 0.001906 | LR: 1.00e-04 | Best: 0.001902
+  Epoch  64/300 | Train Loss: 0.001124 | Val Loss: 0.001919 | LR: 1.00e-04 | Best: 0.001902
+  Epoch  65/300 | Train Loss: 0.001121 | Val Loss: 0.001933 | LR: 1.00e-04 | Best: 0.001902
+  Epoch  66/300 | Train Loss: 0.001110 | Val Loss: 0.001946 | LR: 1.00e-04 | Best: 0.001902
+  Epoch  67/300 | Train Loss: 0.001154 | Val Loss: 0.001897 | LR: 1.00e-04 | Best: 0.001902
+  Epoch  68/300 | Train Loss: 0.001141 | Val Loss: 0.001870 | LR: 1.00e-04 | Best: 0.001897
+  Epoch  69/300 | Train Loss: 0.001149 | Val Loss: 0.001843 | LR: 1.00e-04 | Best: 0.001870
+  Epoch  70/300 | Train Loss: 0.001138 | Val Loss: 0.001823 | LR: 1.00e-04 | Best: 0.001843
+  Epoch  71/300 | Train Loss: 0.001155 | Val Loss: 0.001848 | LR: 1.00e-04 | Best: 0.001823
+  Epoch  72/300 | Train Loss: 0.001100 | Val Loss: 0.001798 | LR: 1.00e-04 | Best: 0.001823
+  Epoch  73/300 | Train Loss: 0.001072 | Val Loss: 0.001776 | LR: 1.00e-04 | Best: 0.001798
+  Epoch  74/300 | Train Loss: 0.001083 | Val Loss: 0.001796 | LR: 1.00e-04 | Best: 0.001776
+  Epoch  75/300 | Train Loss: 0.001073 | Val Loss: 0.001761 | LR: 1.00e-04 | Best: 0.001776
+  Epoch  76/300 | Train Loss: 0.001057 | Val Loss: 0.001742 | LR: 1.00e-04 | Best: 0.001761
+  Epoch  77/300 | Train Loss: 0.001076 | Val Loss: 0.001737 | LR: 1.00e-04 | Best: 0.001742
+  Epoch  78/300 | Train Loss: 0.001076 | Val Loss: 0.001717 | LR: 1.00e-04 | Best: 0.001737
+  Epoch  79/300 | Train Loss: 0.001045 | Val Loss: 0.001704 | LR: 1.00e-04 | Best: 0.001717
+  Epoch  80/300 | Train Loss: 0.001067 | Val Loss: 0.001682 | LR: 1.00e-04 | Best: 0.001704
+  Epoch  81/300 | Train Loss: 0.001044 | Val Loss: 0.001646 | LR: 1.00e-04 | Best: 0.001682
+  Epoch  82/300 | Train Loss: 0.001011 | Val Loss: 0.001630 | LR: 1.00e-04 | Best: 0.001646
+  Epoch  83/300 | Train Loss: 0.001017 | Val Loss: 0.001667 | LR: 1.00e-04 | Best: 0.001630
+  Epoch  84/300 | Train Loss: 0.001028 | Val Loss: 0.001622 | LR: 1.00e-04 | Best: 0.001630
+  Epoch  85/300 | Train Loss: 0.001010 | Val Loss: 0.001622 | LR: 1.00e-04 | Best: 0.001622
+  Epoch  86/300 | Train Loss: 0.001026 | Val Loss: 0.001662 | LR: 1.00e-04 | Best: 0.001622
+  Epoch  87/300 | Train Loss: 0.001018 | Val Loss: 0.001593 | LR: 1.00e-04 | Best: 0.001622
+  Epoch  88/300 | Train Loss: 0.000979 | Val Loss: 0.001618 | LR: 1.00e-04 | Best: 0.001593
+  Epoch  89/300 | Train Loss: 0.000973 | Val Loss: 0.001648 | LR: 1.00e-04 | Best: 0.001593
+  Epoch  90/300 | Train Loss: 0.000981 | Val Loss: 0.001598 | LR: 1.00e-04 | Best: 0.001593
+  Epoch  91/300 | Train Loss: 0.000987 | Val Loss: 0.001624 | LR: 1.00e-04 | Best: 0.001593
+  Epoch  92/300 | Train Loss: 0.001004 | Val Loss: 0.001639 | LR: 1.00e-04 | Best: 0.001593
+  Epoch  93/300 | Train Loss: 0.000978 | Val Loss: 0.001589 | LR: 1.00e-04 | Best: 0.001593
+  Epoch  94/300 | Train Loss: 0.000954 | Val Loss: 0.001605 | LR: 1.00e-04 | Best: 0.001589
+  Epoch  95/300 | Train Loss: 0.000951 | Val Loss: 0.001628 | LR: 1.00e-04 | Best: 0.001589
+  Epoch  96/300 | Train Loss: 0.000954 | Val Loss: 0.001586 | LR: 1.00e-04 | Best: 0.001589
+  Epoch  97/300 | Train Loss: 0.000965 | Val Loss: 0.001616 | LR: 1.00e-04 | Best: 0.001586
+  Epoch  98/300 | Train Loss: 0.000960 | Val Loss: 0.001610 | LR: 1.00e-04 | Best: 0.001586
+  Epoch  99/300 | Train Loss: 0.000946 | Val Loss: 0.001570 | LR: 1.00e-04 | Best: 0.001586
+  Epoch 100/300 | Train Loss: 0.000948 | Val Loss: 0.001605 | LR: 1.00e-04 | Best: 0.001570
+  Epoch 101/300 | Train Loss: 0.000929 | Val Loss: 0.001596 | LR: 1.00e-04 | Best: 0.001570
+  Epoch 102/300 | Train Loss: 0.000930 | Val Loss: 0.001578 | LR: 1.00e-04 | Best: 0.001570
+  Epoch 103/300 | Train Loss: 0.000933 | Val Loss: 0.001611 | LR: 1.00e-04 | Best: 0.001570
+  Epoch 104/300 | Train Loss: 0.000928 | Val Loss: 0.001589 | LR: 1.00e-04 | Best: 0.001570
+  Epoch 105/300 | Train Loss: 0.000915 | Val Loss: 0.001577 | LR: 5.00e-05 | Best: 0.001570
+  Epoch 106/300 | Train Loss: 0.000927 | Val Loss: 0.001591 | LR: 5.00e-05 | Best: 0.001570
+  Epoch 107/300 | Train Loss: 0.000888 | Val Loss: 0.001575 | LR: 5.00e-05 | Best: 0.001570
+  Epoch 108/300 | Train Loss: 0.000874 | Val Loss: 0.001578 | LR: 5.00e-05 | Best: 0.001570
+  Epoch 109/300 | Train Loss: 0.000867 | Val Loss: 0.001584 | LR: 5.00e-05 | Best: 0.001570
+
+[Early Stopping] No improvement for 10 epochs. Stopping at epoch 109.
+[Early Stopping] Best validation loss: 0.001570 at epoch 99
+
+[Checkpoint] Restored best model from epoch 99
+============================================================
+
+  [F regime p] mean=[0.3319 0.3347 0.3333] std=0.0011 min=0.3319 max=0.3347
+    t=0: [0.3319 0.3347 0.3333]
+    t=2: [0.3319 0.3347 0.3333]
+    t=4: [0.3319 0.3347 0.3333]
+    t=6: [0.3319 0.3347 0.3333]
+    t=8: [0.3319 0.3347 0.3333]
+    t=10: [0.3319 0.3347 0.3333]
+    t=12: [0.3319 0.3347 0.3333]
+    t=14: [0.3319 0.3347 0.3333]
+    t=16: [0.3319 0.3347 0.3333]
+    t=18: [0.3319 0.3347 0.3333]
+  [F entropy] mean=1.0986 std=0.0000 (logK=1.0986)
+  [F transition] mean ||p_t−p_{t−1}||_1 = 0.0000
+  [F prototype cosine] pairwise=[-0.276  -0.0996 -0.276  -0.2075 -0.0996 -0.2075] mean=-0.1944
+  [F adapter cosine] cos12=-0.2797 cos13=-0.2281 cos23=-0.2893
+  [F grad] ||∇prototypes|| = 0.0000
+  [F grad] ||∇context_enc|| = 0.0000
+  [F grad] ||∇transition|| = 0.0000
+  [F grad] ||∇adapter1|| = 0.0018
+  [F grad] ||∇adapter2|| = 0.0037
+  [F grad] ||∇adapter3|| = 0.0021
+  [F forced regime] h_temporal / pred differences vs real
+    real: h_temporal_norm=19.1989 pred_norm=0.4016
+    r1: h_temporal_norm=39.4632 pred_norm=0.7170
+    r2: h_temporal_norm=64.4886 pred_norm=0.3293
+    r3: h_temporal_norm=41.3771 pred_norm=0.5209
+  [F regime semantics] (soft-weighted by p_last)
+    regime 0: weight=0.332 mean_ret=+0.007459 mean_abs=0.009661 vol=0.011668
+    regime 1: weight=0.335 mean_ret=+0.007459 mean_abs=0.009661 vol=0.011668
+    regime 2: weight=0.333 mean_ret=+0.007459 mean_abs=0.009661 vol=0.011668
+  [F causality] max p diff at t<10 = 0.000e+00 (PASS)
+
+  ── Result ──
+  MAE: 0.022135  RMSE: 0.028732  Hit%: 51.8  vs Zero: +4.05%  [393s]
+
+==========================================================================================
+  ABLATION: F2-RegimeSemantic  (variant=regime_dynamic_semantic, feat_dim=21, {})
+==========================================================================================
+  Params: 1,213,728
+
+============================================================
+CMGM Training
+============================================================
+Device: cuda
+Epochs: 300 (early stopping patience=10)
+Learning rate: 0.0001, Weight decay: 1e-05
+============================================================
+  [regime_dynamic] h_spatial=[64, 64] h_temporal=[64, 64] → [64, 4, 24]
+  Epoch   1/300 | Train Loss: 0.007622 | Val Loss: 0.005100 | LR: 1.00e-04 | Best: inf
+  Epoch   2/300 | Train Loss: 0.006957 | Val Loss: 0.004568 | LR: 1.00e-04 | Best: 0.005100
+  Epoch   3/300 | Train Loss: 0.006559 | Val Loss: 0.004437 | LR: 1.00e-04 | Best: 0.004568
+  Epoch   4/300 | Train Loss: 0.006244 | Val Loss: 0.004413 | LR: 1.00e-04 | Best: 0.004437
+  Epoch   5/300 | Train Loss: 0.006085 | Val Loss: 0.004179 | LR: 1.00e-04 | Best: 0.004413
+  Epoch   6/300 | Train Loss: 0.005901 | Val Loss: 0.003955 | LR: 1.00e-04 | Best: 0.004179
+  Epoch   7/300 | Train Loss: 0.005733 | Val Loss: 0.003588 | LR: 1.00e-04 | Best: 0.003955
+  Epoch   8/300 | Train Loss: 0.005618 | Val Loss: 0.003387 | LR: 1.00e-04 | Best: 0.003588
+  Epoch   9/300 | Train Loss: 0.005487 | Val Loss: 0.003446 | LR: 1.00e-04 | Best: 0.003387
+  Epoch  10/300 | Train Loss: 0.005258 | Val Loss: 0.003336 | LR: 1.00e-04 | Best: 0.003387
+  Epoch  11/300 | Train Loss: 0.005135 | Val Loss: 0.003186 | LR: 1.00e-04 | Best: 0.003336
+  Epoch  12/300 | Train Loss: 0.005075 | Val Loss: 0.003075 | LR: 1.00e-04 | Best: 0.003186
+  Epoch  13/300 | Train Loss: 0.005047 | Val Loss: 0.003106 | LR: 1.00e-04 | Best: 0.003075
+  Epoch  14/300 | Train Loss: 0.004984 | Val Loss: 0.003221 | LR: 1.00e-04 | Best: 0.003075
+  Epoch  15/300 | Train Loss: 0.004898 | Val Loss: 0.003050 | LR: 1.00e-04 | Best: 0.003075
+  Epoch  16/300 | Train Loss: 0.004722 | Val Loss: 0.002858 | LR: 1.00e-04 | Best: 0.003050
+  Epoch  17/300 | Train Loss: 0.004643 | Val Loss: 0.002854 | LR: 1.00e-04 | Best: 0.002858
+  Epoch  18/300 | Train Loss: 0.004542 | Val Loss: 0.002800 | LR: 1.00e-04 | Best: 0.002854
+  Epoch  19/300 | Train Loss: 0.004466 | Val Loss: 0.002771 | LR: 1.00e-04 | Best: 0.002800
+  Epoch  20/300 | Train Loss: 0.004425 | Val Loss: 0.002745 | LR: 1.00e-04 | Best: 0.002771
+  Epoch  21/300 | Train Loss: 0.004374 | Val Loss: 0.002736 | LR: 1.00e-04 | Best: 0.002745
+  Epoch  22/300 | Train Loss: 0.004360 | Val Loss: 0.002763 | LR: 1.00e-04 | Best: 0.002736
+  Epoch  23/300 | Train Loss: 0.004380 | Val Loss: 0.002804 | LR: 1.00e-04 | Best: 0.002736
+  Epoch  24/300 | Train Loss: 0.004362 | Val Loss: 0.002732 | LR: 1.00e-04 | Best: 0.002736
+  Epoch  25/300 | Train Loss: 0.004406 | Val Loss: 0.002596 | LR: 1.00e-04 | Best: 0.002732
+  Epoch  26/300 | Train Loss: 0.004322 | Val Loss: 0.002637 | LR: 1.00e-04 | Best: 0.002596
+  Epoch  27/300 | Train Loss: 0.004255 | Val Loss: 0.002642 | LR: 1.00e-04 | Best: 0.002596
+  Epoch  28/300 | Train Loss: 0.004208 | Val Loss: 0.002594 | LR: 1.00e-04 | Best: 0.002596
+  Epoch  29/300 | Train Loss: 0.004220 | Val Loss: 0.002462 | LR: 1.00e-04 | Best: 0.002594
+  Epoch  30/300 | Train Loss: 0.004172 | Val Loss: 0.002391 | LR: 1.00e-04 | Best: 0.002462
+  Epoch  31/300 | Train Loss: 0.004181 | Val Loss: 0.002376 | LR: 1.00e-04 | Best: 0.002391
+  Epoch  32/300 | Train Loss: 0.004090 | Val Loss: 0.002375 | LR: 1.00e-04 | Best: 0.002376
+  Epoch  33/300 | Train Loss: 0.004056 | Val Loss: 0.002432 | LR: 1.00e-04 | Best: 0.002375
+  Epoch  34/300 | Train Loss: 0.004041 | Val Loss: 0.002464 | LR: 1.00e-04 | Best: 0.002375
+  Epoch  35/300 | Train Loss: 0.004036 | Val Loss: 0.002459 | LR: 1.00e-04 | Best: 0.002375
+  Epoch  36/300 | Train Loss: 0.004007 | Val Loss: 0.002362 | LR: 1.00e-04 | Best: 0.002375
+  Epoch  37/300 | Train Loss: 0.003988 | Val Loss: 0.002303 | LR: 1.00e-04 | Best: 0.002362
+  Epoch  38/300 | Train Loss: 0.003992 | Val Loss: 0.002315 | LR: 1.00e-04 | Best: 0.002303
+  Epoch  39/300 | Train Loss: 0.003992 | Val Loss: 0.002404 | LR: 1.00e-04 | Best: 0.002303
+  Epoch  40/300 | Train Loss: 0.004018 | Val Loss: 0.002297 | LR: 1.00e-04 | Best: 0.002303
+  Epoch  41/300 | Train Loss: 0.003955 | Val Loss: 0.002245 | LR: 1.00e-04 | Best: 0.002297
+  Epoch  42/300 | Train Loss: 0.003927 | Val Loss: 0.002202 | LR: 1.00e-04 | Best: 0.002245
+  Epoch  43/300 | Train Loss: 0.003887 | Val Loss: 0.002194 | LR: 1.00e-04 | Best: 0.002202
+  Epoch  44/300 | Train Loss: 0.003839 | Val Loss: 0.002180 | LR: 1.00e-04 | Best: 0.002194
+  Epoch  45/300 | Train Loss: 0.003831 | Val Loss: 0.002156 | LR: 1.00e-04 | Best: 0.002180
+  Epoch  46/300 | Train Loss: 0.003825 | Val Loss: 0.002158 | LR: 1.00e-04 | Best: 0.002156
+  Epoch  47/300 | Train Loss: 0.003837 | Val Loss: 0.002142 | LR: 1.00e-04 | Best: 0.002156
+  Epoch  48/300 | Train Loss: 0.003881 | Val Loss: 0.002123 | LR: 1.00e-04 | Best: 0.002142
+  Epoch  49/300 | Train Loss: 0.003880 | Val Loss: 0.002123 | LR: 1.00e-04 | Best: 0.002123
+  Epoch  50/300 | Train Loss: 0.003819 | Val Loss: 0.002081 | LR: 1.00e-04 | Best: 0.002123
+  Epoch  51/300 | Train Loss: 0.003755 | Val Loss: 0.002058 | LR: 1.00e-04 | Best: 0.002081
+  Epoch  52/300 | Train Loss: 0.003745 | Val Loss: 0.002042 | LR: 1.00e-04 | Best: 0.002058
+  Epoch  53/300 | Train Loss: 0.003710 | Val Loss: 0.002008 | LR: 1.00e-04 | Best: 0.002042
+  Epoch  54/300 | Train Loss: 0.003699 | Val Loss: 0.001995 | LR: 1.00e-04 | Best: 0.002008
+  Epoch  55/300 | Train Loss: 0.003683 | Val Loss: 0.001982 | LR: 1.00e-04 | Best: 0.001995
+  Epoch  56/300 | Train Loss: 0.003674 | Val Loss: 0.001973 | LR: 1.00e-04 | Best: 0.001982
+  Epoch  57/300 | Train Loss: 0.003684 | Val Loss: 0.001959 | LR: 1.00e-04 | Best: 0.001973
+  Epoch  58/300 | Train Loss: 0.003690 | Val Loss: 0.001943 | LR: 1.00e-04 | Best: 0.001959
+  Epoch  59/300 | Train Loss: 0.003742 | Val Loss: 0.001923 | LR: 1.00e-04 | Best: 0.001943
+  Epoch  60/300 | Train Loss: 0.003659 | Val Loss: 0.001882 | LR: 1.00e-04 | Best: 0.001923
+  Epoch  61/300 | Train Loss: 0.003613 | Val Loss: 0.001863 | LR: 1.00e-04 | Best: 0.001882
+  Epoch  62/300 | Train Loss: 0.003597 | Val Loss: 0.001904 | LR: 1.00e-04 | Best: 0.001863
+  Epoch  63/300 | Train Loss: 0.003594 | Val Loss: 0.001905 | LR: 1.00e-04 | Best: 0.001863
+  Epoch  64/300 | Train Loss: 0.003585 | Val Loss: 0.001850 | LR: 1.00e-04 | Best: 0.001863
+  Epoch  65/300 | Train Loss: 0.003564 | Val Loss: 0.001844 | LR: 1.00e-04 | Best: 0.001850
+  Epoch  66/300 | Train Loss: 0.003571 | Val Loss: 0.001882 | LR: 1.00e-04 | Best: 0.001844
+  Epoch  67/300 | Train Loss: 0.003571 | Val Loss: 0.001848 | LR: 1.00e-04 | Best: 0.001844
+  Epoch  68/300 | Train Loss: 0.003548 | Val Loss: 0.001847 | LR: 1.00e-04 | Best: 0.001844
+  Epoch  69/300 | Train Loss: 0.003611 | Val Loss: 0.001858 | LR: 1.00e-04 | Best: 0.001844
+  Epoch  70/300 | Train Loss: 0.003530 | Val Loss: 0.001818 | LR: 1.00e-04 | Best: 0.001844
+  Epoch  71/300 | Train Loss: 0.003486 | Val Loss: 0.001828 | LR: 1.00e-04 | Best: 0.001818
+  Epoch  72/300 | Train Loss: 0.003462 | Val Loss: 0.001835 | LR: 1.00e-04 | Best: 0.001818
+  Epoch  73/300 | Train Loss: 0.003443 | Val Loss: 0.001820 | LR: 1.00e-04 | Best: 0.001818
+  Epoch  74/300 | Train Loss: 0.003439 | Val Loss: 0.001813 | LR: 1.00e-04 | Best: 0.001818
+  Epoch  75/300 | Train Loss: 0.003456 | Val Loss: 0.001815 | LR: 1.00e-04 | Best: 0.001813
+  Epoch  76/300 | Train Loss: 0.003503 | Val Loss: 0.001754 | LR: 1.00e-04 | Best: 0.001813
+  Epoch  77/300 | Train Loss: 0.003473 | Val Loss: 0.001709 | LR: 1.00e-04 | Best: 0.001754
+  Epoch  78/300 | Train Loss: 0.003448 | Val Loss: 0.001732 | LR: 1.00e-04 | Best: 0.001709
+  Epoch  79/300 | Train Loss: 0.003445 | Val Loss: 0.001752 | LR: 1.00e-04 | Best: 0.001709
+  Epoch  80/300 | Train Loss: 0.003409 | Val Loss: 0.001742 | LR: 1.00e-04 | Best: 0.001709
+  Epoch  81/300 | Train Loss: 0.003364 | Val Loss: 0.001723 | LR: 1.00e-04 | Best: 0.001709
+  Epoch  82/300 | Train Loss: 0.003354 | Val Loss: 0.001730 | LR: 1.00e-04 | Best: 0.001709
+  Epoch  83/300 | Train Loss: 0.003358 | Val Loss: 0.001724 | LR: 5.00e-05 | Best: 0.001709
+  Epoch  84/300 | Train Loss: 0.003344 | Val Loss: 0.001713 | LR: 5.00e-05 | Best: 0.001709
+  Epoch  85/300 | Train Loss: 0.003335 | Val Loss: 0.001697 | LR: 5.00e-05 | Best: 0.001709
+  Epoch  86/300 | Train Loss: 0.003312 | Val Loss: 0.001699 | LR: 5.00e-05 | Best: 0.001697
+  Epoch  87/300 | Train Loss: 0.003301 | Val Loss: 0.001699 | LR: 5.00e-05 | Best: 0.001697
+  Epoch  88/300 | Train Loss: 0.003294 | Val Loss: 0.001701 | LR: 5.00e-05 | Best: 0.001697
+  Epoch  89/300 | Train Loss: 0.003284 | Val Loss: 0.001695 | LR: 5.00e-05 | Best: 0.001697
+  Epoch  90/300 | Train Loss: 0.003282 | Val Loss: 0.001701 | LR: 5.00e-05 | Best: 0.001695
+  Epoch  91/300 | Train Loss: 0.003279 | Val Loss: 0.001706 | LR: 5.00e-05 | Best: 0.001695
+  Epoch  92/300 | Train Loss: 0.003272 | Val Loss: 0.001696 | LR: 5.00e-05 | Best: 0.001695
+  Epoch  93/300 | Train Loss: 0.003267 | Val Loss: 0.001706 | LR: 5.00e-05 | Best: 0.001695
+  Epoch  94/300 | Train Loss: 0.003270 | Val Loss: 0.001710 | LR: 5.00e-05 | Best: 0.001695
+  Epoch  95/300 | Train Loss: 0.003273 | Val Loss: 0.001681 | LR: 5.00e-05 | Best: 0.001695
+  Epoch  96/300 | Train Loss: 0.003266 | Val Loss: 0.001709 | LR: 5.00e-05 | Best: 0.001681
+  Epoch  97/300 | Train Loss: 0.003270 | Val Loss: 0.001690 | LR: 5.00e-05 | Best: 0.001681
+  Epoch  98/300 | Train Loss: 0.003270 | Val Loss: 0.001670 | LR: 5.00e-05 | Best: 0.001681
+  Epoch  99/300 | Train Loss: 0.003260 | Val Loss: 0.001712 | LR: 5.00e-05 | Best: 0.001670
+  Epoch 100/300 | Train Loss: 0.003252 | Val Loss: 0.001678 | LR: 5.00e-05 | Best: 0.001670
+  Epoch 101/300 | Train Loss: 0.003250 | Val Loss: 0.001684 | LR: 5.00e-05 | Best: 0.001670
+  Epoch 102/300 | Train Loss: 0.003254 | Val Loss: 0.001711 | LR: 5.00e-05 | Best: 0.001670
+  Epoch 103/300 | Train Loss: 0.003246 | Val Loss: 0.001674 | LR: 5.00e-05 | Best: 0.001670
+  Epoch 104/300 | Train Loss: 0.003251 | Val Loss: 0.001684 | LR: 2.50e-05 | Best: 0.001670
+  Epoch 105/300 | Train Loss: 0.003244 | Val Loss: 0.001669 | LR: 2.50e-05 | Best: 0.001670
+  Epoch 106/300 | Train Loss: 0.003205 | Val Loss: 0.001675 | LR: 2.50e-05 | Best: 0.001669
+  Epoch 107/300 | Train Loss: 0.003201 | Val Loss: 0.001677 | LR: 2.50e-05 | Best: 0.001669
+  Epoch 108/300 | Train Loss: 0.003206 | Val Loss: 0.001679 | LR: 2.50e-05 | Best: 0.001669
+  Epoch 109/300 | Train Loss: 0.003198 | Val Loss: 0.001682 | LR: 2.50e-05 | Best: 0.001669
+  Epoch 110/300 | Train Loss: 0.003193 | Val Loss: 0.001681 | LR: 2.50e-05 | Best: 0.001669
+  Epoch 111/300 | Train Loss: 0.003194 | Val Loss: 0.001684 | LR: 1.25e-05 | Best: 0.001669
+  Epoch 112/300 | Train Loss: 0.003183 | Val Loss: 0.001684 | LR: 1.25e-05 | Best: 0.001669
+  Epoch 113/300 | Train Loss: 0.003182 | Val Loss: 0.001686 | LR: 1.25e-05 | Best: 0.001669
+  Epoch 114/300 | Train Loss: 0.003181 | Val Loss: 0.001685 | LR: 1.25e-05 | Best: 0.001669
+  Epoch 115/300 | Train Loss: 0.003178 | Val Loss: 0.001686 | LR: 1.25e-05 | Best: 0.001669
+
+[Early Stopping] No improvement for 10 epochs. Stopping at epoch 115.
+[Early Stopping] Best validation loss: 0.001669 at epoch 105
+
+[Checkpoint] Restored best model from epoch 105
+============================================================
+
+  [F regime p] mean=[0.3322 0.3344 0.3334] std=0.0009 min=0.3322 max=0.3344
+    t=0: [0.3322 0.3344 0.3334]
+    t=2: [0.3322 0.3344 0.3334]
+    t=4: [0.3322 0.3344 0.3334]
+    t=6: [0.3322 0.3344 0.3334]
+    t=8: [0.3322 0.3344 0.3334]
+    t=10: [0.3322 0.3344 0.3334]
+    t=12: [0.3322 0.3344 0.3334]
+    t=14: [0.3322 0.3344 0.3334]
+    t=16: [0.3322 0.3344 0.3334]
+    t=18: [0.3322 0.3344 0.3334]
+  [F entropy] mean=1.0986 std=0.0000 (logK=1.0986)
+  [F transition] mean ||p_t−p_{t−1}||_1 = 0.0000
+  [F prototype cosine] pairwise=[-0.2991  0.053  -0.2991 -0.3244  0.053  -0.3244] mean=-0.1902
+  [F adapter cosine] cos12=-0.1672 cos13=-0.2499 cos23=-0.2143
+  [F2 state centers]
+    center_0 = [ 0.1902  0.1414 -0.0135]
+    center_1 = [0.1571 0.1685 0.0203]
+    center_2 = [ 0.1445  0.1792 -0.007 ]
+  [F2 center distances] pairwise=[0.0545 0.0597 0.0545 0.0319 0.0597 0.0319]
+  [F2 reconstruction] mean ||m_hat−m||² = 0.095353
+  [F2 state semantics] (weighted by p_last)
+    state 0: weight=0.332 m=[abs_ret=+0.2676 vol=+0.3390 slope=-0.0018]
+    state 1: weight=0.334 m=[abs_ret=+0.2676 vol=+0.3390 slope=-0.0018]
+    state 2: weight=0.333 m=[abs_ret=+0.2676 vol=+0.3390 slope=-0.0018]
+  [F2 event test] vol range: min=0.0000 max=0.4061
+  [F grad] ||∇prototypes|| = 0.0000
+  [F grad] ||∇context_enc|| = 0.0000
+  [F grad] ||∇transition|| = 0.0001
+  [F grad] ||∇adapter1|| = 0.0031
+  [F grad] ||∇adapter2|| = 0.0049
+  [F grad] ||∇adapter3|| = 0.0036
+  [F grad] state_centers: None
+  [F forced regime] h_temporal / pred differences vs real
+    real: h_temporal_norm=24.2386 pred_norm=0.5380
+    r1: h_temporal_norm=46.9913 pred_norm=0.7479
+    r2: h_temporal_norm=75.8041 pred_norm=0.4049
+    r3: h_temporal_norm=44.8193 pred_norm=0.6315
+  [F regime semantics] (soft-weighted by p_last)
+    regime 0: weight=0.332 mean_ret=+0.007459 mean_abs=0.009661 vol=0.011668
+    regime 1: weight=0.334 mean_ret=+0.007459 mean_abs=0.009661 vol=0.011668
+    regime 2: weight=0.333 mean_ret=+0.007459 mean_abs=0.009661 vol=0.011668
+  [F causality] max p diff at t<10 = 0.000e+00 (PASS)
+
+  ── Result ──
+  MAE: 0.022074  RMSE: 0.028482  Hit%: 50.6  vs Zero: +3.76%  [418s]
+
+====================================================================================================
+ABLATION STUDY — 5-day Return Space
+====================================================================================================
+Variant                Params    Time        MAE       RMSE    Hit%    vs Zero
+----------------------------------------------------------------------------------------------------
+adapter3            1,213,719    393s   0.022135   0.028732   51.8     +4.05%
+state_centers       1,213,728    418s   0.022074   0.028482   50.6     +3.76%
+====================================================================================================
+
+📋 Experiment 20260830_145831 logged to /home/yangxiaotong/projects/myresearch/Commedities/experiments/EXPERIMENTS.jsonl

@@ -21,7 +21,70 @@ from cmgm.config import (
     LEARNING_RATE, WEIGHT_DECAY,
     NUM_EPOCHS, PATIENCE,
     LOSS_TYPE, HUBER_DELTA,
+    MULTI_HORIZONS, TARGET_HORIZON,
 )
+
+FIVE_DAY_ONLY_VARIANT = 'switching_latent_balanced_readout_5d_only'
+FIVE_DAY_OBJECTIVE_MULTIPLIER = 4.0
+GROUPED_VARIANT = 'switching_latent_balanced_readout_5_10_20'
+GROUPED_HORIZONS = (5, 10, 20)
+GROUPED_MULTIPLIER = 4.0 / 3.0
+GROUPED_OBJECTIVE = '4/3*(5d+10d+20d)'
+NO_SWITCH_KL_VARIANT = 'switching_latent_balanced_readout_no_switch_kl'
+
+
+def _effective_switch_loss(model, branch):
+    """Training contribution only; retain the filter's original KL and schedule."""
+    if getattr(model, 'disable_switch_kl', False):
+        # Independent zero: no KL autograd path, even when raw KL is nonzero.
+        return branch.regime_filter.transition_logits.new_zeros(())
+    return branch.switch_loss()
+
+
+@torch.no_grad()
+def _raw_regime_statistics(branch):
+    p, prior = branch.last_regime_probabilities, branch.last_regime_priors
+    return {
+        'raw_KL': branch.regime_filter._last_switch_loss.detach().item(),
+        'posterior_entropy': -(p * p.clamp_min(1e-8).log()).sum(-1).mean().item(),
+        'prior_entropy': -(prior * prior.clamp_min(1e-8).log()).sum(-1).mean().item(),
+        'posterior_prior_L1': (p-prior).abs().sum(-1).mean().item(),
+    }
+
+
+def _is_five_day_only(model):
+    return getattr(model, 'variant', None) == FIVE_DAY_ONLY_VARIANT
+
+
+def _prediction_loss(model, prediction, target, criterion):
+    """Shared train/validation objectives; default variants retain sum_h L_h."""
+    if getattr(model, 'variant', None) == GROUPED_VARIANT:
+        if (len(MULTI_HORIZONS) != 4 or set(MULTI_HORIZONS) != {1, 5, 10, 20}
+                or prediction.dim() != 3 or prediction.size(1) != 4
+                or prediction.shape != target.shape):
+            raise ValueError('Grouped diagnostic requires matching 1/5/10/20 outputs')
+        indices = [MULTI_HORIZONS.index(h) for h in GROUPED_HORIZONS]
+        return GROUPED_MULTIPLIER * sum(
+            criterion(prediction[:, i, :], target[:, i, :]) for i in indices)
+    if _is_five_day_only(model):
+        if (TARGET_HORIZON != 5 or len(MULTI_HORIZONS) != 4
+                or prediction.dim() != 3 or prediction.size(1) != 4
+                or prediction.shape != target.shape):
+            raise ValueError('5d-only diagnostic requires four matching horizons and TARGET_HORIZON=5')
+        idx = MULTI_HORIZONS.index(TARGET_HORIZON)
+        return FIVE_DAY_OBJECTIVE_MULTIPLIER * criterion(
+            prediction[:, idx, :], target[:, idx, :])
+    if prediction.dim() == 3:
+        return sum(criterion(prediction[:, h, :], target[:, h, :])
+                   for h in range(prediction.size(1)))
+    return criterion(prediction, target)
+
+
+@torch.no_grad()
+def _horizon_loss_values(prediction, target, criterion):
+    """Detached descriptive losses; never part of backward or model selection."""
+    return {str(h): criterion(prediction[:, i, :], target[:, i, :]).item()
+            for i, h in enumerate(MULTI_HORIZONS)}
 
 
 def make_loss() -> nn.Module:
@@ -74,6 +137,17 @@ def train_epoch(
     model.train()
     total_loss = 0.0
     num_batches = 0
+    five_only = _is_five_day_only(model)
+    objective_sums = dict(raw_L5=0., scaled_prediction_loss=0., switch_loss=0., total_loss=0.)
+    grouped = getattr(model, 'variant', None) == GROUPED_VARIANT
+    no_switch = getattr(model, 'variant', None) == NO_SWITCH_KL_VARIANT
+    if no_switch:
+        objective_sums = dict(prediction_loss=0., raw_KL=0., posterior_entropy=0.,
+                              prior_entropy=0., posterior_prior_L1=0., weighted_switch_loss=0.,
+                              total_loss=0., beta_effective=0.)
+    if grouped:
+        objective_sums = dict(raw_L1=0., raw_L5=0., raw_L10=0., raw_L20=0.,
+                              group_raw=0., group_scaled=0., switch_loss=0., total_loss=0.)
 
     for batch_idx, batch in enumerate(loader):
         # Support both static graphs (X, y) and dynamic graphs (X, y, ei, ew)
@@ -115,11 +189,14 @@ def train_epoch(
         # pred: (B, N_commodities)
 
         # Compute loss — supports multi-horizon (B,H,Nc) or single (B,Nc)
-        if pred.dim() == 3:  # multi-horizon: (B, H, Nc)
-            loss = sum(criterion(pred[:, h, :], y_batch[:, h, :])
-                       for h in range(pred.size(1)))
-        else:
-            loss = criterion(pred, y_batch)
+        loss = _prediction_loss(model, pred, y_batch, criterion)
+        if no_switch:
+            prediction_value = loss.detach().item()
+        if five_only:
+            scaled_prediction_value = loss.detach().item()
+        if grouped:
+            scaled_prediction_value = loss.detach().item()
+            raw_horizon_values = _horizon_loss_values(pred, y_batch, criterion)
 
         # Auxiliary loss: factor_res — supervise the market-mean branch
         # (r̂_mean stored in model.last_r_mean during forward)
@@ -147,7 +224,27 @@ def train_epoch(
             switching_branch is not None
             and not getattr(switching_branch, 'null_control', False)
         ):
-            loss = loss + switching_branch.switch_loss()
+            switch_loss = _effective_switch_loss(model, switching_branch)
+            loss = loss + switch_loss
+
+        if five_only:
+            objective_sums['raw_L5'] += scaled_prediction_value / FIVE_DAY_OBJECTIVE_MULTIPLIER
+            objective_sums['scaled_prediction_loss'] += scaled_prediction_value
+            objective_sums['switch_loss'] += switch_loss.detach().item()
+            objective_sums['total_loss'] += loss.detach().item()
+        if grouped:
+            for h, value in raw_horizon_values.items():
+                objective_sums[f'raw_L{h}'] += value
+            objective_sums['group_raw'] += sum(raw_horizon_values[str(h)] for h in GROUPED_HORIZONS)
+            objective_sums['group_scaled'] += scaled_prediction_value
+            objective_sums['switch_loss'] += switch_loss.detach().item()
+            objective_sums['total_loss'] += loss.detach().item()
+        if no_switch:
+            objective_sums['prediction_loss'] += prediction_value
+            for key, value in _raw_regime_statistics(switching_branch).items():
+                objective_sums[key] += value
+            objective_sums['weighted_switch_loss'] += switch_loss.item()
+            objective_sums['total_loss'] += loss.detach().item()
 
         # Backward pass
         loss.backward()
@@ -156,6 +253,8 @@ def train_epoch(
         total_loss += loss.item()
         num_batches += 1
 
+    if five_only or grouped or no_switch:
+        model._last_train_objective = {k: v / max(num_batches, 1) for k, v in objective_sums.items()}
     return total_loss / max(num_batches, 1)
 
 
@@ -185,6 +284,9 @@ def validate_epoch(
     model.eval()
     total_loss = 0.0
     num_batches = 0
+    five_only = _is_five_day_only(model)
+    horizon_sums = {str(h): 0. for h in MULTI_HORIZONS}
+    grouped = getattr(model, 'variant', None) == GROUPED_VARIANT
 
     for batch in loader:
         market_descriptor = None
@@ -214,11 +316,10 @@ def validate_epoch(
                 )
         else:
             pred = model(X_batch, cur_ei, cur_ew, debug=False)
-        if pred.dim() == 3:
-            loss = sum(criterion(pred[:, h, :], y_batch[:, h, :])
-                       for h in range(pred.size(1)))
-        else:
-            loss = criterion(pred, y_batch)
+        loss = _prediction_loss(model, pred, y_batch, criterion)
+        if five_only or grouped:
+            for h, value in _horizon_loss_values(pred, y_batch, criterion).items():
+                horizon_sums[h] += value
         # Auxiliary loss: factor_res — supervise the market-mean branch
         aux = getattr(model, 'last_r_mean', None)
         if aux is not None and y_batch.dim() == 3:
@@ -232,6 +333,23 @@ def validate_epoch(
         total_loss += loss.item()
         num_batches += 1
 
+    if five_only:
+        horizon_means = {h: value / max(num_batches, 1) for h, value in horizon_sums.items()}
+        model._last_val_objective = {
+            'raw_L5': horizon_means['5'],
+            'scaled_prediction_loss': total_loss / max(num_batches, 1),
+            'aux_multi_horizon_loss': sum(horizon_means.values()),
+            'per_horizon': horizon_means,
+        }
+    if grouped:
+        horizon_means = {h: value / max(num_batches, 1) for h, value in horizon_sums.items()}
+        model._last_val_objective = {
+            **{f'raw_L{h}': value for h, value in horizon_means.items()},
+            'group_raw': sum(horizon_means[str(h)] for h in GROUPED_HORIZONS),
+            'group_scaled': total_loss / max(num_batches, 1),
+            'aux_multi_horizon_loss': sum(horizon_means.values()),
+            'per_horizon': horizon_means,
+        }
     return total_loss / max(num_batches, 1)
 
 
@@ -313,6 +431,31 @@ def train(
         'switch_beta': [],
         'epoch_diagnostics': {},
     }
+    five_only = _is_five_day_only(model)
+    grouped = getattr(model, 'variant', None) == GROUPED_VARIANT
+    no_switch = getattr(model, 'variant', None) == NO_SWITCH_KL_VARIANT
+    if no_switch:
+        if not getattr(model, 'disable_switch_kl', False):
+            raise ValueError('NoSwitchKL requires disable_switch_kl=True')
+        history['switch_kl_enabled'] = False
+        history['objective_history'] = []
+    if five_only:
+        history['objective'] = '4x_5d_only'
+        history['objective_history'] = []
+    if grouped:
+        history['objective'] = GROUPED_OBJECTIVE
+        history['objective_history'] = []
+    persistence_branch = _switching_branch(model)
+    persistence_filter = (
+        getattr(persistence_branch, 'regime_filter', None)
+        if persistence_branch is not None else None
+    )
+    learnable_persistence = getattr(
+        persistence_filter, 'learnable_sticky_alpha', False
+    )
+    if learnable_persistence:
+        history['alpha_history'] = []
+        history['sticky_logit_history'] = []
 
     best_val_loss = float('inf')
     best_model_state = None
@@ -323,6 +466,8 @@ def train(
         current_switch_beta = None
         if switching_branch is not None:
             current_switch_beta = switching_branch.set_epoch(epoch)
+            if no_switch:
+                current_switch_beta = 0.0
 
         # Train for one epoch
         train_loss = train_epoch(
@@ -345,7 +490,42 @@ def train(
         history['val_loss'].append(val_loss)
         history['lr_history'].append(current_lr)
         history['switch_beta'].append(current_switch_beta)
-        if epoch_diagnostic is not None and epoch in (1, 5, 10):
+        if five_only:
+            row = {'epoch': epoch, 'train': dict(model._last_train_objective),
+                   'val': dict(model._last_val_objective), 'lr': current_lr,
+                   'switch_beta': current_switch_beta}
+            history['objective_history'].append(row)
+            print(f"  [D0B-5dOnly epoch {epoch}] "
+                  f"raw_L5={row['train']['raw_L5']:.9g} "
+                  f"scaled_prediction_loss={row['train']['scaled_prediction_loss']:.9g} "
+                  f"switch_loss={row['train']['switch_loss']:.9g} "
+                  f"total_loss={row['train']['total_loss']:.9g} "
+                  f"val_scaled_5d_loss={val_loss:.9g} "
+                  f"aux_multi_horizon_val_loss={row['val']['aux_multi_horizon_loss']:.9g}")
+        if learnable_persistence:
+            alpha_value = persistence_filter.sticky_alpha_value().detach().item()
+            logit_value = persistence_filter.sticky_logit.detach().item()
+            history['alpha_history'].append(alpha_value)
+            history['sticky_logit_history'].append(logit_value)
+            print(f"  [D0E epoch {epoch}] sticky_logit={logit_value:.9g} "
+                  f"alpha={alpha_value:.9g}")
+        if grouped:
+            row = {'epoch': epoch, 'train': dict(model._last_train_objective),
+                   'val': dict(model._last_val_objective), 'lr': current_lr,
+                   'switch_beta': current_switch_beta}
+            history['objective_history'].append(row)
+            values = ' '.join(f'{k}={v:.9g}' for k, v in row['train'].items())
+            print(f"  [D0B grouped epoch {epoch}] {values} "
+                  f"val_grouped_objective={val_loss:.9g} raw_val_L5={row['val']['raw_L5']:.9g}")
+        if no_switch:
+            row = {'epoch': epoch, 'train': dict(model._last_train_objective),
+                   'val_prediction_loss': val_loss, 'lr': current_lr,
+                   'beta_effective': 0., 'reference_schedule_beta': persistence_filter.current_beta}
+            history['objective_history'].append(row)
+            values = ' '.join(f'{k}={v:.9g}' for k,v in row['train'].items())
+            print(f"  [D0B-NoSwitchKL epoch {epoch}] {values} val_prediction_loss={val_loss:.9g}")
+        diagnostic_epochs = (1, 5, 10, 20) if no_switch else (1, 5, 10)
+        if epoch_diagnostic is not None and epoch in diagnostic_epochs:
             history['epoch_diagnostics'][f'epoch{epoch}'] = (
                 epoch_diagnostic(model, f'epoch{epoch}')
             )
@@ -390,6 +570,21 @@ def train(
                       f"at epoch {history['best_epoch']}")
                 break
 
+    if five_only or grouped or no_switch:
+        history['final_epoch'] = len(history['objective_history'])
+    if no_switch and epoch_diagnostic is not None:
+        history['epoch_diagnostics']['final'] = epoch_diagnostic(model, f"final(epoch {history['final_epoch']})")
+    if grouped:
+        # Persist the elapsed training-loop time before checkpoint diagnostics.
+        history['training_elapsed_seconds'] = time.time() - t0
+    if learnable_persistence and history['alpha_history']:
+        history['final_epoch'] = len(history['alpha_history'])
+        history['final_epoch_alpha'] = history['alpha_history'][-1]
+        history['final_epoch_sticky_logit'] = history['sticky_logit_history'][-1]
+        print(f"  [D0E final epoch {history['final_epoch']}] "
+              f"alpha={history['final_epoch_alpha']:.9g} "
+              f"sticky_logit={history['final_epoch_sticky_logit']:.9g}")
+
     # Restore best model
     if best_model_state is not None:
         model.load_state_dict(best_model_state)
@@ -401,6 +596,12 @@ def train(
                 model, f"best(epoch {history['best_epoch']})"
             )
         print(f"\n[Checkpoint] Restored best model from epoch {history['best_epoch']}")
+        if learnable_persistence:
+            history['best_alpha'] = persistence_filter.sticky_alpha_value().detach().item()
+            history['best_sticky_logit'] = persistence_filter.sticky_logit.detach().item()
+            print(f"  [D0E best epoch {history['best_epoch']}] "
+                  f"alpha={history['best_alpha']:.9g} "
+                  f"sticky_logit={history['best_sticky_logit']:.9g}")
 
     # Save checkpoint if path provided
     if checkpoint_path and best_model_state is not None:
@@ -412,6 +613,51 @@ def train(
         }
         if checkpoint_metadata:
             checkpoint['metadata'] = dict(checkpoint_metadata)
+        if five_only:
+            checkpoint.setdefault('metadata', {}).update({
+                'variant': model.variant,
+                'objective': '4x_5d_only',
+                'objective_description': 'scale-matched 5d-only diagnostic objective',
+                'objective_multiplier': FIVE_DAY_OBJECTIVE_MULTIPLIER,
+                'best_epoch': history['best_epoch'],
+                'best_val_scaled_5d_loss': best_val_loss,
+                'raw_val_5d_loss': best_val_loss / FIVE_DAY_OBJECTIVE_MULTIPLIER,
+                'parameter_count': sum(p.numel() for p in model.parameters()),
+            })
+        if learnable_persistence:
+            checkpoint.setdefault('metadata', {}).update({
+                'variant': model.variant,
+                'best_epoch': history['best_epoch'],
+                'best_val_loss': best_val_loss,
+                'final_learned_alpha': history['best_alpha'],
+                'sticky_logit': history['best_sticky_logit'],
+                'parameter_count': sum(p.numel() for p in model.parameters()),
+                'last_training_epoch': history['final_epoch'],
+                'last_training_epoch_alpha': history['final_epoch_alpha'],
+                'alpha_semantics': 'final_learned_alpha belongs to the restored best checkpoint',
+            })
+        if grouped:
+            best_row = history['objective_history'][history['best_epoch'] - 1]
+            checkpoint.setdefault('metadata', {}).update({
+                'variant': model.variant, 'objective': GROUPED_OBJECTIVE,
+                'objective_description': 'scale-matched grouped-objective diagnostic',
+                'objective_multiplier': GROUPED_MULTIPLIER,
+                'best_epoch': history['best_epoch'],
+                'best_grouped_val_loss': best_val_loss,
+                'raw_val_5d_loss': best_row['val']['raw_L5'],
+                'parameter_count': sum(p.numel() for p in model.parameters()),
+                'training_elapsed_seconds': history['training_elapsed_seconds'],
+            })
+        if no_switch:
+            checkpoint.setdefault('metadata', {}).update({
+                'variant': model.variant, 'best_epoch': history['best_epoch'],
+                'best_val_loss': best_val_loss,
+                'parameter_count': sum(p.numel() for p in model.parameters()),
+                'switch_kl_enabled': False, 'beta_effective': 0.,
+                'objective': 'sum_1d_5d_10d_20d',
+                'reference_beta_max': persistence_filter.beta_max,
+                'reference_warmup_epochs': persistence_filter.warmup_epochs,
+            })
         torch.save(checkpoint, checkpoint_path)
         print(f"[Checkpoint] Saved to {checkpoint_path}")
 

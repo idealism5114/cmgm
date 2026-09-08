@@ -1,0 +1,282 @@
+nohup: 忽略输入
+Device=cuda target=return horizon=5 variants=['D0B-BalancedLatentReadout']
+============================================================
+CMGM Data Loading Pipeline
+============================================================
+
+[Step 1] Loading raw price data...
+
+[Step 2] Aligning markets to common date range...
+[DataLoader] Stock date range: 2015-01-05 00:00:00 to 2025-06-30 00:00:00 (2548 days)
+[DataLoader] Bond date range: 2017-01-17 00:00:00 to 2025-12-31 00:00:00 (2176 days)
+[DataLoader] Commodity date range: 2015-01-05 00:00:00 to 2025-12-31 00:00:00 (2679 days)
+[DataLoader] Common date range: 2017-01-17 00:00:00 to 2025-06-30 00:00:00 (2050 days)
+[DataLoader] Combined price matrix shape: (2050, 284)
+[DataLoader] Market split: stocks=248, bonds=12, commodities=24
+
+[Step 3] Temporal train/val/test split...
+[DataLoader] Temporal split: train=1435, val=307, test=308
+
+[Step 4] Per-asset z-score normalization...
+[DataLoader] Per-asset z-score normalization fitted on training data only
+[DataLoader] mean range: [0.9803, 173055.7656]
+[DataLoader] std  range: [0.000000, 55160.3203]
+[DataLoader] Z-scored train range: [-11.3746, 91.5527]
+
+[Step 6] Computing returns for graph construction...
+     Training returns shape: (1434, 284)
+
+[Step 7] Creating sliding window datasets...
+
+[Done] Dataset sizes: train=1396, val=268, test=269
+[Done] Total nodes: 284
+[Done] Commodity nodes (output dim): 24
+[Features] Computed 21 features: price, ret_1d, ret_5d, ret_10d, ret_20d, vol_5d, vol_10d, vol_20d, zscore_5d, zscore_10d, zscore_20d, price_ma5, price_ma10, price_ma20, price_ma60, rsi_14, bb_position, skewness_20d, kurtosis_20d, roc_10d, percentile_20d
+[Features] Shape: (T=2050, N=284, F=21)  range: [-4.4721, 391400.0000]
+Descriptor timeline: [abs_return, volatility_5, slope], train mean=[ 5.799e-03  6.818e-03 -7.000e-06], train std=[0.005384 0.003965 0.01143 ]
+  [D0/D0B shared initialization] PASS
+
+D0B-BalancedLatentReadout (switching_latent_balanced_readout) — 520,549 parameters
+  D0 params=511,973; D0B params=520,549; difference=+8,576
+  D0B readout params: long projection=8,256; micro projection=4,160; long LayerNorm=128; micro LayerNorm=128; final state_readout=8,256
+  D0B temporal params: Market Encoder=27,363; LongMemory Transformer=264,960; Base RPE=156; regime evidence=387; transition=9; G0/G1/G2=[32960, 32960, 32960]; state_readout=8,256
+  Best checkpoint path=/home/yangxiaotong/projects/myresearch/Commedities/checkpoints/switching_latent_balanced_readout_best.pt
+
+============================================================
+CMGM Training
+============================================================
+Device: cuda
+Epochs: 300 (early stopping patience=10)
+Learning rate: 0.0001, Weight decay: 1e-05
+============================================================
+  [switching_latent_balanced_readout] h_spatial=[64, 64] h_temporal=[64, 64] → gate → [64, 4, 24]
+  Epoch   1/300 | Train Loss: 0.004757 | Val Loss: 0.004877 | LR: 1.00e-04 | Best: inf
+  Epoch   2/300 | Train Loss: 0.004135 | Val Loss: 0.004544 | LR: 1.00e-04 | Best: 0.004877
+  Epoch   3/300 | Train Loss: 0.003869 | Val Loss: 0.004345 | LR: 1.00e-04 | Best: 0.004544
+  Epoch   4/300 | Train Loss: 0.003620 | Val Loss: 0.004134 | LR: 1.00e-04 | Best: 0.004345
+  Epoch   5/300 | Train Loss: 0.003406 | Val Loss: 0.003954 | LR: 1.00e-04 | Best: 0.004134
+  Epoch   6/300 | Train Loss: 0.003210 | Val Loss: 0.003788 | LR: 1.00e-04 | Best: 0.003954
+  Epoch   7/300 | Train Loss: 0.003036 | Val Loss: 0.003626 | LR: 1.00e-04 | Best: 0.003788
+  Epoch   8/300 | Train Loss: 0.002909 | Val Loss: 0.003506 | LR: 1.00e-04 | Best: 0.003626
+  Epoch   9/300 | Train Loss: 0.002781 | Val Loss: 0.003387 | LR: 1.00e-04 | Best: 0.003506
+  Epoch  10/300 | Train Loss: 0.002687 | Val Loss: 0.003274 | LR: 1.00e-04 | Best: 0.003387
+  Gate   | mean=0.483 std=0.062 [0.334, 0.664] → 偏向GCN
+  Epoch  11/300 | Train Loss: 0.002595 | Val Loss: 0.003170 | LR: 1.00e-04 | Best: 0.003274
+  Epoch  12/300 | Train Loss: 0.002534 | Val Loss: 0.003089 | LR: 1.00e-04 | Best: 0.003170
+  Epoch  13/300 | Train Loss: 0.002495 | Val Loss: 0.002977 | LR: 1.00e-04 | Best: 0.003089
+  Epoch  14/300 | Train Loss: 0.002428 | Val Loss: 0.002902 | LR: 1.00e-04 | Best: 0.002977
+  Epoch  15/300 | Train Loss: 0.002382 | Val Loss: 0.002886 | LR: 1.00e-04 | Best: 0.002902
+  Epoch  16/300 | Train Loss: 0.002312 | Val Loss: 0.002824 | LR: 1.00e-04 | Best: 0.002886
+  Epoch  17/300 | Train Loss: 0.002269 | Val Loss: 0.002752 | LR: 1.00e-04 | Best: 0.002824
+  Epoch  18/300 | Train Loss: 0.002242 | Val Loss: 0.002664 | LR: 1.00e-04 | Best: 0.002752
+  Epoch  19/300 | Train Loss: 0.002214 | Val Loss: 0.002607 | LR: 1.00e-04 | Best: 0.002664
+  Epoch  20/300 | Train Loss: 0.002206 | Val Loss: 0.002554 | LR: 1.00e-04 | Best: 0.002607
+  Gate   | mean=0.482 std=0.049 [0.371, 0.620] → 偏向GCN
+  Epoch  21/300 | Train Loss: 0.002172 | Val Loss: 0.002488 | LR: 1.00e-04 | Best: 0.002554
+  Epoch  22/300 | Train Loss: 0.002160 | Val Loss: 0.002432 | LR: 1.00e-04 | Best: 0.002488
+  Epoch  23/300 | Train Loss: 0.002124 | Val Loss: 0.002400 | LR: 1.00e-04 | Best: 0.002432
+  Epoch  24/300 | Train Loss: 0.002084 | Val Loss: 0.002341 | LR: 1.00e-04 | Best: 0.002400
+  Epoch  25/300 | Train Loss: 0.002068 | Val Loss: 0.002325 | LR: 1.00e-04 | Best: 0.002341
+  Epoch  26/300 | Train Loss: 0.002077 | Val Loss: 0.002308 | LR: 1.00e-04 | Best: 0.002325
+  Epoch  27/300 | Train Loss: 0.002116 | Val Loss: 0.002312 | LR: 1.00e-04 | Best: 0.002308
+  Epoch  28/300 | Train Loss: 0.002138 | Val Loss: 0.002232 | LR: 1.00e-04 | Best: 0.002308
+  Epoch  29/300 | Train Loss: 0.002111 | Val Loss: 0.002194 | LR: 1.00e-04 | Best: 0.002232
+  Epoch  30/300 | Train Loss: 0.002044 | Val Loss: 0.002185 | LR: 1.00e-04 | Best: 0.002194
+  Gate   | mean=0.482 std=0.042 [0.369, 0.593] → 偏向GCN
+  Epoch  31/300 | Train Loss: 0.002032 | Val Loss: 0.002149 | LR: 1.00e-04 | Best: 0.002185
+  Epoch  32/300 | Train Loss: 0.001984 | Val Loss: 0.002110 | LR: 1.00e-04 | Best: 0.002149
+  Epoch  33/300 | Train Loss: 0.001949 | Val Loss: 0.002069 | LR: 1.00e-04 | Best: 0.002110
+  Epoch  34/300 | Train Loss: 0.001928 | Val Loss: 0.002047 | LR: 1.00e-04 | Best: 0.002069
+  Epoch  35/300 | Train Loss: 0.001927 | Val Loss: 0.002033 | LR: 1.00e-04 | Best: 0.002047
+  Epoch  36/300 | Train Loss: 0.001922 | Val Loss: 0.002019 | LR: 1.00e-04 | Best: 0.002033
+  Epoch  37/300 | Train Loss: 0.001912 | Val Loss: 0.002008 | LR: 1.00e-04 | Best: 0.002019
+  Epoch  38/300 | Train Loss: 0.001910 | Val Loss: 0.001992 | LR: 1.00e-04 | Best: 0.002008
+  Epoch  39/300 | Train Loss: 0.001903 | Val Loss: 0.001972 | LR: 1.00e-04 | Best: 0.001992
+  Epoch  40/300 | Train Loss: 0.001886 | Val Loss: 0.001952 | LR: 1.00e-04 | Best: 0.001972
+  Gate   | mean=0.484 std=0.039 [0.391, 0.584] → 偏向GCN
+  Epoch  41/300 | Train Loss: 0.001874 | Val Loss: 0.001937 | LR: 1.00e-04 | Best: 0.001952
+  Epoch  42/300 | Train Loss: 0.001866 | Val Loss: 0.001919 | LR: 1.00e-04 | Best: 0.001937
+  Epoch  43/300 | Train Loss: 0.001859 | Val Loss: 0.001905 | LR: 1.00e-04 | Best: 0.001919
+  Epoch  44/300 | Train Loss: 0.001851 | Val Loss: 0.001892 | LR: 1.00e-04 | Best: 0.001905
+  Epoch  45/300 | Train Loss: 0.001844 | Val Loss: 0.001879 | LR: 1.00e-04 | Best: 0.001892
+  Epoch  46/300 | Train Loss: 0.001842 | Val Loss: 0.001875 | LR: 1.00e-04 | Best: 0.001879
+  Epoch  47/300 | Train Loss: 0.001827 | Val Loss: 0.001859 | LR: 1.00e-04 | Best: 0.001875
+  Epoch  48/300 | Train Loss: 0.001827 | Val Loss: 0.001849 | LR: 1.00e-04 | Best: 0.001859
+  Epoch  49/300 | Train Loss: 0.001813 | Val Loss: 0.001836 | LR: 1.00e-04 | Best: 0.001849
+  Epoch  50/300 | Train Loss: 0.001816 | Val Loss: 0.001825 | LR: 1.00e-04 | Best: 0.001836
+  Gate   | mean=0.485 std=0.037 [0.399, 0.576] → 偏向GCN
+  Epoch  51/300 | Train Loss: 0.001806 | Val Loss: 0.001818 | LR: 1.00e-04 | Best: 0.001825
+  Epoch  52/300 | Train Loss: 0.001803 | Val Loss: 0.001814 | LR: 1.00e-04 | Best: 0.001818
+  Epoch  53/300 | Train Loss: 0.001799 | Val Loss: 0.001804 | LR: 1.00e-04 | Best: 0.001814
+  Epoch  54/300 | Train Loss: 0.001802 | Val Loss: 0.001797 | LR: 1.00e-04 | Best: 0.001804
+  Epoch  55/300 | Train Loss: 0.001799 | Val Loss: 0.001794 | LR: 1.00e-04 | Best: 0.001797
+  Epoch  56/300 | Train Loss: 0.001795 | Val Loss: 0.001784 | LR: 1.00e-04 | Best: 0.001794
+  Epoch  57/300 | Train Loss: 0.001791 | Val Loss: 0.001778 | LR: 1.00e-04 | Best: 0.001784
+  Epoch  58/300 | Train Loss: 0.001787 | Val Loss: 0.001776 | LR: 1.00e-04 | Best: 0.001778
+  Epoch  59/300 | Train Loss: 0.001788 | Val Loss: 0.001765 | LR: 1.00e-04 | Best: 0.001776
+  Epoch  60/300 | Train Loss: 0.001786 | Val Loss: 0.001759 | LR: 1.00e-04 | Best: 0.001765
+  Gate   | mean=0.486 std=0.034 [0.413, 0.576] → 偏向GCN
+  Epoch  61/300 | Train Loss: 0.001780 | Val Loss: 0.001753 | LR: 1.00e-04 | Best: 0.001759
+  Epoch  62/300 | Train Loss: 0.001781 | Val Loss: 0.001744 | LR: 1.00e-04 | Best: 0.001753
+  Epoch  63/300 | Train Loss: 0.001781 | Val Loss: 0.001738 | LR: 1.00e-04 | Best: 0.001744
+  Epoch  64/300 | Train Loss: 0.001775 | Val Loss: 0.001729 | LR: 1.00e-04 | Best: 0.001738
+  Epoch  65/300 | Train Loss: 0.001776 | Val Loss: 0.001720 | LR: 1.00e-04 | Best: 0.001729
+  Epoch  66/300 | Train Loss: 0.001790 | Val Loss: 0.001710 | LR: 1.00e-04 | Best: 0.001720
+  Epoch  67/300 | Train Loss: 0.001787 | Val Loss: 0.001708 | LR: 1.00e-04 | Best: 0.001710
+  Epoch  68/300 | Train Loss: 0.001795 | Val Loss: 0.001697 | LR: 1.00e-04 | Best: 0.001708
+  Epoch  69/300 | Train Loss: 0.001783 | Val Loss: 0.001687 | LR: 1.00e-04 | Best: 0.001697
+  Epoch  70/300 | Train Loss: 0.001772 | Val Loss: 0.001682 | LR: 1.00e-04 | Best: 0.001687
+  Gate   | mean=0.487 std=0.032 [0.418, 0.567] → 偏向GCN
+  Epoch  71/300 | Train Loss: 0.001768 | Val Loss: 0.001679 | LR: 1.00e-04 | Best: 0.001682
+  Epoch  72/300 | Train Loss: 0.001762 | Val Loss: 0.001678 | LR: 1.00e-04 | Best: 0.001679
+  Epoch  73/300 | Train Loss: 0.001763 | Val Loss: 0.001672 | LR: 1.00e-04 | Best: 0.001678
+  Epoch  74/300 | Train Loss: 0.001761 | Val Loss: 0.001667 | LR: 1.00e-04 | Best: 0.001672
+  Epoch  75/300 | Train Loss: 0.001758 | Val Loss: 0.001658 | LR: 1.00e-04 | Best: 0.001667
+  Epoch  76/300 | Train Loss: 0.001759 | Val Loss: 0.001651 | LR: 1.00e-04 | Best: 0.001658
+  Epoch  77/300 | Train Loss: 0.001752 | Val Loss: 0.001649 | LR: 1.00e-04 | Best: 0.001651
+  Epoch  78/300 | Train Loss: 0.001748 | Val Loss: 0.001645 | LR: 1.00e-04 | Best: 0.001649
+  Epoch  79/300 | Train Loss: 0.001743 | Val Loss: 0.001642 | LR: 1.00e-04 | Best: 0.001645
+  Epoch  80/300 | Train Loss: 0.001743 | Val Loss: 0.001644 | LR: 1.00e-04 | Best: 0.001642
+  Gate   | mean=0.488 std=0.029 [0.425, 0.564] → 偏向GCN
+  Epoch  81/300 | Train Loss: 0.001742 | Val Loss: 0.001641 | LR: 1.00e-04 | Best: 0.001642
+  Epoch  82/300 | Train Loss: 0.001739 | Val Loss: 0.001638 | LR: 1.00e-04 | Best: 0.001641
+  Epoch  83/300 | Train Loss: 0.001743 | Val Loss: 0.001636 | LR: 1.00e-04 | Best: 0.001638
+  Epoch  84/300 | Train Loss: 0.001740 | Val Loss: 0.001631 | LR: 1.00e-04 | Best: 0.001636
+  Epoch  85/300 | Train Loss: 0.001740 | Val Loss: 0.001628 | LR: 1.00e-04 | Best: 0.001631
+  Epoch  86/300 | Train Loss: 0.001736 | Val Loss: 0.001637 | LR: 1.00e-04 | Best: 0.001628
+  Epoch  87/300 | Train Loss: 0.001732 | Val Loss: 0.001658 | LR: 1.00e-04 | Best: 0.001628
+  Epoch  88/300 | Train Loss: 0.001737 | Val Loss: 0.001680 | LR: 1.00e-04 | Best: 0.001628
+  Epoch  89/300 | Train Loss: 0.001733 | Val Loss: 0.001707 | LR: 1.00e-04 | Best: 0.001628
+  Epoch  90/300 | Train Loss: 0.001744 | Val Loss: 0.001710 | LR: 1.00e-04 | Best: 0.001628
+  Gate   | mean=0.489 std=0.027 [0.430, 0.561] → 偏向GCN
+  Epoch  91/300 | Train Loss: 0.001733 | Val Loss: 0.001696 | LR: 5.00e-05 | Best: 0.001628
+  Epoch  92/300 | Train Loss: 0.001722 | Val Loss: 0.001642 | LR: 5.00e-05 | Best: 0.001628
+  Epoch  93/300 | Train Loss: 0.001719 | Val Loss: 0.001652 | LR: 5.00e-05 | Best: 0.001628
+  Epoch  94/300 | Train Loss: 0.001716 | Val Loss: 0.001664 | LR: 5.00e-05 | Best: 0.001628
+  Epoch  95/300 | Train Loss: 0.001704 | Val Loss: 0.001667 | LR: 5.00e-05 | Best: 0.001628
+
+[Early Stopping] No improvement for 10 epochs. Stopping at epoch 95.
+[Early Stopping] Best validation loss: 0.001628 at epoch 85
+
+[Checkpoint] Restored best model from epoch 85
+[Checkpoint] Saved to checkpoints/switching_latent_balanced_readout_best.pt
+============================================================
+
+  Temporal weights: mean=0.0500 std=0.0133 min=0.0000 max=1.0000
+  [D0B TRAIN] mean p=[0.3802 0.4101 0.2097] entropy=1.054531 mean max p=0.417700 margin=0.045044
+  [D0B TRAIN] argmax occupancy
+    state 0 = 25.41%
+    state 1 = 74.58%
+    state 2 = 0.01%
+  [D0B TRAIN prior] entropy=1.088364 mean max p=0.374203
+  [D0B VAL] mean p=[0.3645 0.3479 0.2876] entropy=1.089366 mean max p=0.379374 margin=0.042200
+  [D0B VAL] argmax occupancy
+    state 0 = 63.73%
+    state 1 = 35.60%
+    state 2 = 0.67%
+  [D0B VAL prior] entropy=1.096349 mean max p=0.355569
+  [D0B TEST] mean p=[0.367  0.3259 0.3072] entropy=1.091357 mean max p=0.374794 margin=0.041928
+  [D0B TEST] argmax occupancy
+    state 0 = 68.94%
+    state 1 = 21.67%
+    state 2 = 9.39%
+  [D0B TEST prior] entropy=1.096864 mean max p=0.353151
+  [D0B probability legality] min p=2.359195e-01 max probability-sum error=1.192e-07
+  [D0B prior/posterior] prior entropy=1.096864 posterior entropy=1.091357 mean KL=0.002321 mean L1=0.054885
+  [D0B regime dynamics] mean ||p_t-p_(t-1)||_1=0.030923
+  [D0B p t=0] [0.3509 0.3303 0.3189]
+  [D0B p t=2] [0.3645 0.3275 0.308 ]
+  [D0B p t=4] [0.3678 0.3266 0.3056]
+  [D0B p t=6] [0.3685 0.3263 0.3052]
+  [D0B p t=8] [0.3687 0.3259 0.3054]
+  [D0B p t=10] [0.3688 0.3253 0.3059]
+  [D0B p t=12] [0.3687 0.3249 0.3064]
+  [D0B p t=14] [0.3686 0.3247 0.3067]
+  [D0B p t=16] [0.3686 0.3245 0.3069]
+  [D0B p t=18] [0.3686 0.3243 0.307 ]
+  [D0B transition matrix]
+[[0.666688 0.168136 0.165176]
+ [0.166606 0.667534 0.16586 ]
+ [0.166468 0.167899 0.665633]]
+  [D0B transition] row sums=[1. 1. 1.] diagonal=[0.666688 0.667534 0.665633] mean persistence=0.666618 row entropy=[0.86752  0.866358 0.868991]
+  [D0B transition] absolute transition_logits drift=1.742e-02
+  [D0B Base RPE] norm=0.000535 mean |QK/sqrt(d)|=2.188770e-05 mean |base bias|=4.937000e-05 base/QK=2.254575e+00
+  [D0B Base RPE delta=+0] heads=[-7.80e-05 -9.70e-05 -3.30e-05 -2.37e-04] mean=-0.000111 std=0.000076
+  [D0B Base RPE delta=+1] heads=[-5.30e-05 -3.30e-05 -1.90e-05 -1.61e-04] mean=-0.000066 std=0.000056
+  [D0B Base RPE delta=+2] heads=[-4.50e-05 -3.80e-05 -3.60e-05 -1.71e-04] mean=-0.000072 std=0.000057
+  [D0B Base RPE delta=+5] heads=[-6.0e-06  7.6e-05  5.0e-06  7.0e-06] mean=0.000021 std=0.000032
+  [D0B Base RPE delta=+10] heads=[3.0e-06 6.0e-05 7.2e-05 6.5e-05] mean=0.000050 std=0.000027
+  [D0B Base RPE delta=+19] heads=[ 1.0e-05 -6.7e-05 -5.7e-05  8.6e-05] mean=-0.000007 std=0.000061
+  [D0B candidate state 0] norm mean=0.566195 std=0.022613 max=0.611987
+  [D0B candidate state 1] norm mean=0.884344 std=0.050848 max=0.984790
+  [D0B candidate state 2] norm mean=0.675199 std=0.028357 max=0.738822
+  [D0B candidate pair 0/1] mean L1=0.094084 cosine=0.224608
+  [D0B candidate pair 0/2] mean L1=0.082947 cosine=0.131981
+  [D0B candidate pair 1/2] mean L1=0.089102 cosine=0.309963
+  [D0B Z trajectory] mean norm=0.496862 max norm=0.562298 mean ||Z_t-Z_(t-1)||_2=0.071021
+  [D0B Z direction] consecutive cosine mean/std=0.995012/0.004763 mean directional change=0.004988
+  [D0B Z t=0] mean norm=0.499583
+  [D0B Z t=5] mean norm=0.497593
+  [D0B Z t=10] mean norm=0.496669
+  [D0B Z t=15] mean norm=0.495812
+  [D0B Z t=19] mean norm=0.495054
+  [D0B weighted generator contributions] [0.207755 0.289178 0.207231]
+  [D0B pre-balance scale] E=9.542638 H=9.641786 Z=0.496862 H_T=9.641182 Z_T=0.495054 Z_T/H_T=5.134789e-02 readout input=9.653934 h_temporal=2.784533
+  [D0B readout weights] ||W_long||=2.745716 ||W_micro||=2.689293 W_micro/W_long=0.979451
+  [D0B post-balance scale] ||h_long||=7.074485 ||h_micro||=7.060313 micro/long=0.997997 balanced concat=9.994818 h_temporal=2.784533
+  [D0B stock dispersion sensitivity] high p=[0.3616 0.3275 0.311 ] low p=[0.3959 0.2968 0.3073] L1=0.068687 high/low ||Z_T||=0.499459/0.458361 high/low ||h_micro||=7.061889/7.049095
+  [D0B bond dispersion sensitivity] high p=[0.375  0.3352 0.2899] low p=[0.3518 0.3306 0.3176] L1=0.055555 high/low ||Z_T||=0.499096/0.498257 high/low ||h_micro||=7.062612/7.060745
+  [D0B commodity dispersion sensitivity] high p=[0.3614 0.3263 0.3123] low p=[0.3848 0.3114 0.3038] L1=0.046903 high/low ||Z_T||=0.508989/0.466036 high/low ||h_micro||=7.064099/7.051560
+  [D0B prediction-only grad] Market Encoder=8.375e-04
+  [D0B prediction-only grad] LongMemory Transformer=1.505e-04
+  [D0B prediction-only grad] Base RPE=3.357e-08
+  [D0B prediction-only grad] regime evidence=3.637e-05
+  [D0B prediction-only grad] transition logits=1.059e-06
+  [D0B prediction-only grad] G0=1.627e-04
+  [D0B prediction-only grad] G1=1.844e-04
+  [D0B prediction-only grad] G2=1.222e-04
+  [D0B prediction-only grad] long_memory_readout=6.989e-04
+  [D0B prediction-only grad] micro_state_readout=5.516e-04
+  [D0B prediction-only grad] state readout=1.685e-03
+  [D0B prediction-only grad ratio] generator/LongMemory=1.039108e+00
+  [D0B prediction-only grad ratio] microReadout/longReadout=7.891504e-01
+  [D0B total-loss grad] Market Encoder=8.614e-04
+  [D0B total-loss grad] LongMemory Transformer=1.548e-04
+  [D0B total-loss grad] Base RPE=3.381e-08
+  [D0B total-loss grad] regime evidence=1.959e-04
+  [D0B total-loss grad] transition logits=1.001e-06
+  [D0B total-loss grad] G0=1.627e-04
+  [D0B total-loss grad] G1=1.844e-04
+  [D0B total-loss grad] G2=1.222e-04
+  [D0B total-loss grad] long_memory_readout=6.989e-04
+  [D0B total-loss grad] micro_state_readout=5.516e-04
+  [D0B total-loss grad] state readout=1.685e-03
+  [D0B total-loss grad ratio] generator/LongMemory=1.010241e+00
+  [D0B total-loss grad ratio] microReadout/longReadout=7.891504e-01
+  [D0B loss] L_return=1.429442e-03
+  [D0B loss] L_switch_raw=3.302503e-03
+  [D0B loss] beta=5.000000e-04
+  [D0B loss] weighted_switch=1.651251e-06
+  [D0B loss] total=1.431093e-03
+  [D0B loss] switch_to_return_ratio=1.155164e-03
+  [D0B forced-full-regime state 0] Z_T mean/max diff=5.068e-02/1.357e-01 h_micro mean/max diff=2.101e-01/7.740e-01 h_temporal mean/max diff=7.839e-02/2.203e-01 prediction mean/max diff=2.773e-03/9.679e-03
+  [D0B forced-full-regime state 1] Z_T mean/max diff=5.399e-02/2.058e-01 h_micro mean/max diff=2.120e-01/7.358e-01 h_temporal mean/max diff=6.416e-02/1.998e-01 prediction mean/max diff=1.416e-03/7.100e-03
+  [D0B forced-full-regime state 2] Z_T mean/max diff=5.296e-02/2.416e-01 h_micro mean/max diff=1.990e-01/5.519e-01 h_temporal mean/max diff=7.051e-02/2.187e-01 prediction mean/max diff=2.051e-03/1.195e-02
+  [D0B zero-balanced-micro] h_temporal mean/max diff=2.278e-01/7.163e-01 prediction mean/max diff=8.651e-03/2.823e-02
+  [D0B zero-balanced-long] h_temporal mean/max diff=2.204e-01/7.532e-01 prediction mean/max diff=6.830e-03/3.331e-02
+  [D0B zero-out impact] micro/long prediction-impact ratio=1.266675e+00
+  [D0B vs D0 zero-out reference] D0 zero-Z mean=7.417e-05 D0 zero-H mean=1.112e-02 D0 ratio≈6.670e-03
+  [D0B causality] E diff through t=10=0.000e+00 H diff=0.000e+00 p diff=0.000e+00 Z diff=0.000e+00 h_long@t10=0.000e+00 h_micro@t10=0.000e+00 h_temporal@t10=0.000e+00
+  [D0B batch independence] E=9.537e-07 H=1.431e-06 p=1.192e-07 Z=5.215e-08 h_long=3.576e-07 h_micro=2.384e-07 h_temporal=2.384e-07
+  [D0B stock permutation] E=4.768e-07 H=1.192e-06 p=1.192e-07 Z=5.960e-08 h_long=4.768e-07 h_micro=3.576e-07 h_temporal=2.384e-07
+  [D0B bond permutation] E=4.768e-07 H=1.192e-06 p=1.192e-07 Z=5.960e-08 h_long=4.768e-07 h_micro=4.768e-07 h_temporal=2.980e-07
+  [D0B commodity permutation] E=4.768e-07 H=1.192e-06 p=1.192e-07 Z=7.451e-08 h_long=7.153e-07 h_micro=4.768e-07 h_temporal=3.576e-07
+  MAE=0.021995 RMSE=0.028486 Hit=49.1% vs-zero=+3.39% (217s)
+
+Retained ablation summary
+Variant                    Params   Train Time        MAE       RMSE     Hit%    vs Zero
+D0B-BalancedLatentReadout      520,549         217s   0.021995   0.028486    49.1%     +3.39%
+
+D0B mechanism conclusion: [Case A] Balanced latent readout makes the micro state more prediction-visible and improves over D0.
+
+📋 Experiment 20260903_192725 logged to /home/yangxiaotong/projects/myresearch/Commedities/experiments/EXPERIMENTS.jsonl

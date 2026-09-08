@@ -148,10 +148,11 @@ class MarkovRegimeFilter(nn.Module):
     def __init__(self, d_model: int = 128, K: int = 3,
                  sticky_alpha: float = 0.5, tau: float = 1.0,
                  beta_max: float = 5e-4, warmup_epochs: int = 20,
-                 eps: float = 1e-8):
+                 eps: float = 1e-8, learnable_sticky_alpha: bool = False):
         super().__init__()
         self.K = int(K)
         self.sticky_alpha = float(sticky_alpha)
+        self.learnable_sticky_alpha = bool(learnable_sticky_alpha)
         self.tau = float(tau)
         self.beta_max = float(beta_max)
         self.warmup_epochs = int(warmup_epochs)
@@ -161,13 +162,24 @@ class MarkovRegimeFilter(nn.Module):
         self.transition_logits = nn.Parameter(torch.zeros(self.K, self.K))
         self.regime_evidence = nn.Linear(d_model, self.K)
         self._last_switch_loss = None
+        if self.learnable_sticky_alpha:
+            # Deterministic scalar creation consumes no RNG and leaves every
+            # D0B shared parameter's initialization order unchanged.
+            self.sticky_logit = nn.Parameter(torch.tensor(0.0))
+
+    def sticky_alpha_value(self):
+        """D0E uses one sigmoid scalar; legacy variants retain their float."""
+        if self.learnable_sticky_alpha:
+            return torch.sigmoid(self.sticky_logit)
+        return self.sticky_alpha
 
     def transition_matrix(self) -> torch.Tensor:
         learned = F.softmax(self.transition_logits, dim=-1)
         identity = torch.eye(
             self.K, dtype=learned.dtype, device=learned.device
         )
-        return self.sticky_alpha * identity + (1.0 - self.sticky_alpha) * learned
+        alpha = self.sticky_alpha_value()
+        return alpha * identity + (1.0 - alpha) * learned
 
     def set_epoch(self, epoch: int) -> float:
         self.current_epoch = int(epoch)
@@ -308,7 +320,8 @@ class SwitchingLatentTransformerBranch(nn.Module):
                  zero_init_memory_projection: bool = True,
                  use_regime_relative_memory: bool = False,
                  use_dynamic_slope: bool = False,
-                 use_balanced_transition_input: bool = False):
+                 use_balanced_transition_input: bool = False,
+                 learnable_sticky_alpha: bool = False):
         super().__init__()
         self.K = int(K)
         self.z_dim = int(z_dim)
@@ -324,6 +337,11 @@ class SwitchingLatentTransformerBranch(nn.Module):
         self.use_balanced_transition_input = bool(
             use_balanced_transition_input
         )
+        if learnable_sticky_alpha and (
+            not balanced_readout or use_latent_memory or use_dynamic_slope
+            or use_balanced_transition_input or use_regime_relative_memory
+        ):
+            raise ValueError("learnable persistence requires the unchanged D0B backbone")
         if self.use_latent_memory and not self.balanced_readout:
             raise ValueError("latent memory requires the D0B balanced readout")
         if self.use_regime_relative_memory and not self.use_latent_memory:
@@ -358,6 +376,7 @@ class SwitchingLatentTransformerBranch(nn.Module):
             tau=tau,
             beta_max=beta_max,
             warmup_epochs=warmup_epochs,
+            learnable_sticky_alpha=learnable_sticky_alpha,
         )
         self.latent_transition = RegimeLatentTransition(
             h_dim=d_model,

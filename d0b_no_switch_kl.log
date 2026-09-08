@@ -1,0 +1,434 @@
+nohup: 忽略输入
+Device=cuda target=return horizon=5 variants=['D0B-NoSwitchKL']
+============================================================
+CMGM Data Loading Pipeline
+============================================================
+
+[Step 1] Loading raw price data...
+
+[Step 2] Aligning markets to common date range...
+[DataLoader] Stock date range: 2015-01-05 00:00:00 to 2025-06-30 00:00:00 (2548 days)
+[DataLoader] Bond date range: 2017-01-17 00:00:00 to 2025-12-31 00:00:00 (2176 days)
+[DataLoader] Commodity date range: 2015-01-05 00:00:00 to 2025-12-31 00:00:00 (2679 days)
+[DataLoader] Common date range: 2017-01-17 00:00:00 to 2025-06-30 00:00:00 (2050 days)
+[DataLoader] Combined price matrix shape: (2050, 284)
+[DataLoader] Market split: stocks=248, bonds=12, commodities=24
+
+[Step 3] Temporal train/val/test split...
+[DataLoader] Temporal split: train=1435, val=307, test=308
+
+[Step 4] Per-asset z-score normalization...
+[DataLoader] Per-asset z-score normalization fitted on training data only
+[DataLoader] mean range: [0.9803, 173055.7656]
+[DataLoader] std  range: [0.000000, 55160.3203]
+[DataLoader] Z-scored train range: [-11.3746, 91.5527]
+
+[Step 6] Computing returns for graph construction...
+     Training returns shape: (1434, 284)
+
+[Step 7] Creating sliding window datasets...
+
+[Done] Dataset sizes: train=1396, val=268, test=269
+[Done] Total nodes: 284
+[Done] Commodity nodes (output dim): 24
+[Features] Computed 21 features: price, ret_1d, ret_5d, ret_10d, ret_20d, vol_5d, vol_10d, vol_20d, zscore_5d, zscore_10d, zscore_20d, price_ma5, price_ma10, price_ma20, price_ma60, rsi_14, bb_position, skewness_20d, kurtosis_20d, roc_10d, percentile_20d
+[Features] Shape: (T=2050, N=284, F=21)  range: [-4.4721, 391400.0000]
+Descriptor timeline: [abs_return, volatility_5, slope], train mean=[ 5.799e-03  6.818e-03 -7.000e-06], train std=[0.005384 0.003965 0.01143 ]
+[D0B-NoSwitchKL shared init] {"seed": 42, "D0B_params": 520549, "NoSwitchKL_params": 520549, "difference": 0, "max_abs_diff": 0.0, "mismatch_count": 0, "batches": {"TRAIN": {"shape": [64, 20, 284, 21], "forward_differences": {"E": {"mean": 0.0, "max": 0.0}, "H": {"mean": 0.0, "max": 0.0}, "prior": {"mean": 0.0, "max": 0.0}, "p": {"mean": 0.0, "max": 0.0}, "candidates": {"mean": 0.0, "max": 0.0}, "Z": {"mean": 0.0, "max": 0.0}, "h_long": {"mean": 0.0, "max": 0.0}, "h_micro": {"mean": 0.0, "max": 0.0}, "h_temporal": {"mean": 0.0, "max": 0.0}, "h_spatial": {"mean": 0.0, "max": 0.0}, "gate": {"mean": 0.0, "max": 0.0}, "prediction": {"mean": 0.0, "max": 0.0}, "evidence": {"mean": 0.0, "max": 0.0}}, "D0B_prediction_loss": 0.005630798637866974, "NoSwitch_prediction_loss": 0.005630798637866974, "prediction_loss_abs_diff": 0.0, "total_loss_sanity": {"1": {"reference_epoch": 1, "prediction_loss": 0.005630798637866974, "switch_raw_KL": 0.025288838893175125, "beta_D0B": 0.0, "beta_effective_NoSwitchKL": 0.0, "weighted_switch_loss_D0B": 0.0, "weighted_switch_loss_NoSwitchKL": 0.0, "D0B_total": 0.005630798637866974, "NoSwitch_total": 0.005630798637866974, "total_difference": 0.0, "sanity_diff": 0.0}, "20": {"reference_epoch": 20, "prediction_loss": 0.005630798637866974, "switch_raw_KL": 0.025288838893175125, "beta_D0B": 0.0005, "beta_effective_NoSwitchKL": 0.0, "weighted_switch_loss_D0B": 1.2644420166907366e-05, "weighted_switch_loss_NoSwitchKL": 0.0, "D0B_total": 0.005643443204462528, "NoSwitch_total": 0.005630798637866974, "total_difference": 1.2644566595554352e-05, "sanity_diff": 1.4642864698544145e-10}}}, "TEST": {"shape": [64, 20, 284, 21], "forward_differences": {"E": {"mean": 0.0, "max": 0.0}, "H": {"mean": 0.0, "max": 0.0}, "prior": {"mean": 0.0, "max": 0.0}, "p": {"mean": 0.0, "max": 0.0}, "candidates": {"mean": 0.0, "max": 0.0}, "Z": {"mean": 0.0, "max": 0.0}, "h_long": {"mean": 0.0, "max": 0.0}, "h_micro": {"mean": 0.0, "max": 0.0}, "h_temporal": {"mean": 0.0, "max": 0.0}, "h_spatial": {"mean": 0.0, "max": 0.0}, "gate": {"mean": 0.0, "max": 0.0}, "prediction": {"mean": 0.0, "max": 0.0}, "evidence": {"mean": 0.0, "max": 0.0}}, "D0B_prediction_loss": 0.005850345827639103, "NoSwitch_prediction_loss": 0.005850345827639103, "prediction_loss_abs_diff": 0.0, "total_loss_sanity": {"1": {"reference_epoch": 1, "prediction_loss": 0.005850345827639103, "switch_raw_KL": 0.04494204372167587, "beta_D0B": 0.0, "beta_effective_NoSwitchKL": 0.0, "weighted_switch_loss_D0B": 0.0, "weighted_switch_loss_NoSwitchKL": 0.0, "D0B_total": 0.005850345827639103, "NoSwitch_total": 0.005850345827639103, "total_difference": 0.0, "sanity_diff": 0.0}, "20": {"reference_epoch": 20, "prediction_loss": 0.005850345827639103, "switch_raw_KL": 0.04494204372167587, "beta_D0B": 0.0005, "beta_effective_NoSwitchKL": 0.0, "weighted_switch_loss_D0B": 2.2471022020909004e-05, "weighted_switch_loss_NoSwitchKL": 0.0, "D0B_total": 0.005872816778719425, "NoSwitch_total": 0.005850345827639103, "total_difference": 2.2470951080322266e-05, "sanity_diff": 7.09405867382884e-11}}}}, "PASS": true}
+
+============================================================
+CMGM Training
+============================================================
+Device: cuda
+Epochs: 200 (early stopping patience=10)
+Learning rate: 0.0001, Weight decay: 1e-05
+============================================================
+  [switching_latent_balanced_readout_no_switch_kl] h_spatial=[64, 64] h_temporal=[64, 64] → gate → [64, 4, 24]
+  [D0B-NoSwitchKL epoch 1] prediction_loss=0.00475660017 raw_KL=0.0812290343 posterior_entropy=0.836562506 prior_entropy=1.03704428 posterior_prior_L1=0.353493092 weighted_switch_loss=0 total_loss=0.00475660017 beta_effective=0 val_prediction_loss=0.00487678936
+[D0B-NoSwitchKL KL trajectory epoch1] {"stage": "epoch1", "batch_shape": [64, 20, 284, 21], "raw_KL": 0.15537406504154205, "posterior_entropy": 0.5771399736404419, "prior_entropy": 0.9776889085769653, "posterior_prior_L1": 0.5168117880821228, "beta_effective": 0.0, "weighted_switch_loss": 0.0, "reference_schedule_beta": 0.0, "mode": "fixed TRAIN eval probe"}
+  Epoch   1/200 | Train Loss: 0.004757 | Val Loss: 0.004877 | LR: 1.00e-04 | Best: inf
+  [D0B-NoSwitchKL epoch 2] prediction_loss=0.00413197836 raw_KL=0.12814093 posterior_entropy=0.673708382 prior_entropy=0.99946632 posterior_prior_L1=0.460500064 weighted_switch_loss=0 total_loss=0.00413197836 beta_effective=0 val_prediction_loss=0.00453325659
+  Epoch   2/200 | Train Loss: 0.004132 | Val Loss: 0.004533 | LR: 1.00e-04 | Best: 0.004877
+  [D0B-NoSwitchKL epoch 3] prediction_loss=0.00386299553 raw_KL=0.134150099 posterior_entropy=0.653806984 prior_entropy=0.9950343 posterior_prior_L1=0.471816352 weighted_switch_loss=0 total_loss=0.00386299553 beta_effective=0 val_prediction_loss=0.00432061702
+  Epoch   3/200 | Train Loss: 0.003863 | Val Loss: 0.004321 | LR: 1.00e-04 | Best: 0.004533
+  [D0B-NoSwitchKL epoch 4] prediction_loss=0.00361430272 raw_KL=0.12766961 posterior_entropy=0.671927764 prior_entropy=0.998820907 posterior_prior_L1=0.462637524 weighted_switch_loss=0 total_loss=0.00361430272 beta_effective=0 val_prediction_loss=0.0041017591
+  Epoch   4/200 | Train Loss: 0.003614 | Val Loss: 0.004102 | LR: 1.00e-04 | Best: 0.004321
+  [D0B-NoSwitchKL epoch 5] prediction_loss=0.00339828992 raw_KL=0.121007132 posterior_entropy=0.691342442 prior_entropy=1.00310578 posterior_prior_L1=0.45261162 weighted_switch_loss=0 total_loss=0.00339828992 beta_effective=0 val_prediction_loss=0.00391134722
+[D0B-NoSwitchKL KL trajectory epoch5] {"stage": "epoch5", "batch_shape": [64, 20, 284, 21], "raw_KL": 0.13225655257701874, "posterior_entropy": 0.6423994302749634, "prior_entropy": 0.9916602969169617, "posterior_prior_L1": 0.48530083894729614, "beta_effective": 0.0, "weighted_switch_loss": 0.0, "reference_schedule_beta": 0.00010526315789473683, "mode": "fixed TRAIN eval probe"}
+  Epoch   5/200 | Train Loss: 0.003398 | Val Loss: 0.003911 | LR: 1.00e-04 | Best: 0.004102
+  [D0B-NoSwitchKL epoch 6] prediction_loss=0.0032017401 raw_KL=0.107515767 posterior_entropy=0.733587555 prior_entropy=1.01251259 posterior_prior_L1=0.428074603 weighted_switch_loss=0 total_loss=0.0032017401 beta_effective=0 val_prediction_loss=0.00374560906
+  Epoch   6/200 | Train Loss: 0.003202 | Val Loss: 0.003746 | LR: 1.00e-04 | Best: 0.003911
+  [D0B-NoSwitchKL epoch 7] prediction_loss=0.0030307405 raw_KL=0.103892623 posterior_entropy=0.744363299 prior_entropy=1.01494474 posterior_prior_L1=0.421743704 weighted_switch_loss=0 total_loss=0.0030307405 beta_effective=0 val_prediction_loss=0.00358475414
+  Epoch   7/200 | Train Loss: 0.003031 | Val Loss: 0.003585 | LR: 1.00e-04 | Best: 0.003746
+  [D0B-NoSwitchKL epoch 8] prediction_loss=0.00290052081 raw_KL=0.0990353049 posterior_entropy=0.75945089 prior_entropy=1.01829428 posterior_prior_L1=0.412486301 weighted_switch_loss=0 total_loss=0.00290052081 beta_effective=0 val_prediction_loss=0.00347099365
+  Epoch   8/200 | Train Loss: 0.002901 | Val Loss: 0.003471 | LR: 1.00e-04 | Best: 0.003585
+  [D0B-NoSwitchKL epoch 9] prediction_loss=0.00277277443 raw_KL=0.0963236899 posterior_entropy=0.767945613 prior_entropy=1.02023861 posterior_prior_L1=0.407234832 weighted_switch_loss=0 total_loss=0.00277277443 beta_effective=0 val_prediction_loss=0.0033431476
+  Epoch   9/200 | Train Loss: 0.002773 | Val Loss: 0.003343 | LR: 1.00e-04 | Best: 0.003471
+  [D0B-NoSwitchKL epoch 10] prediction_loss=0.00268052223 raw_KL=0.100466123 posterior_entropy=0.753556288 prior_entropy=1.01694091 posterior_prior_L1=0.416216559 weighted_switch_loss=0 total_loss=0.00268052223 beta_effective=0 val_prediction_loss=0.00323159043
+[D0B-NoSwitchKL KL trajectory epoch10] {"stage": "epoch10", "batch_shape": [64, 20, 284, 21], "raw_KL": 0.11403536796569824, "posterior_entropy": 0.6975451707839966, "prior_entropy": 1.003879427909851, "posterior_prior_L1": 0.4557190537452698, "beta_effective": 0.0, "weighted_switch_loss": 0.0, "reference_schedule_beta": 0.00023684210526315788, "mode": "fixed TRAIN eval probe"}
+  Epoch  10/200 | Train Loss: 0.002681 | Val Loss: 0.003232 | LR: 1.00e-04 | Best: 0.003343
+  Gate   | mean=0.485 std=0.064 [0.332, 0.674] → 偏向GCN
+  [D0B-NoSwitchKL epoch 11] prediction_loss=0.00259126154 raw_KL=0.0940577015 posterior_entropy=0.77475434 prior_entropy=1.02181388 posterior_prior_L1=0.401719572 weighted_switch_loss=0 total_loss=0.00259126154 beta_effective=0 val_prediction_loss=0.00313183917
+  Epoch  11/200 | Train Loss: 0.002591 | Val Loss: 0.003132 | LR: 1.00e-04 | Best: 0.003232
+  [D0B-NoSwitchKL epoch 12] prediction_loss=0.00252701706 raw_KL=0.0975857934 posterior_entropy=0.761203513 prior_entropy=1.01853036 posterior_prior_L1=0.412396784 weighted_switch_loss=0 total_loss=0.00252701706 beta_effective=0 val_prediction_loss=0.0030516183
+  Epoch  12/200 | Train Loss: 0.002527 | Val Loss: 0.003052 | LR: 1.00e-04 | Best: 0.003132
+  [D0B-NoSwitchKL epoch 13] prediction_loss=0.00248685709 raw_KL=0.0997293691 posterior_entropy=0.753420966 prior_entropy=1.0167997 posterior_prior_L1=0.417605526 weighted_switch_loss=0 total_loss=0.00248685709 beta_effective=0 val_prediction_loss=0.00295384983
+  Epoch  13/200 | Train Loss: 0.002487 | Val Loss: 0.002954 | LR: 1.00e-04 | Best: 0.003052
+  [D0B-NoSwitchKL epoch 14] prediction_loss=0.00242146074 raw_KL=0.0940467896 posterior_entropy=0.773283944 prior_entropy=1.02141411 posterior_prior_L1=0.403005494 weighted_switch_loss=0 total_loss=0.00242146074 beta_effective=0 val_prediction_loss=0.00289515038
+  Epoch  14/200 | Train Loss: 0.002421 | Val Loss: 0.002895 | LR: 1.00e-04 | Best: 0.002954
+  [D0B-NoSwitchKL epoch 15] prediction_loss=0.00238784053 raw_KL=0.0853201266 posterior_entropy=0.801523027 prior_entropy=1.02785611 posterior_prior_L1=0.38480735 weighted_switch_loss=0 total_loss=0.00238784053 beta_effective=0 val_prediction_loss=0.00286518647
+  Epoch  15/200 | Train Loss: 0.002388 | Val Loss: 0.002865 | LR: 1.00e-04 | Best: 0.002895
+  [D0B-NoSwitchKL epoch 16] prediction_loss=0.00232264633 raw_KL=0.0773821849 posterior_entropy=0.827723659 prior_entropy=1.03390048 posterior_prior_L1=0.367573785 weighted_switch_loss=0 total_loss=0.00232264633 beta_effective=0 val_prediction_loss=0.0028192441
+  Epoch  16/200 | Train Loss: 0.002323 | Val Loss: 0.002819 | LR: 1.00e-04 | Best: 0.002865
+  [D0B-NoSwitchKL epoch 17] prediction_loss=0.00226844093 raw_KL=0.0876071162 posterior_entropy=0.794257093 prior_entropy=1.02630599 posterior_prior_L1=0.387491216 weighted_switch_loss=0 total_loss=0.00226844093 beta_effective=0 val_prediction_loss=0.00275848201
+  Epoch  17/200 | Train Loss: 0.002268 | Val Loss: 0.002758 | LR: 1.00e-04 | Best: 0.002819
+  [D0B-NoSwitchKL epoch 18] prediction_loss=0.00223740691 raw_KL=0.0884938971 posterior_entropy=0.790733059 prior_entropy=1.02542959 posterior_prior_L1=0.390078821 weighted_switch_loss=0 total_loss=0.00223740691 beta_effective=0 val_prediction_loss=0.00271154116
+  Epoch  18/200 | Train Loss: 0.002237 | Val Loss: 0.002712 | LR: 1.00e-04 | Best: 0.002758
+  [D0B-NoSwitchKL epoch 19] prediction_loss=0.00221345336 raw_KL=0.0925210993 posterior_entropy=0.777197299 prior_entropy=1.02234443 posterior_prior_L1=0.398687334 weighted_switch_loss=0 total_loss=0.00221345336 beta_effective=0 val_prediction_loss=0.0026372592
+  Epoch  19/200 | Train Loss: 0.002213 | Val Loss: 0.002637 | LR: 1.00e-04 | Best: 0.002712
+  [D0B-NoSwitchKL epoch 20] prediction_loss=0.00222109826 raw_KL=0.0915678362 posterior_entropy=0.782363809 prior_entropy=1.02374687 posterior_prior_L1=0.390350831 weighted_switch_loss=0 total_loss=0.00222109826 beta_effective=0 val_prediction_loss=0.00257970351
+[D0B-NoSwitchKL KL trajectory epoch20] {"stage": "epoch20", "batch_shape": [64, 20, 284, 21], "raw_KL": 0.13308794796466827, "posterior_entropy": 0.64079350233078, "prior_entropy": 0.9914981126785278, "posterior_prior_L1": 0.4848461151123047, "beta_effective": 0.0, "weighted_switch_loss": 0.0, "reference_schedule_beta": 0.0005, "mode": "fixed TRAIN eval probe"}
+  Epoch  20/200 | Train Loss: 0.002221 | Val Loss: 0.002580 | LR: 1.00e-04 | Best: 0.002637
+  Gate   | mean=0.481 std=0.052 [0.356, 0.639] → 偏向GCN
+  [D0B-NoSwitchKL epoch 21] prediction_loss=0.00218891831 raw_KL=0.0937875245 posterior_entropy=0.775321716 prior_entropy=1.02220717 posterior_prior_L1=0.397251315 weighted_switch_loss=0 total_loss=0.00218891831 beta_effective=0 val_prediction_loss=0.0024884826
+  Epoch  21/200 | Train Loss: 0.002189 | Val Loss: 0.002488 | LR: 1.00e-04 | Best: 0.002580
+  [D0B-NoSwitchKL epoch 22] prediction_loss=0.00218582101 raw_KL=0.1347795 posterior_entropy=0.655974111 prior_entropy=0.996319115 posterior_prior_L1=0.455120821 weighted_switch_loss=0 total_loss=0.00218582101 beta_effective=0 val_prediction_loss=0.00246684253
+  Epoch  22/200 | Train Loss: 0.002186 | Val Loss: 0.002467 | LR: 1.00e-04 | Best: 0.002488
+  [D0B-NoSwitchKL epoch 23] prediction_loss=0.00216660832 raw_KL=0.147635759 posterior_entropy=0.618781826 prior_entropy=0.988289646 posterior_prior_L1=0.473166038 weighted_switch_loss=0 total_loss=0.00216660832 beta_effective=0 val_prediction_loss=0.00244396506
+  Epoch  23/200 | Train Loss: 0.002167 | Val Loss: 0.002444 | LR: 1.00e-04 | Best: 0.002467
+  [D0B-NoSwitchKL epoch 24] prediction_loss=0.00211641189 raw_KL=0.128756296 posterior_entropy=0.66782057 prior_entropy=0.998304438 posterior_prior_L1=0.455773003 weighted_switch_loss=0 total_loss=0.00211641189 beta_effective=0 val_prediction_loss=0.00239497093
+  Epoch  24/200 | Train Loss: 0.002116 | Val Loss: 0.002395 | LR: 1.00e-04 | Best: 0.002444
+  [D0B-NoSwitchKL epoch 25] prediction_loss=0.00212832589 raw_KL=0.126816632 posterior_entropy=0.675222719 prior_entropy=1.00006232 posterior_prior_L1=0.450918104 weighted_switch_loss=0 total_loss=0.00212832589 beta_effective=0 val_prediction_loss=0.0023532602
+  Epoch  25/200 | Train Loss: 0.002128 | Val Loss: 0.002353 | LR: 1.00e-04 | Best: 0.002395
+  [D0B-NoSwitchKL epoch 26] prediction_loss=0.00212780036 raw_KL=0.207174591 posterior_entropy=0.45214071 prior_entropy=0.952813986 posterior_prior_L1=0.561468237 weighted_switch_loss=0 total_loss=0.00212780036 beta_effective=0 val_prediction_loss=0.00231379573
+  Epoch  26/200 | Train Loss: 0.002128 | Val Loss: 0.002314 | LR: 1.00e-04 | Best: 0.002353
+  [D0B-NoSwitchKL epoch 27] prediction_loss=0.00208732472 raw_KL=0.249956499 posterior_entropy=0.347133143 prior_entropy=0.932083905 posterior_prior_L1=0.603935457 weighted_switch_loss=0 total_loss=0.00208732472 beta_effective=0 val_prediction_loss=0.00224786783
+  Epoch  27/200 | Train Loss: 0.002087 | Val Loss: 0.002248 | LR: 1.00e-04 | Best: 0.002314
+  [D0B-NoSwitchKL epoch 28] prediction_loss=0.00204742675 raw_KL=0.263225514 posterior_entropy=0.316156362 prior_entropy=0.926147929 posterior_prior_L1=0.615397297 weighted_switch_loss=0 total_loss=0.00204742675 beta_effective=0 val_prediction_loss=0.0022409813
+  Epoch  28/200 | Train Loss: 0.002047 | Val Loss: 0.002241 | LR: 1.00e-04 | Best: 0.002248
+  [D0B-NoSwitchKL epoch 29] prediction_loss=0.00204230847 raw_KL=0.256423379 posterior_entropy=0.330988877 prior_entropy=0.928836144 posterior_prior_L1=0.610287876 weighted_switch_loss=0 total_loss=0.00204230847 beta_effective=0 val_prediction_loss=0.00224058209
+  Epoch  29/200 | Train Loss: 0.002042 | Val Loss: 0.002241 | LR: 1.00e-04 | Best: 0.002241
+  [D0B-NoSwitchKL epoch 30] prediction_loss=0.00204055664 raw_KL=0.249631578 posterior_entropy=0.34745521 prior_entropy=0.932049439 posterior_prior_L1=0.603900865 weighted_switch_loss=0 total_loss=0.00204055664 beta_effective=0 val_prediction_loss=0.00220373161
+  Epoch  30/200 | Train Loss: 0.002041 | Val Loss: 0.002204 | LR: 1.00e-04 | Best: 0.002241
+  Gate   | mean=0.482 std=0.044 [0.365, 0.603] → 偏向GCN
+  [D0B-NoSwitchKL epoch 31] prediction_loss=0.00203071413 raw_KL=0.233105044 posterior_entropy=0.387664798 prior_entropy=0.939942735 posterior_prior_L1=0.587844346 weighted_switch_loss=0 total_loss=0.00203071413 beta_effective=0 val_prediction_loss=0.00215672732
+  Epoch  31/200 | Train Loss: 0.002031 | Val Loss: 0.002157 | LR: 1.00e-04 | Best: 0.002204
+  [D0B-NoSwitchKL epoch 32] prediction_loss=0.00199024315 raw_KL=0.214966334 posterior_entropy=0.43278826 prior_entropy=0.948966818 posterior_prior_L1=0.568898691 weighted_switch_loss=0 total_loss=0.00199024315 beta_effective=0 val_prediction_loss=0.00209652192
+  Epoch  32/200 | Train Loss: 0.001990 | Val Loss: 0.002097 | LR: 1.00e-04 | Best: 0.002157
+  [D0B-NoSwitchKL epoch 33] prediction_loss=0.00194710119 raw_KL=0.194904146 posterior_entropy=0.482314181 prior_entropy=0.958808939 posterior_prior_L1=0.548545502 weighted_switch_loss=0 total_loss=0.00194710119 beta_effective=0 val_prediction_loss=0.00207316829
+  Epoch  33/200 | Train Loss: 0.001947 | Val Loss: 0.002073 | LR: 1.00e-04 | Best: 0.002097
+  [D0B-NoSwitchKL epoch 34] prediction_loss=0.00192629369 raw_KL=0.17273681 posterior_entropy=0.541328422 prior_entropy=0.971007744 posterior_prior_L1=0.520775456 weighted_switch_loss=0 total_loss=0.00192629369 beta_effective=0 val_prediction_loss=0.00206308593
+  Epoch  34/200 | Train Loss: 0.001926 | Val Loss: 0.002063 | LR: 1.00e-04 | Best: 0.002073
+  [D0B-NoSwitchKL epoch 35] prediction_loss=0.00192759695 raw_KL=0.15205246 posterior_entropy=0.599436201 prior_entropy=0.983457693 posterior_prior_L1=0.490668774 weighted_switch_loss=0 total_loss=0.00192759695 beta_effective=0 val_prediction_loss=0.00204949104
+  Epoch  35/200 | Train Loss: 0.001928 | Val Loss: 0.002049 | LR: 1.00e-04 | Best: 0.002063
+  [D0B-NoSwitchKL epoch 36] prediction_loss=0.0019192566 raw_KL=0.151476088 posterior_entropy=0.59911751 prior_entropy=0.983183148 posterior_prior_L1=0.493418329 weighted_switch_loss=0 total_loss=0.0019192566 beta_effective=0 val_prediction_loss=0.00203903224
+  Epoch  36/200 | Train Loss: 0.001919 | Val Loss: 0.002039 | LR: 1.00e-04 | Best: 0.002049
+  [D0B-NoSwitchKL epoch 37] prediction_loss=0.00189967348 raw_KL=0.159607694 posterior_entropy=0.575379312 prior_entropy=0.977989225 posterior_prior_L1=0.506365528 weighted_switch_loss=0 total_loss=0.00189967348 beta_effective=0 val_prediction_loss=0.00201682034
+  Epoch  37/200 | Train Loss: 0.001900 | Val Loss: 0.002017 | LR: 1.00e-04 | Best: 0.002039
+  [D0B-NoSwitchKL epoch 38] prediction_loss=0.00188991969 raw_KL=0.168018962 posterior_entropy=0.551072248 prior_entropy=0.97277989 posterior_prior_L1=0.519263268 weighted_switch_loss=0 total_loss=0.00188991969 beta_effective=0 val_prediction_loss=0.00199256432
+  Epoch  38/200 | Train Loss: 0.001890 | Val Loss: 0.001993 | LR: 1.00e-04 | Best: 0.002017
+  [D0B-NoSwitchKL epoch 39] prediction_loss=0.00188820459 raw_KL=0.166208861 posterior_entropy=0.556934895 prior_entropy=0.974123191 posterior_prior_L1=0.515517065 weighted_switch_loss=0 total_loss=0.00188820459 beta_effective=0 val_prediction_loss=0.00197540794
+  Epoch  39/200 | Train Loss: 0.001888 | Val Loss: 0.001975 | LR: 1.00e-04 | Best: 0.001993
+  [D0B-NoSwitchKL epoch 40] prediction_loss=0.00187387452 raw_KL=0.161593624 posterior_entropy=0.569714286 prior_entropy=0.976820741 posterior_prior_L1=0.509168778 weighted_switch_loss=0 total_loss=0.00187387452 beta_effective=0 val_prediction_loss=0.00196239557
+  Epoch  40/200 | Train Loss: 0.001874 | Val Loss: 0.001962 | LR: 1.00e-04 | Best: 0.001975
+  Gate   | mean=0.483 std=0.041 [0.376, 0.597] → 偏向GCN
+  [D0B-NoSwitchKL epoch 41] prediction_loss=0.00186697729 raw_KL=0.156848521 posterior_entropy=0.583687869 prior_entropy=0.979890639 posterior_prior_L1=0.50118519 weighted_switch_loss=0 total_loss=0.00186697729 beta_effective=0 val_prediction_loss=0.00194799034
+  Epoch  41/200 | Train Loss: 0.001867 | Val Loss: 0.001948 | LR: 1.00e-04 | Best: 0.001962
+  [D0B-NoSwitchKL epoch 42] prediction_loss=0.00186168818 raw_KL=0.153230894 posterior_entropy=0.593651227 prior_entropy=0.982010688 posterior_prior_L1=0.496455476 weighted_switch_loss=0 total_loss=0.00186168818 beta_effective=0 val_prediction_loss=0.00194048069
+  Epoch  42/200 | Train Loss: 0.001862 | Val Loss: 0.001940 | LR: 1.00e-04 | Best: 0.001948
+  [D0B-NoSwitchKL epoch 43] prediction_loss=0.00185739626 raw_KL=0.15784611 posterior_entropy=0.579800453 prior_entropy=0.97894525 posterior_prior_L1=0.50443409 weighted_switch_loss=0 total_loss=0.00185739626 beta_effective=0 val_prediction_loss=0.00192291113
+  Epoch  43/200 | Train Loss: 0.001857 | Val Loss: 0.001923 | LR: 1.00e-04 | Best: 0.001940
+  [D0B-NoSwitchKL epoch 44] prediction_loss=0.00184968738 raw_KL=0.160695493 posterior_entropy=0.571724659 prior_entropy=0.977229774 posterior_prior_L1=0.508499804 weighted_switch_loss=0 total_loss=0.00184968738 beta_effective=0 val_prediction_loss=0.00191489069
+  Epoch  44/200 | Train Loss: 0.001850 | Val Loss: 0.001915 | LR: 1.00e-04 | Best: 0.001923
+  [D0B-NoSwitchKL epoch 45] prediction_loss=0.00184482024 raw_KL=0.160849542 posterior_entropy=0.571578593 prior_entropy=0.977237247 posterior_prior_L1=0.508113712 weighted_switch_loss=0 total_loss=0.00184482024 beta_effective=0 val_prediction_loss=0.00189771559
+  Epoch  45/200 | Train Loss: 0.001845 | Val Loss: 0.001898 | LR: 1.00e-04 | Best: 0.001915
+  [D0B-NoSwitchKL epoch 46] prediction_loss=0.00184411593 raw_KL=0.153967938 posterior_entropy=0.591384461 prior_entropy=0.981530749 posterior_prior_L1=0.497535156 weighted_switch_loss=0 total_loss=0.00184411593 beta_effective=0 val_prediction_loss=0.00189843567
+  Epoch  46/200 | Train Loss: 0.001844 | Val Loss: 0.001898 | LR: 1.00e-04 | Best: 0.001898
+  [D0B-NoSwitchKL epoch 47] prediction_loss=0.00183069444 raw_KL=0.155095891 posterior_entropy=0.587719605 prior_entropy=0.980681763 posterior_prior_L1=0.499905918 weighted_switch_loss=0 total_loss=0.00183069444 beta_effective=0 val_prediction_loss=0.00188189722
+  Epoch  47/200 | Train Loss: 0.001831 | Val Loss: 0.001882 | LR: 1.00e-04 | Best: 0.001898
+  [D0B-NoSwitchKL epoch 48] prediction_loss=0.00183256256 raw_KL=0.150887005 posterior_entropy=0.600317553 prior_entropy=0.98347415 posterior_prior_L1=0.492676387 weighted_switch_loss=0 total_loss=0.00183256256 beta_effective=0 val_prediction_loss=0.00187085236
+  Epoch  48/200 | Train Loss: 0.001833 | Val Loss: 0.001871 | LR: 1.00e-04 | Best: 0.001882
+  [D0B-NoSwitchKL epoch 49] prediction_loss=0.00181796816 raw_KL=0.145754867 posterior_entropy=0.615211684 prior_entropy=0.986716029 posterior_prior_L1=0.484626178 weighted_switch_loss=0 total_loss=0.00181796816 beta_effective=0 val_prediction_loss=0.0018625376
+  Epoch  49/200 | Train Loss: 0.001818 | Val Loss: 0.001863 | LR: 1.00e-04 | Best: 0.001871
+  [D0B-NoSwitchKL epoch 50] prediction_loss=0.00182263523 raw_KL=0.144444208 posterior_entropy=0.619113532 prior_entropy=0.9875733 posterior_prior_L1=0.482199042 weighted_switch_loss=0 total_loss=0.00182263523 beta_effective=0 val_prediction_loss=0.00185223697
+  Epoch  50/200 | Train Loss: 0.001823 | Val Loss: 0.001852 | LR: 1.00e-04 | Best: 0.001863
+  Gate   | mean=0.483 std=0.038 [0.387, 0.590] → 偏向GCN
+  [D0B-NoSwitchKL epoch 51] prediction_loss=0.00181235094 raw_KL=0.137239653 posterior_entropy=0.641451065 prior_entropy=0.992601786 posterior_prior_L1=0.46812516 weighted_switch_loss=0 total_loss=0.00181235094 beta_effective=0 val_prediction_loss=0.00184624039
+  Epoch  51/200 | Train Loss: 0.001812 | Val Loss: 0.001846 | LR: 1.00e-04 | Best: 0.001852
+  [D0B-NoSwitchKL epoch 52] prediction_loss=0.00180863048 raw_KL=0.133582432 posterior_entropy=0.652112748 prior_entropy=0.99494434 posterior_prior_L1=0.462589304 weighted_switch_loss=0 total_loss=0.00180863048 beta_effective=0 val_prediction_loss=0.00184000239
+  Epoch  52/200 | Train Loss: 0.001809 | Val Loss: 0.001840 | LR: 1.00e-04 | Best: 0.001846
+  [D0B-NoSwitchKL epoch 53] prediction_loss=0.00180294195 raw_KL=0.131530169 posterior_entropy=0.658616548 prior_entropy=0.996418558 posterior_prior_L1=0.458404173 weighted_switch_loss=0 total_loss=0.00180294195 beta_effective=0 val_prediction_loss=0.00182963447
+  Epoch  53/200 | Train Loss: 0.001803 | Val Loss: 0.001830 | LR: 1.00e-04 | Best: 0.001840
+  [D0B-NoSwitchKL epoch 54] prediction_loss=0.00180314269 raw_KL=0.12381213 posterior_entropy=0.682647189 prior_entropy=1.00183407 posterior_prior_L1=0.443510596 weighted_switch_loss=0 total_loss=0.00180314269 beta_effective=0 val_prediction_loss=0.00182137727
+  Epoch  54/200 | Train Loss: 0.001803 | Val Loss: 0.001821 | LR: 1.00e-04 | Best: 0.001830
+  [D0B-NoSwitchKL epoch 55] prediction_loss=0.00179753551 raw_KL=0.132905681 posterior_entropy=0.654582001 prior_entropy=0.995557669 posterior_prior_L1=0.461142918 weighted_switch_loss=0 total_loss=0.00179753551 beta_effective=0 val_prediction_loss=0.00181236388
+  Epoch  55/200 | Train Loss: 0.001798 | Val Loss: 0.001812 | LR: 1.00e-04 | Best: 0.001821
+  [D0B-NoSwitchKL epoch 56] prediction_loss=0.00179263117 raw_KL=0.118044296 posterior_entropy=0.701932657 prior_entropy=1.00633169 posterior_prior_L1=0.430041083 weighted_switch_loss=0 total_loss=0.00179263117 beta_effective=0 val_prediction_loss=0.00180165505
+  Epoch  56/200 | Train Loss: 0.001793 | Val Loss: 0.001802 | LR: 1.00e-04 | Best: 0.001812
+  [D0B-NoSwitchKL epoch 57] prediction_loss=0.00178778414 raw_KL=0.142947978 posterior_entropy=0.623640936 prior_entropy=0.988641242 posterior_prior_L1=0.480471036 weighted_switch_loss=0 total_loss=0.00178778414 beta_effective=0 val_prediction_loss=0.00179368085
+  Epoch  57/200 | Train Loss: 0.001788 | Val Loss: 0.001794 | LR: 1.00e-04 | Best: 0.001802
+  [D0B-NoSwitchKL epoch 58] prediction_loss=0.00178466333 raw_KL=0.131483074 posterior_entropy=0.660436548 prior_entropy=0.997026636 posterior_prior_L1=0.455962949 weighted_switch_loss=0 total_loss=0.00178466333 beta_effective=0 val_prediction_loss=0.00179029009
+  Epoch  58/200 | Train Loss: 0.001785 | Val Loss: 0.001790 | LR: 1.00e-04 | Best: 0.001794
+  [D0B-NoSwitchKL epoch 59] prediction_loss=0.00178359111 raw_KL=0.14405073 posterior_entropy=0.621677237 prior_entropy=0.988346131 posterior_prior_L1=0.479999649 weighted_switch_loss=0 total_loss=0.00178359111 beta_effective=0 val_prediction_loss=0.00177932938
+  Epoch  59/200 | Train Loss: 0.001784 | Val Loss: 0.001779 | LR: 1.00e-04 | Best: 0.001790
+  [D0B-NoSwitchKL epoch 60] prediction_loss=0.00178336832 raw_KL=0.132712027 posterior_entropy=0.657378588 prior_entropy=0.996417962 posterior_prior_L1=0.456949765 weighted_switch_loss=0 total_loss=0.00178336832 beta_effective=0 val_prediction_loss=0.00177507268
+  Epoch  60/200 | Train Loss: 0.001783 | Val Loss: 0.001775 | LR: 1.00e-04 | Best: 0.001779
+  Gate   | mean=0.485 std=0.036 [0.396, 0.583] → 偏向GCN
+  [D0B-NoSwitchKL epoch 61] prediction_loss=0.00177414867 raw_KL=0.155467043 posterior_entropy=0.587878192 prior_entropy=0.980921711 posterior_prior_L1=0.499376501 weighted_switch_loss=0 total_loss=0.00177414867 beta_effective=0 val_prediction_loss=0.00176440438
+  Epoch  61/200 | Train Loss: 0.001774 | Val Loss: 0.001764 | LR: 1.00e-04 | Best: 0.001775
+  [D0B-NoSwitchKL epoch 62] prediction_loss=0.00177689911 raw_KL=0.15458265 posterior_entropy=0.592486231 prior_entropy=0.982149507 posterior_prior_L1=0.494511972 weighted_switch_loss=0 total_loss=0.00177689911 beta_effective=0 val_prediction_loss=0.00175426661
+  Epoch  62/200 | Train Loss: 0.001777 | Val Loss: 0.001754 | LR: 1.00e-04 | Best: 0.001764
+  [D0B-NoSwitchKL epoch 63] prediction_loss=0.00177491207 raw_KL=0.15628857 posterior_entropy=0.589211893 prior_entropy=0.981626746 posterior_prior_L1=0.494908141 weighted_switch_loss=0 total_loss=0.00177491207 beta_effective=0 val_prediction_loss=0.00174601439
+  Epoch  63/200 | Train Loss: 0.001775 | Val Loss: 0.001746 | LR: 1.00e-04 | Best: 0.001754
+  [D0B-NoSwitchKL epoch 64] prediction_loss=0.00176727411 raw_KL=0.151929726 posterior_entropy=0.604806418 prior_entropy=0.9853649 posterior_prior_L1=0.483822984 weighted_switch_loss=0 total_loss=0.00176727411 beta_effective=0 val_prediction_loss=0.0017378174
+  Epoch  64/200 | Train Loss: 0.001767 | Val Loss: 0.001738 | LR: 1.00e-04 | Best: 0.001746
+  [D0B-NoSwitchKL epoch 65] prediction_loss=0.00176564266 raw_KL=0.171430249 posterior_entropy=0.546851057 prior_entropy=0.972581114 posterior_prior_L1=0.517031813 weighted_switch_loss=0 total_loss=0.00176564266 beta_effective=0 val_prediction_loss=0.00172586148
+  Epoch  65/200 | Train Loss: 0.001766 | Val Loss: 0.001726 | LR: 1.00e-04 | Best: 0.001738
+  [D0B-NoSwitchKL epoch 66] prediction_loss=0.00177625685 raw_KL=0.166416645 posterior_entropy=0.564091052 prior_entropy=0.976636722 posterior_prior_L1=0.505257876 weighted_switch_loss=0 total_loss=0.00177625685 beta_effective=0 val_prediction_loss=0.00171652057
+  Epoch  66/200 | Train Loss: 0.001776 | Val Loss: 0.001717 | LR: 1.00e-04 | Best: 0.001726
+  [D0B-NoSwitchKL epoch 67] prediction_loss=0.00176746106 raw_KL=0.163324544 posterior_entropy=0.574094162 prior_entropy=0.978899144 posterior_prior_L1=0.499286209 weighted_switch_loss=0 total_loss=0.00176746106 beta_effective=0 val_prediction_loss=0.00171142609
+  Epoch  67/200 | Train Loss: 0.001767 | Val Loss: 0.001711 | LR: 1.00e-04 | Best: 0.001717
+  [D0B-NoSwitchKL epoch 68] prediction_loss=0.00177449888 raw_KL=0.155327561 posterior_entropy=0.599242176 prior_entropy=0.984588152 posterior_prior_L1=0.484554451 weighted_switch_loss=0 total_loss=0.00177449888 beta_effective=0 val_prediction_loss=0.00170375858
+  Epoch  68/200 | Train Loss: 0.001774 | Val Loss: 0.001704 | LR: 1.00e-04 | Best: 0.001711
+  [D0B-NoSwitchKL epoch 69] prediction_loss=0.0017627065 raw_KL=0.152977097 posterior_entropy=0.607041922 prior_entropy=0.986406502 posterior_prior_L1=0.480250089 weighted_switch_loss=0 total_loss=0.0017627065 beta_effective=0 val_prediction_loss=0.00168937761
+  Epoch  69/200 | Train Loss: 0.001763 | Val Loss: 0.001689 | LR: 1.00e-04 | Best: 0.001704
+  [D0B-NoSwitchKL epoch 70] prediction_loss=0.0017601319 raw_KL=0.133340469 posterior_entropy=0.671892295 prior_entropy=1.00147453 posterior_prior_L1=0.440375616 weighted_switch_loss=0 total_loss=0.0017601319 beta_effective=0 val_prediction_loss=0.00169511545
+  Epoch  70/200 | Train Loss: 0.001760 | Val Loss: 0.001695 | LR: 1.00e-04 | Best: 0.001689
+  Gate   | mean=0.486 std=0.034 [0.403, 0.572] → 偏向GCN
+  [D0B-NoSwitchKL epoch 71] prediction_loss=0.00176051156 raw_KL=0.138878264 posterior_entropy=0.654944481 prior_entropy=0.997712399 posterior_prior_L1=0.451580618 weighted_switch_loss=0 total_loss=0.00176051156 beta_effective=0 val_prediction_loss=0.00169100163
+  Epoch  71/200 | Train Loss: 0.001761 | Val Loss: 0.001691 | LR: 1.00e-04 | Best: 0.001689
+  [D0B-NoSwitchKL epoch 72] prediction_loss=0.00176671464 raw_KL=0.112990502 posterior_entropy=0.740488444 prior_entropy=1.01757218 posterior_prior_L1=0.39711352 weighted_switch_loss=0 total_loss=0.00176671464 beta_effective=0 val_prediction_loss=0.0017108076
+  Epoch  72/200 | Train Loss: 0.001767 | Val Loss: 0.001711 | LR: 1.00e-04 | Best: 0.001689
+  [D0B-NoSwitchKL epoch 73] prediction_loss=0.00178559817 raw_KL=0.16142185 posterior_entropy=0.590263382 prior_entropy=0.983566897 posterior_prior_L1=0.483392845 weighted_switch_loss=0 total_loss=0.00178559817 beta_effective=0 val_prediction_loss=0.00171769056
+  Epoch  73/200 | Train Loss: 0.001786 | Val Loss: 0.001718 | LR: 1.00e-04 | Best: 0.001689
+  [D0B-NoSwitchKL epoch 74] prediction_loss=0.00176228502 raw_KL=0.220509827 posterior_entropy=0.429981408 prior_entropy=0.949750909 posterior_prior_L1=0.560397219 weighted_switch_loss=0 total_loss=0.00176228502 beta_effective=0 val_prediction_loss=0.00167889018
+  Epoch  74/200 | Train Loss: 0.001762 | Val Loss: 0.001679 | LR: 1.00e-04 | Best: 0.001689
+  [D0B-NoSwitchKL epoch 75] prediction_loss=0.00173683665 raw_KL=0.240187372 posterior_entropy=0.376943601 prior_entropy=0.938588571 posterior_prior_L1=0.586156302 weighted_switch_loss=0 total_loss=0.00173683665 beta_effective=0 val_prediction_loss=0.00165128037
+  Epoch  75/200 | Train Loss: 0.001737 | Val Loss: 0.001651 | LR: 1.00e-04 | Best: 0.001679
+  [D0B-NoSwitchKL epoch 76] prediction_loss=0.00174892025 raw_KL=0.189781178 posterior_entropy=0.513396653 prior_entropy=0.967237211 posterior_prior_L1=0.519753083 weighted_switch_loss=0 total_loss=0.00174892025 beta_effective=0 val_prediction_loss=0.00167994231
+  Epoch  76/200 | Train Loss: 0.001749 | Val Loss: 0.001680 | LR: 1.00e-04 | Best: 0.001651
+  [D0B-NoSwitchKL epoch 77] prediction_loss=0.00173725203 raw_KL=0.309553614 posterior_entropy=0.217327316 prior_entropy=0.908246443 posterior_prior_L1=0.646904545 weighted_switch_loss=0 total_loss=0.00173725203 beta_effective=0 val_prediction_loss=0.00163678792
+  Epoch  77/200 | Train Loss: 0.001737 | Val Loss: 0.001637 | LR: 1.00e-04 | Best: 0.001651
+  [D0B-NoSwitchKL epoch 78] prediction_loss=0.00175938176 raw_KL=0.31999832 posterior_entropy=0.196128146 prior_entropy=0.904588211 posterior_prior_L1=0.653101226 weighted_switch_loss=0 total_loss=0.00175938176 beta_effective=0 val_prediction_loss=0.00166076806
+  Epoch  78/200 | Train Loss: 0.001759 | Val Loss: 0.001661 | LR: 1.00e-04 | Best: 0.001637
+  [D0B-NoSwitchKL epoch 79] prediction_loss=0.00173837594 raw_KL=0.302085653 posterior_entropy=0.23430973 prior_entropy=0.911448865 posterior_prior_L1=0.64014517 weighted_switch_loss=0 total_loss=0.00173837594 beta_effective=0 val_prediction_loss=0.0016760749
+  Epoch  79/200 | Train Loss: 0.001738 | Val Loss: 0.001676 | LR: 1.00e-04 | Best: 0.001637
+  [D0B-NoSwitchKL epoch 80] prediction_loss=0.00173806072 raw_KL=0.259940666 posterior_entropy=0.329444677 prior_entropy=0.929231391 posterior_prior_L1=0.605766966 weighted_switch_loss=0 total_loss=0.00173806072 beta_effective=0 val_prediction_loss=0.00169578635
+  Epoch  80/200 | Train Loss: 0.001738 | Val Loss: 0.001696 | LR: 1.00e-04 | Best: 0.001637
+  Gate   | mean=0.488 std=0.032 [0.399, 0.571] → 偏向GCN
+  [D0B-NoSwitchKL epoch 81] prediction_loss=0.0017374027 raw_KL=0.208133833 posterior_entropy=0.458820197 prior_entropy=0.955073388 posterior_prior_L1=0.551779368 weighted_switch_loss=0 total_loss=0.0017374027 beta_effective=0 val_prediction_loss=0.0016986399
+  Epoch  81/200 | Train Loss: 0.001737 | Val Loss: 0.001699 | LR: 1.00e-04 | Best: 0.001637
+  [D0B-NoSwitchKL epoch 82] prediction_loss=0.00171981718 raw_KL=0.275371571 posterior_entropy=0.29338995 prior_entropy=0.922364124 posterior_prior_L1=0.619867193 weighted_switch_loss=0 total_loss=0.00171981718 beta_effective=0 val_prediction_loss=0.00163689076
+  Epoch  82/200 | Train Loss: 0.001720 | Val Loss: 0.001637 | LR: 1.00e-04 | Best: 0.001637
+  [D0B-NoSwitchKL epoch 83] prediction_loss=0.00174333686 raw_KL=0.254002118 posterior_entropy=0.34305423 prior_entropy=0.931774085 posterior_prior_L1=0.601565062 weighted_switch_loss=0 total_loss=0.00174333686 beta_effective=0 val_prediction_loss=0.00164917479
+  Epoch  83/200 | Train Loss: 0.001743 | Val Loss: 0.001649 | LR: 5.00e-05 | Best: 0.001637
+  [D0B-NoSwitchKL epoch 84] prediction_loss=0.00171876852 raw_KL=0.220428132 posterior_entropy=0.426779335 prior_entropy=0.948489646 posterior_prior_L1=0.56700133 weighted_switch_loss=0 total_loss=0.00171876852 beta_effective=0 val_prediction_loss=0.00168344125
+  Epoch  84/200 | Train Loss: 0.001719 | Val Loss: 0.001683 | LR: 5.00e-05 | Best: 0.001637
+  [D0B-NoSwitchKL epoch 85] prediction_loss=0.00170196088 raw_KL=0.217045681 posterior_entropy=0.435971618 prior_entropy=0.950404394 posterior_prior_L1=0.562657494 weighted_switch_loss=0 total_loss=0.00170196088 beta_effective=0 val_prediction_loss=0.00167381926
+  Epoch  85/200 | Train Loss: 0.001702 | Val Loss: 0.001674 | LR: 5.00e-05 | Best: 0.001637
+  [D0B-NoSwitchKL epoch 86] prediction_loss=0.00169403571 raw_KL=0.233715205 posterior_entropy=0.392713936 prior_entropy=0.941561043 posterior_prior_L1=0.581819817 weighted_switch_loss=0 total_loss=0.00169403571 beta_effective=0 val_prediction_loss=0.00169000952
+  Epoch  86/200 | Train Loss: 0.001694 | Val Loss: 0.001690 | LR: 5.00e-05 | Best: 0.001637
+  [D0B-NoSwitchKL epoch 87] prediction_loss=0.001692309 raw_KL=0.221509882 posterior_entropy=0.425982222 prior_entropy=0.948549234 posterior_prior_L1=0.566098398 weighted_switch_loss=0 total_loss=0.001692309 beta_effective=0 val_prediction_loss=0.00170933737
+  Epoch  87/200 | Train Loss: 0.001692 | Val Loss: 0.001709 | LR: 5.00e-05 | Best: 0.001637
+
+[Early Stopping] No improvement for 10 epochs. Stopping at epoch 87.
+[Early Stopping] Best validation loss: 0.001637 at epoch 77
+[D0B-NoSwitchKL KL trajectory final(epoch 87)] {"stage": "final(epoch 87)", "batch_shape": [64, 20, 284, 21], "raw_KL": 0.16291314363479614, "posterior_entropy": 0.5649592280387878, "prior_entropy": 0.9761363863945007, "posterior_prior_L1": 0.5149031281471252, "beta_effective": 0.0, "weighted_switch_loss": 0.0, "reference_schedule_beta": 0.0005, "mode": "fixed TRAIN eval probe"}
+[D0B-NoSwitchKL KL trajectory best(epoch 77)] {"stage": "best(epoch 77)", "batch_shape": [64, 20, 284, 21], "raw_KL": 0.2954426407814026, "posterior_entropy": 0.24027609825134277, "prior_entropy": 0.9115914702415466, "posterior_prior_L1": 0.6421564221382141, "beta_effective": 0.0, "weighted_switch_loss": 0.0, "reference_schedule_beta": 0.0005, "mode": "fixed TRAIN eval probe"}
+
+[Checkpoint] Restored best model from epoch 77
+[Checkpoint] Saved to checkpoints/switching_latent_balanced_readout_no_switch_kl_best.pt
+============================================================
+
+  Temporal weights: mean=0.0500 std=0.0134 min=0.0000 max=1.0000
+  [D0B-NoSwitchKL TRAIN] mean p=[0.0201 0.9599 0.02  ] entropy=0.185977 mean max p=0.959930 margin=0.937184
+  [D0B-NoSwitchKL TRAIN] argmax occupancy
+    state 0 = 0.00%
+    state 1 = 100.00%
+    state 2 = 0.00%
+  [D0B-NoSwitchKL TRAIN prior] entropy=0.902881 mean max p=0.631860
+  [D0B-NoSwitchKL VAL] mean p=[0.0241 0.9445 0.0314] entropy=0.244258 mean max p=0.944543 margin=0.912944
+  [D0B-NoSwitchKL VAL] argmax occupancy
+    state 0 = 0.00%
+    state 1 = 100.00%
+    state 2 = 0.00%
+  [D0B-NoSwitchKL VAL prior] entropy=0.912373 mean max p=0.624490
+  [D0B-NoSwitchKL TEST] mean p=[0.029  0.9347 0.0363] entropy=0.277299 mean max p=0.934663 margin=0.897013
+  [D0B-NoSwitchKL TEST] argmax occupancy
+    state 0 = 0.00%
+    state 1 = 100.00%
+    state 2 = 0.00%
+  [D0B-NoSwitchKL TEST prior] entropy=0.918145 mean max p=0.619813
+  [D0B-NoSwitchKL probability legality] min p=9.212322e-03 max probability-sum error=1.192e-07
+  [D0B-NoSwitchKL prior/posterior] prior entropy=0.918145 posterior entropy=0.277299 mean KL=0.279067 mean L1=0.629710
+  [D0B-NoSwitchKL regime dynamics] mean ||p_t-p_(t-1)||_1=0.028462
+  [D0B-NoSwitchKL p t=0] [0.0764 0.8279 0.0956]
+  [D0B-NoSwitchKL p t=2] [0.0264 0.9407 0.033 ]
+  [D0B-NoSwitchKL p t=4] [0.0256 0.9425 0.032 ]
+  [D0B-NoSwitchKL p t=6] [0.0257 0.9422 0.0321]
+  [D0B-NoSwitchKL p t=8] [0.0259 0.9418 0.0323]
+  [D0B-NoSwitchKL p t=10] [0.0261 0.9413 0.0326]
+  [D0B-NoSwitchKL p t=12] [0.0263 0.9407 0.0329]
+  [D0B-NoSwitchKL p t=14] [0.0265 0.9403 0.0332]
+  [D0B-NoSwitchKL p t=16] [0.0266 0.94   0.0334]
+  [D0B-NoSwitchKL p t=18] [0.0267 0.9396 0.0336]
+  [D0B-NoSwitchKL transition matrix]
+[[0.667948 0.165587 0.166464]
+ [0.165931 0.667772 0.166297]
+ [0.166633 0.166821 0.666545]]
+  [D0B-NoSwitchKL transition] row sums=[1. 1. 1.] diagonal=[0.667948 0.667772 0.666545] mean persistence=0.667422 row entropy=[0.865781 0.866028 0.867731]
+  [D0B-NoSwitchKL transition] absolute transition_logits drift=1.319e-02
+  [D0B-NoSwitchKL Base RPE] norm=0.001220 mean |QK/sqrt(d)|=8.994206e-05 mean |base bias|=1.201342e-04 base/QK=1.335536e+00
+  [D0B-NoSwitchKL Base RPE delta=+0] heads=[-0.000331 -0.000507 -0.000341 -0.000369] mean=-0.000387 std=0.000071
+  [D0B-NoSwitchKL Base RPE delta=+1] heads=[-0.000156 -0.000316 -0.000243 -0.000154] mean=-0.000217 std=0.000067
+  [D0B-NoSwitchKL Base RPE delta=+2] heads=[-0.000136 -0.000117 -0.000179 -0.000125] mean=-0.000139 std=0.000024
+  [D0B-NoSwitchKL Base RPE delta=+5] heads=[ 7.00e-06  6.60e-05 -1.30e-05  1.24e-04] mean=0.000046 std=0.000054
+  [D0B-NoSwitchKL Base RPE delta=+10] heads=[5.30e-05 7.80e-05 1.71e-04 9.80e-05] mean=0.000100 std=0.000044
+  [D0B-NoSwitchKL Base RPE delta=+19] heads=[ 4.40e-05  3.00e-06 -6.50e-05  1.59e-04] mean=0.000035 std=0.000081
+  [D0B-NoSwitchKL candidate state 0] norm mean=0.428154 std=0.038776 max=0.525045
+  [D0B-NoSwitchKL candidate state 1] norm mean=1.275897 std=0.093427 max=1.429582
+  [D0B-NoSwitchKL candidate state 2] norm mean=0.360344 std=0.010042 max=0.384358
+  [D0B-NoSwitchKL candidate pair 0/1] mean L1=0.139778 cosine=-0.277179
+  [D0B-NoSwitchKL candidate pair 0/2] mean L1=0.056744 cosine=-0.026113
+  [D0B-NoSwitchKL candidate pair 1/2] mean L1=0.126309 cosine=0.135623
+  [D0B-NoSwitchKL Z trajectory] mean norm=1.192397 max norm=1.367975 mean ||Z_t-Z_(t-1)||_2=0.199010
+  [D0B-NoSwitchKL Z direction] consecutive cosine mean/std=0.991408/0.009127 mean directional change=0.008593
+  [D0B-NoSwitchKL Z t=0] mean norm=1.043580
+  [D0B-NoSwitchKL Z t=5] mean norm=1.204199
+  [D0B-NoSwitchKL Z t=10] mean norm=1.201425
+  [D0B-NoSwitchKL Z t=15] mean norm=1.199229
+  [D0B-NoSwitchKL Z t=19] mean norm=1.197684
+  [D0B-NoSwitchKL weighted generator contributions] [0.012666 1.193833 0.013101]
+  [D0B-NoSwitchKL pre-balance scale] E=9.678123 H=9.786490 Z=1.192397 H_T=9.786211 Z_T=1.197684 Z_T/H_T=1.223849e-01 readout input=9.859750 h_temporal=3.239525
+  [D0B-NoSwitchKL readout weights] ||W_long||=2.798492 ||W_micro||=2.778678 W_micro/W_long=0.992920
+  [D0B-NoSwitchKL post-balance scale] ||h_long||=7.165322 ||h_micro||=7.210711 micro/long=1.006335 balanced concat=10.165445 h_temporal=3.239525
+  [D0B-NoSwitchKL stock dispersion sensitivity] high p=[0.026  0.9404 0.0337] low p=[0.0399 0.9257 0.0344] L1=0.029228 high/low ||Z_T||=1.213931/1.036880 high/low ||h_micro||=7.212192/7.201688
+  [D0B-NoSwitchKL bond dispersion sensitivity] high p=[0.0216 0.9467 0.0317] low p=[0.0315 0.923  0.0454] L1=0.047241 high/low ||Z_T||=1.220401/1.195100 high/low ||h_micro||=7.212490/7.208794
+  [D0B-NoSwitchKL commodity dispersion sensitivity] high p=[0.0218 0.9473 0.0308] low p=[0.0378 0.9194 0.0428] L1=0.055778 high/low ||Z_T||=1.271650/1.113653 high/low ||h_micro||=7.213056/7.207613
+  [D0B-NoSwitchKL prediction-only grad] Market Encoder=1.181e-03
+  [D0B-NoSwitchKL prediction-only grad] LongMemory Transformer=1.897e-04
+  [D0B-NoSwitchKL prediction-only grad] Base RPE=6.545e-08
+  [D0B-NoSwitchKL prediction-only grad] regime evidence=1.049e-05
+  [D0B-NoSwitchKL prediction-only grad] transition logits=4.941e-07
+  [D0B-NoSwitchKL prediction-only grad] G0=7.143e-06
+  [D0B-NoSwitchKL prediction-only grad] G1=5.176e-04
+  [D0B-NoSwitchKL prediction-only grad] G2=7.426e-06
+  [D0B-NoSwitchKL prediction-only grad] long_memory_readout=6.823e-04
+  [D0B-NoSwitchKL prediction-only grad] micro_state_readout=5.343e-04
+  [D0B-NoSwitchKL prediction-only grad] state readout=1.738e-03
+  [D0B-NoSwitchKL prediction-only grad ratio] generator/LongMemory=9.349016e-01
+  [D0B-NoSwitchKL prediction-only grad ratio] microReadout/longReadout=7.830723e-01
+  [D0B-NoSwitchKL total-loss grad] Market Encoder=1.181e-03
+  [D0B-NoSwitchKL total-loss grad] LongMemory Transformer=1.897e-04
+  [D0B-NoSwitchKL total-loss grad] Base RPE=6.545e-08
+  [D0B-NoSwitchKL total-loss grad] regime evidence=1.049e-05
+  [D0B-NoSwitchKL total-loss grad] transition logits=4.941e-07
+  [D0B-NoSwitchKL total-loss grad] G0=7.143e-06
+  [D0B-NoSwitchKL total-loss grad] G1=5.176e-04
+  [D0B-NoSwitchKL total-loss grad] G2=7.426e-06
+  [D0B-NoSwitchKL total-loss grad] long_memory_readout=6.823e-04
+  [D0B-NoSwitchKL total-loss grad] micro_state_readout=5.343e-04
+  [D0B-NoSwitchKL total-loss grad] state readout=1.738e-03
+  [D0B-NoSwitchKL total-loss grad ratio] generator/LongMemory=9.349016e-01
+  [D0B-NoSwitchKL total-loss grad ratio] microReadout/longReadout=7.830723e-01
+  [D0B-NoSwitchKL loss] L_return=1.441928e-03
+  [D0B-NoSwitchKL loss] L_switch_raw=3.136975e-01
+  [D0B-NoSwitchKL loss] beta_effective=0 reference_schedule_beta=5.000000e-04
+  [D0B-NoSwitchKL loss] weighted_switch=0.000000e+00
+  [D0B-NoSwitchKL loss] total=1.441928e-03
+  [D0B-NoSwitchKL loss] switch_to_return_ratio=0.000000e+00
+  [D0B-NoSwitchKL forced-full-regime state 0] Z_T mean/max diff=1.432e-01/5.794e-01 h_micro mean/max diff=7.699e-01/2.485e+00 h_temporal mean/max diff=3.074e-01/9.715e-01 prediction mean/max diff=1.159e-02/4.021e-02
+  [D0B-NoSwitchKL forced-full-regime state 1] Z_T mean/max diff=6.530e-03/3.522e-02 h_micro mean/max diff=1.469e-02/5.876e-02 h_temporal mean/max diff=4.841e-03/2.053e-02 prediction mean/max diff=1.826e-04/1.216e-03
+  [D0B-NoSwitchKL forced-full-regime state 2] Z_T mean/max diff=1.271e-01/5.000e-01 h_micro mean/max diff=6.294e-01/2.054e+00 h_temporal mean/max diff=2.073e-01/6.620e-01 prediction mean/max diff=7.359e-03/3.364e-02
+  [D0B-NoSwitchKL zero-balanced-micro] h_temporal mean/max diff=2.475e-01/8.238e-01 prediction mean/max diff=1.020e-02/3.465e-02
+  [D0B-NoSwitchKL zero-balanced-long] h_temporal mean/max diff=2.444e-01/9.066e-01 prediction mean/max diff=5.717e-03/2.593e-02
+  [D0B-NoSwitchKL zero-out impact] micro/long prediction-impact ratio=1.783779e+00
+  [D0B vs D0 zero-out reference] D0 zero-Z mean=7.417e-05 D0 zero-H mean=1.112e-02 D0 ratio≈6.670e-03
+  [D0B-NoSwitchKL causality] E diff through t=10=0.000e+00 H diff=0.000e+00 p diff=0.000e+00 Z diff=0.000e+00 h_long@t10=0.000e+00 h_micro@t10=0.000e+00 h_temporal@t10=0.000e+00
+  [D0B-NoSwitchKL batch independence] E=7.153e-07 H=9.537e-07 p=1.192e-07 Z=8.941e-08 h_long=3.576e-07 h_micro=4.768e-07 h_temporal=2.384e-07
+  [D0B-NoSwitchKL stock permutation] E=4.768e-07 H=9.537e-07 p=1.192e-07 Z=1.192e-07 h_long=4.768e-07 h_micro=4.768e-07 h_temporal=2.384e-07
+  [D0B-NoSwitchKL bond permutation] E=7.153e-07 H=1.192e-06 p=1.192e-07 Z=1.490e-07 h_long=4.768e-07 h_micro=4.768e-07 h_temporal=2.682e-07
+  [D0B-NoSwitchKL commodity permutation] E=7.153e-07 H=1.192e-06 p=1.192e-07 Z=1.192e-07 h_long=4.768e-07 h_micro=4.768e-07 h_temporal=2.980e-07
+[D0B-NoSwitchKL switching_latent_balanced_readout TRAIN]
+[TRAIN] batch 1/22 complete
+[TRAIN] batch 2/22 complete
+[TRAIN] batch 3/22 complete
+[TRAIN] batch 4/22 complete
+[TRAIN] batch 5/22 complete
+[TRAIN] batch 6/22 complete
+[TRAIN] batch 7/22 complete
+[TRAIN] batch 8/22 complete
+[TRAIN] batch 9/22 complete
+[TRAIN] batch 10/22 complete
+[TRAIN] batch 11/22 complete
+[TRAIN] batch 12/22 complete
+[TRAIN] batch 13/22 complete
+[TRAIN] batch 14/22 complete
+[TRAIN] batch 15/22 complete
+[TRAIN] batch 16/22 complete
+[TRAIN] batch 17/22 complete
+[TRAIN] batch 18/22 complete
+[TRAIN] batch 19/22 complete
+[TRAIN] batch 20/22 complete
+[TRAIN] batch 21/22 complete
+[TRAIN] batch 22/22 complete
+[D0B-NoSwitchKL switching_latent_balanced_readout VAL]
+[VAL] batch 1/5 complete
+[VAL] batch 2/5 complete
+[VAL] batch 3/5 complete
+[VAL] batch 4/5 complete
+[VAL] batch 5/5 complete
+[D0B-NoSwitchKL switching_latent_balanced_readout TEST]
+[TEST] batch 1/5 complete
+[TEST] batch 2/5 complete
+[TEST] batch 3/5 complete
+[TEST] batch 4/5 complete
+[TEST] batch 5/5 complete
+[D0B-NoSwitchKL causality/batch/market sanity] {"prefix_cutoff": 10, "causality": {"E": 0.0, "H": 0.0, "p": 0.0, "Z": 0.0, "h_long": 0.0, "h_micro": 0.0, "h_temporal": 0.0}, "batch_permutation_max": 0.0, "single_sample_max": 1.1175870895385742e-08, "within_market": {"stock": {"temporal_invariance_max": 1.430511474609375e-06, "full_model_with_graph_relabeling_max": 2.9802322387695312e-08}, "bond": {"temporal_invariance_max": 1.6689300537109375e-06, "full_model_with_graph_relabeling_max": 2.2351741790771484e-08}, "commodity": {"temporal_invariance_max": 1.1920928955078125e-06, "full_model_with_graph_relabeling_max": 2.2351741790771484e-08}}, "readout_note": "Readout applied to H_t/Z_t at each t; full-window spatial pooling is not a prefix forecast", "PASS": true}
+[D0B-NoSwitchKL switching_latent_balanced_readout horizon gradients] {"norms": {"1": {"regime evidence": 1.7092712369048968e-05, "transition logits": 5.139081054039707e-07, "G0": 3.494664633763023e-05, "G1": 3.9664973883191124e-05, "G2": 2.7084179237135686e-05, "long readout": 0.00013514081365428865, "micro readout": 0.0001028674523695372, "generators": 5.939791299169883e-05, "balanced readouts": 0.0003987653471995145, "Market Encoder": 0.0001768913643900305, "LongMemory": 3.0431845516432077e-05, "Base RPE": 2.6028030841729333e-09, "state readout": 0.00036078947596251965}, "5": {"regime evidence": 2.9962709959363565e-05, "transition logits": 8.988365038931079e-07, "G0": 5.1666040235431865e-05, "G1": 5.725368100684136e-05, "G2": 4.05589998990763e-05, "long readout": 0.00014089661999605596, "micro readout": 0.00015443154552485794, "generators": 8.713412535144016e-05, "balanced readouts": 0.0004369250382296741, "Market Encoder": 0.0001786172651918605, "LongMemory": 2.9596836611744948e-05, "Base RPE": 5.375281553199329e-09, "state readout": 0.00038366977241821587}, "10": {"regime evidence": 0.00016669818433001637, "transition logits": 5.129406417836435e-06, "G0": 8.679643360665068e-05, "G1": 0.00010673388896975666, "G2": 7.211182673927397e-05, "long readout": 0.00026887707645073533, "micro readout": 0.0002431990287732333, "generators": 0.00015532462566625327, "balanced readouts": 0.0007180898683145642, "Market Encoder": 0.0005487175076268613, "LongMemory": 8.693988638697192e-05, "Base RPE": 3.1674222356059545e-08, "state readout": 0.0006198487244546413}, "20": {"regime evidence": 0.0002519616100471467, "transition logits": 7.731687219347805e-06, "G0": 0.00013664459402207285, "G1": 0.00016375831910409033, "G2": 0.0001085468175006099, "long readout": 0.0004406377556733787, "micro readout": 0.00037128350231796503, "generators": 0.00023931289615575224, "balanced readouts": 0.0011394681641831994, "Market Encoder": 0.0008805581601336598, "LongMemory": 0.00013903994113206863, "Base RPE": 1.8727993378320207e-08, "state readout": 0.000983043690212071}}, "cosines": {"regime evidence": {"5d-vs-1d": -0.9800747036933899, "5d-vs-10d": 0.9832973480224609, "5d-vs-20d": 0.9746631383895874}, "transition logits": {"5d-vs-1d": -0.9895288348197937, "5d-vs-10d": 0.9888823628425598, "5d-vs-20d": 0.9832717180252075}, "generators": {"5d-vs-1d": 0.24348977208137512, "5d-vs-10d": 0.46046358346939087, "5d-vs-20d": 0.4474498927593231}, "balanced readouts": {"5d-vs-1d": 0.30319201946258545, "5d-vs-10d": 0.06603211164474487, "5d-vs-20d": -0.006262097042053938}}, "raw_horizon_losses": {"1": 8.728375541977584e-05, "5": 0.0002786702534649521, "10": 0.0004612714401446283, "20": 0.0007285116007551551}, "five_day_multiplier": 1.0, "LongMemory_definition": "transformer layers; Base RPE listed separately", "method": "eval single-horizon raw Huber; autograd.grad; no optimizer step"}
+[D0B-NoSwitchKL switching_latent_balanced_readout KL gradient contribution] {"epoch": 85, "prediction_loss": 0.0015557371079921722, "raw_KL": 0.002680673962458968, "actual_weighted_switch_loss": 1.3403370076048304e-06, "actual_total_loss": 0.0015570773975923657, "beta_effective": 0.0005, "counterfactual_beta": 0.0005, "counterfactual_weighted_switch_loss": 1.3403370076048304e-06, "counterfactual_policy": "Original D0B beta schedule at this checkpoint best epoch (zero at epoch 1); raw-KL gradients also reported", "evidence_weight_norm": 0.7819787263870239, "evidence_bias_norm": 0.08820120990276337, "modules": {"regime evidence": {"prediction_norm": 0.0004314199322834611, "total_norm": 0.00030754294130019844, "counterfactual_switch_norm": 0.0001547418360132724, "raw_KL_norm": 0.30948373675346375, "cos_prediction_switch": -0.8649472843933448, "switch_prediction_ratio": 0.35868031222906155, "total_prediction_max_diff": 3.4172091545769945e-05}, "transition logits": {"prediction_norm": 1.3254683835839387e-05, "total_norm": 1.3327569831744768e-05, "counterfactual_switch_norm": 2.2671558497222577e-07, "raw_KL_norm": 0.00045344026875682175, "cos_prediction_switch": 0.31380864040598333, "switch_prediction_ratio": 0.01710456377384187, "total_prediction_max_diff": 1.1066367733292282e-07}, "G0": {"prediction_norm": 0.000243750648223795, "total_norm": 0.000243750648223795, "counterfactual_switch_norm": 0.0, "raw_KL_norm": 0.0, "cos_prediction_switch": null, "switch_prediction_ratio": 0.0, "total_prediction_max_diff": 0.0}, "G1": {"prediction_norm": 0.00029548059683293104, "total_norm": 0.00029548059683293104, "counterfactual_switch_norm": 0.0, "raw_KL_norm": 0.0, "cos_prediction_switch": null, "switch_prediction_ratio": 0.0, "total_prediction_max_diff": 0.0}, "G2": {"prediction_norm": 0.00020569103071466088, "total_norm": 0.00020569103071466088, "counterfactual_switch_norm": 0.0, "raw_KL_norm": 0.0, "cos_prediction_switch": null, "switch_prediction_ratio": 0.0, "total_prediction_max_diff": 0.0}, "long readout": {"prediction_norm": 0.0006829879712313414, "total_norm": 0.0006829879712313414, "counterfactual_switch_norm": 0.0, "raw_KL_norm": 0.0, "cos_prediction_switch": null, "switch_prediction_ratio": 0.0, "total_prediction_max_diff": 0.0}, "micro readout": {"prediction_norm": 0.0006514518172480166, "total_norm": 0.0006514518172480166, "counterfactual_switch_norm": 0.0, "raw_KL_norm": 0.0, "cos_prediction_switch": null, "switch_prediction_ratio": 0.0, "total_prediction_max_diff": 0.0}, "generators": {"prediction_norm": 0.00043477697181515396, "total_norm": 0.00043477697181515396, "counterfactual_switch_norm": 0.0, "raw_KL_norm": 0.0, "cos_prediction_switch": null, "switch_prediction_ratio": 0.0, "total_prediction_max_diff": 0.0}, "balanced readouts": {"prediction_norm": 0.0018848332110792398, "total_norm": 0.0018848332110792398, "counterfactual_switch_norm": 0.0, "raw_KL_norm": 0.0, "cos_prediction_switch": null, "switch_prediction_ratio": 0.0, "total_prediction_max_diff": 0.0}}, "mode": "eval fixed TEST; prediction=sum four raw Huber losses; no optimizer step"}
+[D0B-NoSwitchKL switching_latent_balanced_readout_no_switch_kl TRAIN]
+[TRAIN] batch 1/22 complete
+[TRAIN] batch 2/22 complete
+[TRAIN] batch 3/22 complete
+[TRAIN] batch 4/22 complete
+[TRAIN] batch 5/22 complete
+[TRAIN] batch 6/22 complete
+[TRAIN] batch 7/22 complete
+[TRAIN] batch 8/22 complete
+[TRAIN] batch 9/22 complete
+[TRAIN] batch 10/22 complete
+[TRAIN] batch 11/22 complete
+[TRAIN] batch 12/22 complete
+[TRAIN] batch 13/22 complete
+[TRAIN] batch 14/22 complete
+[TRAIN] batch 15/22 complete
+[TRAIN] batch 16/22 complete
+[TRAIN] batch 17/22 complete
+[TRAIN] batch 18/22 complete
+[TRAIN] batch 19/22 complete
+[TRAIN] batch 20/22 complete
+[TRAIN] batch 21/22 complete
+[TRAIN] batch 22/22 complete
+[D0B-NoSwitchKL switching_latent_balanced_readout_no_switch_kl VAL]
+[VAL] batch 1/5 complete
+[VAL] batch 2/5 complete
+[VAL] batch 3/5 complete
+[VAL] batch 4/5 complete
+[VAL] batch 5/5 complete
+[D0B-NoSwitchKL switching_latent_balanced_readout_no_switch_kl TEST]
+[TEST] batch 1/5 complete
+[TEST] batch 2/5 complete
+[TEST] batch 3/5 complete
+[TEST] batch 4/5 complete
+[TEST] batch 5/5 complete
+[D0B-NoSwitchKL causality/batch/market sanity] {"prefix_cutoff": 10, "causality": {"E": 0.0, "H": 0.0, "p": 0.0, "Z": 0.0, "h_long": 0.0, "h_micro": 0.0, "h_temporal": 0.0}, "batch_permutation_max": 0.0, "single_sample_max": 1.4901161193847656e-08, "within_market": {"stock": {"temporal_invariance_max": 1.430511474609375e-06, "full_model_with_graph_relabeling_max": 2.3748725652694702e-08}, "bond": {"temporal_invariance_max": 1.430511474609375e-06, "full_model_with_graph_relabeling_max": 2.2351741790771484e-08}, "commodity": {"temporal_invariance_max": 1.1920928955078125e-06, "full_model_with_graph_relabeling_max": 2.9802322387695312e-08}}, "readout_note": "Readout applied to H_t/Z_t at each t; full-window spatial pooling is not a prefix forecast", "PASS": true}
+[D0B-NoSwitchKL switching_latent_balanced_readout_no_switch_kl horizon gradients] {"norms": {"1": {"regime evidence": 2.020022293436341e-06, "transition logits": 1.2645907077057927e-07, "G0": 2.0488978407229297e-06, "G1": 0.00014887633733451366, "G2": 2.5234869553969475e-06, "long readout": 0.00015172177518252283, "micro readout": 0.00014193131937645376, "generators": 0.00014891132013872266, "balanced readouts": 0.0004603993729688227, "Market Encoder": 0.00027820991817861795, "LongMemory": 4.3235319026280195e-05, "Base RPE": 6.396799090424565e-09, "state readout": 0.0004108571447432041}, "5": {"regime evidence": 5.31928708369378e-06, "transition logits": 2.6981206247000955e-07, "G0": 2.602116410344024e-06, "G1": 0.00017101093544624746, "G2": 2.926790784840705e-06, "long readout": 0.00016294632223434746, "micro readout": 0.00020063573902007192, "generators": 0.00017105504230130464, "balanced readouts": 0.0005793061573058367, "Market Encoder": 0.00023998957476578653, "LongMemory": 3.819330595433712e-05, "Base RPE": 9.719884452863425e-09, "state readout": 0.0005184491164982319}, "10": {"regime evidence": 1.5786874428158626e-05, "transition logits": 8.067229941843834e-07, "G0": 4.004752554465085e-06, "G1": 0.00027648304239846766, "G2": 4.1586358747736085e-06, "long readout": 0.0002626174536999315, "micro readout": 0.00022025182261131704, "generators": 0.00027654209407046437, "balanced readouts": 0.0006658955826424062, "Market Encoder": 0.0006203614175319672, "LongMemory": 9.028261411003768e-05, "Base RPE": 4.978207712724725e-08, "state readout": 0.0005709098768420517}, "20": {"regime evidence": 3.2091880711959675e-05, "transition logits": 1.6242967149082688e-06, "G0": 6.473475878010504e-06, "G1": 0.00045105363824404776, "G2": 6.464611033152323e-06, "long readout": 0.0004354805569164455, "micro readout": 0.00035175515222363174, "generators": 0.00045114479144103825, "balanced readouts": 0.0011224133195355535, "Market Encoder": 0.0010597212240099907, "LongMemory": 0.00015601668565068394, "Base RPE": 2.7404684743714824e-08, "state readout": 0.0009728497243486345}}, "cosines": {"regime evidence": {"5d-vs-1d": 0.7943207621574402, "5d-vs-10d": 0.9844350814819336, "5d-vs-20d": 0.9949865341186523}, "transition logits": {"5d-vs-1d": 0.4975091814994812, "5d-vs-10d": 0.9988913536071777, "5d-vs-20d": 0.999681830406189}, "generators": {"5d-vs-1d": 0.10092336684465408, "5d-vs-10d": 0.15717200934886932, "5d-vs-20d": 0.22086337208747864}, "balanced readouts": {"5d-vs-1d": 0.1788005530834198, "5d-vs-10d": 0.01746104657649994, "5d-vs-20d": -0.0018174066208302975}}, "raw_horizon_losses": {"1": 9.571387636242434e-05, "5": 0.00029378969338722527, "10": 0.0004525880503933877, "20": 0.0007188621675595641}, "five_day_multiplier": 1.0, "LongMemory_definition": "transformer layers; Base RPE listed separately", "method": "eval single-horizon raw Huber; autograd.grad; no optimizer step"}
+[D0B-NoSwitchKL switching_latent_balanced_readout_no_switch_kl KL gradient contribution] {"epoch": 77, "prediction_loss": 0.001560953794978559, "raw_KL": 0.2978443205356598, "actual_weighted_switch_loss": 0.0, "actual_total_loss": 0.001560953794978559, "beta_effective": 0.0, "counterfactual_beta": 0.0005, "counterfactual_weighted_switch_loss": 0.0001489221613155678, "counterfactual_policy": "Original D0B beta schedule at this checkpoint best epoch (zero at epoch 1); raw-KL gradients also reported", "evidence_weight_norm": 0.7611058950424194, "evidence_bias_norm": 0.0803726464509964, "modules": {"regime evidence": {"prediction_norm": 5.472431439557113e-05, "total_norm": 5.472431439557113e-05, "counterfactual_switch_norm": 0.0005298854666762054, "raw_KL_norm": 1.059770941734314, "cos_prediction_switch": 0.9692760477323282, "switch_prediction_ratio": 9.682815993745722, "total_prediction_max_diff": 0.0}, "transition logits": {"prediction_norm": 2.764634245977504e-06, "total_norm": 2.764634245977504e-06, "counterfactual_switch_norm": 6.177854811539873e-05, "raw_KL_norm": 0.12355706095695496, "cos_prediction_switch": -0.986433890125649, "switch_prediction_ratio": 22.346011305215317, "total_prediction_max_diff": 0.0}, "G0": {"prediction_norm": 1.0970617950079031e-05, "total_norm": 1.0970617950079031e-05, "counterfactual_switch_norm": 0.0, "raw_KL_norm": 0.0, "cos_prediction_switch": null, "switch_prediction_ratio": 0.0, "total_prediction_max_diff": 0.0}, "G1": {"prediction_norm": 0.0007244548760354519, "total_norm": 0.0007244548760354519, "counterfactual_switch_norm": 0.0, "raw_KL_norm": 0.0, "cos_prediction_switch": null, "switch_prediction_ratio": 0.0, "total_prediction_max_diff": 0.0}, "G2": {"prediction_norm": 1.1121873285446782e-05, "total_norm": 1.1121873285446782e-05, "counterfactual_switch_norm": 0.0, "raw_KL_norm": 0.0, "cos_prediction_switch": null, "switch_prediction_ratio": 0.0, "total_prediction_max_diff": 0.0}, "long readout": {"prediction_norm": 0.0006465549231506884, "total_norm": 0.0006465549231506884, "counterfactual_switch_norm": 0.0, "raw_KL_norm": 0.0, "cos_prediction_switch": null, "switch_prediction_ratio": 0.0, "total_prediction_max_diff": 0.0}, "micro readout": {"prediction_norm": 0.0005895728245377541, "total_norm": 0.0005895728245377541, "counterfactual_switch_norm": 0.0, "raw_KL_norm": 0.0, "cos_prediction_switch": null, "switch_prediction_ratio": 0.0, "total_prediction_max_diff": 0.0}, "generators": {"prediction_norm": 0.0007246205350384116, "total_norm": 0.0007246205350384116, "counterfactual_switch_norm": 0.0, "raw_KL_norm": 0.0, "cos_prediction_switch": null, "switch_prediction_ratio": 0.0, "total_prediction_max_diff": 0.0}, "balanced readouts": {"prediction_norm": 0.0017470272723585367, "total_norm": 0.0017470272723585367, "counterfactual_switch_norm": 0.0, "raw_KL_norm": 0.0, "cos_prediction_switch": null, "switch_prediction_ratio": 0.0, "total_prediction_max_diff": 0.0}}, "mode": "eval fixed TEST; prediction=sum four raw Huber losses; no optimizer step"}
+[D0B-NoSwitchKL REPORT] experiments/d0b_no_switch_kl/20260907_230208/REPORT.md
+
+Retained ablation summary
+Variant                    Params   Train Time        MAE       RMSE     Hit%    vs Zero
+D0B-NoSwitchKL            520,549         359s   0.022914   0.029497    49.5%     +7.71%
+
+📋 Experiment 20260907_230226 logged to /home/yangxiaotong/projects/myresearch/Commedities/experiments/EXPERIMENTS.jsonl

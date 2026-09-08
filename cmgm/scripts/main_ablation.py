@@ -50,6 +50,10 @@ VARIANTS = [
     ("S2F-SwitchingFilterRPE", "switching_filter_rpe"),
     ("D0-SwitchingLatentTransformer", "switching_latent_transformer"),
     ("D0B-BalancedLatentReadout", "switching_latent_balanced_readout"),
+    ("D0B-NoSwitchKL", "switching_latent_balanced_readout_no_switch_kl"),
+    ("D0B-5dOnlyObjective", "switching_latent_balanced_readout_5d_only"),
+    ("D0B-MidLongGroupedObjective", "switching_latent_balanced_readout_5_10_20"),
+    ("D0E-LearnablePersistence", "switching_latent_learnable_persistence"),
     ("D0D-BalancedTransitionInput", "switching_latent_balanced_transition"),
     ("D0C-DynamicSlopeTransition", "switching_latent_dynamic_slope"),
     ("D1A-LatentMemory", "switching_latent_memory"),
@@ -68,6 +72,10 @@ VARIANTS = [
 D_SERIES_VARIANTS = frozenset({
     "switching_latent_transformer",
     "switching_latent_balanced_readout",
+    "switching_latent_balanced_readout_no_switch_kl",
+    "switching_latent_balanced_readout_5d_only",
+    "switching_latent_balanced_readout_5_10_20",
+    "switching_latent_learnable_persistence",
     "switching_latent_balanced_transition",
     "switching_latent_dynamic_slope",
     "switching_latent_memory",
@@ -79,8 +87,8 @@ D_SERIES_VARIANTS = frozenset({
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
-            "HeteroMixHop A/B/C/S0/S0D/S1/S1C/S2F/D0/D0B/D0D/D0C/D1A/D1A2/D1 "
-            "and retained F/F2/G/H/I/J/K/L ablations"
+            "HeteroMixHop A/B/C/S0/S0D/S1/S1C/S2F/D0/D0B/D0B-5dOnlyObjective/D0E/D0D/D0C/D1A/D1A2/D1 "
+            "plus D0B-NoSwitchKL, D0B-MidLongGroupedObjective and retained F/F2/G/H/I/J/K/L ablations"
         )
     )
     parser.add_argument("--epochs", type=int, default=NUM_EPOCHS)
@@ -94,17 +102,27 @@ def parse_args():
         type=Path,
         default=Path("checkpoints"),
         help=(
-            "Directory for best checkpoints of D0/D0B/D0D/D0C/D1A/D1A2/D1 "
-            "(default: ./checkpoints). Other variants are not saved."
+            "Directory for best checkpoints of D0/D0B/D0B-5dOnlyObjective/D0E/D0D/D0C/D1A/D1A2/D1 "
+            "and D0B-NoSwitchKL/D0B-MidLongGroupedObjective (default: ./checkpoints). Other variants are not saved."
         ),
     )
     parser.add_argument(
         "--variants",
         help=(
             "Comma-separated display or internal names; defaults to "
-            "A/B/C/S0/S0D/S1/S1C/S2F/D0/D0B/D0D/D0C/D1A/D1A2/D1/F/F2/G/H/I/J/K/L"
+            "A/B/C/S0/S0D/S1/S1C/S2F/D0/D0B/D0B-NoSwitchKL/D0B-5dOnlyObjective/D0B-MidLongGroupedObjective/D0E/D0D/D0C/D1A/D1A2/D1/F/F2/G/H/I/J/K/L"
         ),
     )
+    parser.add_argument('--d0b-checkpoint', type=Path,
+                        default=Path('checkpoints/switching_latent_balanced_readout_best.pt'),
+                        help='Post-training D0B reference only; never used to initialize the new variant')
+    parser.add_argument('--d0e-report-dir', type=Path, default=Path('experiments/d0e'))
+    parser.add_argument('--five-day-report-dir', type=Path, default=Path('experiments/d0b_5d_only'))
+    parser.add_argument('--five-day-checkpoint', type=Path,
+                        default=Path('checkpoints/switching_latent_balanced_readout_5d_only_best.pt'),
+                        help='Existing 5d-only reference for grouped checkpoint comparison; never retrained')
+    parser.add_argument('--grouped-report-dir', type=Path, default=Path('experiments/d0b_grouped'))
+    parser.add_argument('--no-switch-report-dir', type=Path, default=Path('experiments/d0b_no_switch_kl'))
     return parser.parse_args()
 
 
@@ -1284,6 +1302,14 @@ def _switching_latent_diagnostics(model, loaders, device):
             else ("D1A" if latent_memory else ("D0B" if balanced else "D0"))
         )))
     )
+    if getattr(model, 'variant', None) == 'switching_latent_balanced_readout_5d_only':
+        label = 'D0B-5dOnly'
+    elif getattr(model, 'variant', None) == 'switching_latent_balanced_readout_5_10_20':
+        label = 'D0B grouped'
+    elif getattr(model, 'variant', None) == 'switching_latent_balanced_readout_no_switch_kl':
+        label = 'D0B-NoSwitchKL'
+    elif branch.regime_filter.learnable_sticky_alpha:
+        label = 'D0E'
     rpe_label = f"{label} LongMemory" if latent_memory else label
     filtering = branch.regime_filter
     memory = branch.long_memory
@@ -2123,9 +2149,21 @@ def _switching_latent_diagnostics(model, loaders, device):
     model.train()
     model.zero_grad(set_to_none=True)
     prediction = model(x_batch)
-    return_loss = _prediction_loss(prediction, y_batch, make_loss())
+    if model.variant == 'switching_latent_balanced_readout_5d_only':
+        from cmgm.training.train import _prediction_loss as training_prediction_loss
+        return_loss = training_prediction_loss(model, prediction, y_batch, make_loss())
+        print(f"  [{label} legacy gradient probe] scaled_prediction_loss=4x raw_L5; "
+              "unscaled eval-mode horizon gradients are saved in the objective comparison REPORT")
+    elif model.variant == 'switching_latent_balanced_readout_5_10_20':
+        from cmgm.training.train import _prediction_loss as training_prediction_loss
+        return_loss = training_prediction_loss(model, prediction, y_batch, make_loss())
+        print(f"  [{label} legacy gradient probe] scaled_prediction_loss=4/3*(L5+L10+L20); "
+              "raw single-horizon gradients are saved in the grouped REPORT")
+    else:
+        return_loss = _prediction_loss(prediction, y_batch, make_loss())
     switch_raw = filtering._last_switch_loss
-    weighted_switch = branch.switch_loss()
+    from cmgm.training.train import _effective_switch_loss
+    weighted_switch = _effective_switch_loss(model, branch)
     total_loss = return_loss + weighted_switch
     gradient_groups = {
         "Market Encoder": list(branch.market_encoder.parameters()),
@@ -2265,7 +2303,10 @@ def _switching_latent_diagnostics(model, loaders, device):
         )
     print(f"  [{label} loss] L_return={return_loss.item():.6e}")
     print(f"  [{label} loss] L_switch_raw={switch_raw.item():.6e}")
-    print(f"  [{label} loss] beta={filtering.current_beta:.6e}")
+    if getattr(model, 'disable_switch_kl', False):
+        print(f"  [{label} loss] beta_effective=0 reference_schedule_beta={filtering.current_beta:.6e}")
+    else:
+        print(f"  [{label} loss] beta={filtering.current_beta:.6e}")
     print(f"  [{label} loss] weighted_switch={weighted_switch.item():.6e}")
     print(f"  [{label} loss] total={total_loss.item():.6e}")
     print(
@@ -3321,6 +3362,10 @@ def print_diagnostics(model, variant, loaders, device):
     elif variant in (
         "switching_latent_transformer",
         "switching_latent_balanced_readout",
+        "switching_latent_balanced_readout_no_switch_kl",
+        "switching_latent_balanced_readout_5d_only",
+        "switching_latent_balanced_readout_5_10_20",
+        "switching_latent_learnable_persistence",
         "switching_latent_balanced_transition",
         "switching_latent_dynamic_slope",
         "switching_latent_memory",
@@ -3577,6 +3622,18 @@ def _balanced_transition_input_diagnostic(model, batch, stage):
 
 
 def run_variant(name, variant, args, device, data):
+    if variant == 'switching_latent_balanced_readout_no_switch_kl':
+        from cmgm.scripts.d0b_no_switch_kl_diagnostics import run_no_switch_kl
+        return run_no_switch_kl(args, device, data)
+    if variant == 'switching_latent_balanced_readout_5_10_20':
+        from cmgm.scripts.d0b_grouped_diagnostics import run_grouped
+        return run_grouped(args, device, data)
+    if variant == 'switching_latent_balanced_readout_5d_only':
+        from cmgm.scripts.d0b_5d_only_diagnostics import run_five_day_only
+        return run_five_day_only(args, device, data)
+    if variant == 'switching_latent_learnable_persistence':
+        from cmgm.scripts.d0e_diagnostics import run_d0e
+        return run_d0e(args, device, data)
     set_seed(args.seed)
     n_stock = data["market_indices"]["stock"][1] - data["market_indices"]["stock"][0]
     n_bond = data["market_indices"]["bond"][1] - data["market_indices"]["bond"][0]

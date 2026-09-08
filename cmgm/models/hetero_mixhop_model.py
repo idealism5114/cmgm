@@ -708,6 +708,10 @@ class HeteroMixHopCMGM(nn.Module):
             "switching_filter_rpe",
             "switching_latent_transformer",
             "switching_latent_balanced_readout",
+            "switching_latent_balanced_readout_no_switch_kl",
+            "switching_latent_balanced_readout_5_10_20",
+            "switching_latent_balanced_readout_5d_only",
+            "switching_latent_learnable_persistence",
             "switching_latent_balanced_transition",
             "switching_latent_dynamic_slope",
             "switching_latent_memory",
@@ -724,6 +728,9 @@ class HeteroMixHopCMGM(nn.Module):
         self.n_stock = n_stock
         self.n_bond = n_bond
         self.variant = variant
+        # Loss configuration only; never consulted by model forward.
+        if variant == "switching_latent_balanced_readout_no_switch_kl":
+            self.disable_switch_kl = True
         self.feat_dim = feat_dim
         self.attn_heads = attn_heads
         self.attn_dropout = attn_dropout
@@ -765,6 +772,10 @@ class HeteroMixHopCMGM(nn.Module):
                                                "switching_filter_rpe",
                                                "switching_latent_transformer",
                                                "switching_latent_balanced_readout",
+                                               "switching_latent_balanced_readout_no_switch_kl",
+                                               "switching_latent_balanced_readout_5_10_20",
+                                               "switching_latent_balanced_readout_5d_only",
+                                               "switching_latent_learnable_persistence",
                                                "switching_latent_balanced_transition",
                                                "switching_latent_dynamic_slope",
                                                "switching_latent_memory",
@@ -794,6 +805,10 @@ class HeteroMixHopCMGM(nn.Module):
                                            "switching_filter_rpe",
                                            "switching_latent_transformer",
                                            "switching_latent_balanced_readout",
+                                           "switching_latent_balanced_readout_no_switch_kl",
+                                           "switching_latent_balanced_readout_5_10_20",
+                                           "switching_latent_balanced_readout_5d_only",
+                                           "switching_latent_learnable_persistence",
                                            "switching_latent_balanced_transition",
                                            "switching_latent_dynamic_slope",
                                            "switching_latent_memory",
@@ -1035,6 +1050,10 @@ class HeteroMixHopCMGM(nn.Module):
                              "switching_null_control", "switching_filter_rpe",
                              "switching_latent_transformer",
                              "switching_latent_balanced_readout",
+                             "switching_latent_balanced_readout_no_switch_kl",
+                             "switching_latent_balanced_readout_5_10_20",
+                             "switching_latent_balanced_readout_5d_only",
+                             "switching_latent_learnable_persistence",
                              "switching_latent_balanced_transition",
                              "switching_latent_dynamic_slope",
                              "switching_latent_memory",
@@ -1213,6 +1232,10 @@ class HeteroMixHopCMGM(nn.Module):
         if variant in (
             "switching_latent_transformer",
             "switching_latent_balanced_readout",
+            "switching_latent_balanced_readout_no_switch_kl",
+            "switching_latent_balanced_readout_5_10_20",
+            "switching_latent_balanced_readout_5d_only",
+            "switching_latent_learnable_persistence",
             "switching_latent_balanced_transition",
             "switching_latent_dynamic_slope",
             "switching_latent_memory",
@@ -1240,6 +1263,7 @@ class HeteroMixHopCMGM(nn.Module):
                 warmup_epochs=20,
                 output_dim=LSTM_HIDDEN_DIM,
                 balanced_readout=(variant != "switching_latent_transformer"),
+                learnable_sticky_alpha=(variant == "switching_latent_learnable_persistence"),
                 use_latent_memory=(variant in (
                     "switching_latent_memory",
                     "switching_active_latent_memory",
@@ -2587,6 +2611,10 @@ class HeteroMixHopCMGM(nn.Module):
         if self.variant in (
             "switching_latent_transformer",
             "switching_latent_balanced_readout",
+            "switching_latent_balanced_readout_no_switch_kl",
+            "switching_latent_balanced_readout_5_10_20",
+            "switching_latent_balanced_readout_5d_only",
+            "switching_latent_learnable_persistence",
             "switching_latent_balanced_transition",
             "switching_latent_dynamic_slope",
             "switching_latent_memory",
@@ -2712,6 +2740,10 @@ class HeteroMixHopCMGM(nn.Module):
             "switching_filter_rpe",
             "switching_latent_transformer",
             "switching_latent_balanced_readout",
+            "switching_latent_balanced_readout_no_switch_kl",
+            "switching_latent_balanced_readout_5_10_20",
+            "switching_latent_balanced_readout_5d_only",
+            "switching_latent_learnable_persistence",
             "switching_latent_balanced_transition",
             "switching_latent_dynamic_slope",
             "switching_latent_memory",
@@ -2726,6 +2758,10 @@ class HeteroMixHopCMGM(nn.Module):
                     if self.variant in (
                         "switching_latent_transformer",
                         "switching_latent_balanced_readout",
+                        "switching_latent_balanced_readout_no_switch_kl",
+                        "switching_latent_balanced_readout_5_10_20",
+                        "switching_latent_balanced_readout_5d_only",
+                        "switching_latent_learnable_persistence",
                         "switching_latent_balanced_transition",
                         "switching_latent_dynamic_slope",
                         "switching_latent_memory",
