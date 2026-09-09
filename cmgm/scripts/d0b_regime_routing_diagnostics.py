@@ -123,6 +123,12 @@ def latent_forward_with_routing_intervention(
 
 def complete_readout(model, spatial, trace, zero_component=None):
     branch = model.switching_latent_transformer
+    if getattr(branch, "horizon_specific_state_readout", False):
+        temporal = branch.readout_by_horizon(trace["H"][:, -1], trace["Z"][:, -1], zero_component=zero_component)
+        return dict(trace, h_long=branch.last_h_long.clone(), h_micro=branch.last_h_micro.clone(),
+                    h_long_effective=branch.last_h_long_effective.clone(),
+                    h_micro_effective=branch.last_h_micro_effective.clone(),
+                    h_temporal=temporal, prediction=model._market_token_predict_by_horizon(spatial, temporal))
     temporal = branch.readout(trace["H"][:, -1], trace["Z"][:, -1], zero_component=zero_component)
     return dict(trace, h_long=branch.last_h_long.clone(), h_micro=branch.last_h_micro.clone(),
                 h_long_effective=branch.last_h_long_effective.clone(),

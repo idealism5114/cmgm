@@ -37,6 +37,8 @@ GROUPED_VARIANT = 'switching_latent_balanced_readout_5_10_20'
 GROUPED_HORIZONS = (5, 10, 20)
 GROUPED_MULTIPLIER = 4.0 / 3.0
 GROUPED_OBJECTIVE = '4/3*(5d+10d+20d)'
+COMMODITY_RESIDUAL_VARIANT = 'switching_latent_balanced_commodity_residual'
+HORIZON_READOUT_VARIANT = 'switching_latent_balanced_horizon_readout'
 NO_SWITCH_KL_VARIANT = 'switching_latent_balanced_readout_no_switch_kl'
 
 
@@ -163,10 +165,18 @@ def train_epoch(
     objective_sums = dict(raw_L5=0., scaled_prediction_loss=0., switch_loss=0., total_loss=0.)
     grouped = getattr(model, 'variant', None) == GROUPED_VARIANT
     no_switch = getattr(model, 'variant', None) == NO_SWITCH_KL_VARIANT
+    commodity_residual = getattr(model, 'variant', None) == COMMODITY_RESIDUAL_VARIANT
+    horizon_readout = getattr(model, 'variant', None) == HORIZON_READOUT_VARIANT
     target_scale = getattr(model, 'variant', None) == TARGET_SCALE_VARIANT
     if target_scale:
         objective_sums = {f'{kind}_huber_{h}': 0. for kind in ('raw','weighted') for h in MULTI_HORIZONS}
         objective_sums.update(prediction_loss=0., switch_loss=0., total_loss=0.)
+    if horizon_readout or commodity_residual:
+        objective_sums = {f'raw_L{h}': 0. for h in MULTI_HORIZONS}
+        objective_sums.update(prediction_loss=0., switch_loss=0., total_loss=0.)
+    if commodity_residual:
+        objective_sums.update(raw_residual_mean_abs=0., effective_residual_mean_abs=0.,
+                              base_prediction_mean_abs=0.)
     if no_switch:
         objective_sums = dict(prediction_loss=0., raw_KL=0., posterior_entropy=0.,
                               prior_entropy=0., posterior_prior_L1=0., weighted_switch_loss=0.,
@@ -219,6 +229,9 @@ def train_epoch(
         if target_scale:
             target_scale_values = _target_scale_detached_terms(pred, y_batch, model.target_scale_huber, MULTI_HORIZONS)
             target_scale_values['prediction_loss'] = loss.detach().item()
+        if horizon_readout or commodity_residual:
+            prediction_value = loss.detach().item()
+            raw_horizon_values = _horizon_loss_values(pred, y_batch, criterion)
         if no_switch:
             prediction_value = loss.detach().item()
         if five_only:
@@ -280,6 +293,18 @@ def train_epoch(
             for key,value in target_scale_values.items():
                 objective_sums[key] += value
 
+        if horizon_readout or commodity_residual:
+            for h, value in raw_horizon_values.items():
+                objective_sums[f'raw_L{h}'] += value
+            objective_sums['prediction_loss'] += prediction_value
+            objective_sums['switch_loss'] += switch_loss.detach().item()
+            objective_sums['total_loss'] += loss.detach().item()
+
+        if commodity_residual:
+            objective_sums['raw_residual_mean_abs'] += model.last_commodity_residual_raw.abs().mean().item()
+            objective_sums['effective_residual_mean_abs'] += model.last_commodity_residual_effective.abs().mean().item()
+            objective_sums['base_prediction_mean_abs'] += model.last_base_pred.abs().mean().item()
+
         # Backward pass
         loss.backward()
         optimizer.step()
@@ -287,8 +312,11 @@ def train_epoch(
         total_loss += loss.item()
         num_batches += 1
 
-    if five_only or grouped or no_switch or target_scale:
+    if five_only or grouped or no_switch or target_scale or horizon_readout or commodity_residual:
         model._last_train_objective = {k: v / max(num_batches, 1) for k, v in objective_sums.items()}
+    if commodity_residual:
+        row = model._last_train_objective
+        row['effective_residual_base_ratio'] = row['effective_residual_mean_abs'] / (row['base_prediction_mean_abs'] + 1e-8)
     return total_loss / max(num_batches, 1)
 
 
@@ -321,9 +349,13 @@ def validate_epoch(
     five_only = _is_five_day_only(model)
     horizon_sums = {str(h): 0. for h in MULTI_HORIZONS}
     grouped = getattr(model, 'variant', None) == GROUPED_VARIANT
+    commodity_residual = getattr(model, 'variant', None) == COMMODITY_RESIDUAL_VARIANT
+    horizon_readout = getattr(model, 'variant', None) == HORIZON_READOUT_VARIANT
     target_scale = getattr(model, 'variant', None) == TARGET_SCALE_VARIANT
     target_sums = {f'{kind}_huber_{h}': 0. for kind in ('raw','weighted') for h in MULTI_HORIZONS}
+    val_switch_sum = 0.
     primary_abs, primary_squared, primary_count = 0., 0., 0
+    hybrid_graph_prior = getattr(model, 'variant', None) == 'switching_latent_balanced_hybrid_graph_prior'
 
     for batch in loader:
         market_descriptor = None
@@ -354,6 +386,12 @@ def validate_epoch(
         else:
             pred = model(X_batch, cur_ei, cur_ew, debug=False)
         loss = _prediction_loss(model, pred, y_batch, criterion)
+        if hybrid_graph_prior:
+            idx5 = MULTI_HORIZONS.index(5)
+            residual5 = pred[:, idx5].double() - y_batch[:, idx5].double()
+            primary_abs += residual5.abs().sum().item()
+            primary_squared += residual5.square().sum().item()
+            primary_count += residual5.numel()
         if target_scale:
             values = _target_scale_detached_terms(pred, y_batch, model.target_scale_huber, MULTI_HORIZONS)
             for key,value in values.items():
@@ -363,7 +401,9 @@ def validate_epoch(
             primary_abs += residual.abs().sum().item()
             primary_squared += residual.square().sum().item()
             primary_count += residual.numel()
-        if five_only or grouped:
+        if horizon_readout or commodity_residual:
+            val_switch_sum += _switching_branch(model).switch_loss().item()
+        if five_only or grouped or horizon_readout or commodity_residual:
             for h, value in _horizon_loss_values(pred, y_batch, criterion).items():
                 horizon_sums[h] += value
         # Auxiliary loss: factor_res — supervise the market-mean branch
@@ -379,6 +419,11 @@ def validate_epoch(
         total_loss += loss.item()
         num_batches += 1
 
+    if horizon_readout or commodity_residual:
+        count = max(num_batches, 1)
+        model._last_val_objective = {f'raw_L{h}': v/count for h,v in horizon_sums.items()}
+        model._last_val_objective.update(prediction_loss=total_loss/count,
+            switch_loss=val_switch_sum/count, total_loss=(total_loss+val_switch_sum)/count)
     if five_only:
         horizon_means = {h: value / max(num_batches, 1) for h, value in horizon_sums.items()}
         model._last_val_objective = {
@@ -400,6 +445,9 @@ def validate_epoch(
         model._last_val_objective = {k:v/max(num_batches,1) for k,v in target_sums.items()}
         model._last_val_objective.update(prediction_loss=total_loss/max(num_batches,1),
                                          MAE_5d=primary_abs/primary_count, MSE_5d=primary_squared/primary_count)
+    if hybrid_graph_prior:
+        model._last_val5_diagnostic = dict(MAE=primary_abs/primary_count,
+            MSE=primary_squared/primary_count, count=primary_count)
     return total_loss / max(num_batches, 1)
 
 
@@ -452,6 +500,8 @@ def train(
     print(f"Learning rate: {lr}, Weight decay: {weight_decay}")
     print(f"{'=' * 60}")
 
+    commodity_residual = getattr(model, 'variant', None) == COMMODITY_RESIDUAL_VARIANT
+    horizon_readout = getattr(model, 'variant', None) == HORIZON_READOUT_VARIANT
     target_scale = getattr(model, 'variant', None) == TARGET_SCALE_VARIANT
     if target_scale:
         if not isinstance(getattr(model, 'target_scale_huber', None), TargetScaleHuber):
@@ -463,6 +513,9 @@ def train(
 
     # Move model to device
     model = model.to(device)
+
+    if commodity_residual:
+        initial_residual_weight = model.commodity_residual_head.weight.detach().clone()
 
     # Section 3.4: Adam optimizer
     optimizer = optim.Adam(
@@ -491,6 +544,9 @@ def train(
     five_only = _is_five_day_only(model)
     grouped = getattr(model, 'variant', None) == GROUPED_VARIANT
     no_switch = getattr(model, 'variant', None) == NO_SWITCH_KL_VARIANT
+    if horizon_readout or commodity_residual:
+        history['objective'] = 'sum_1d_5d_10d_20d'
+        history['objective_history'] = []
     if no_switch:
         if not getattr(model, 'disable_switch_kl', False):
             raise ValueError('NoSwitchKL requires disable_switch_kl=True')
@@ -520,6 +576,11 @@ def train(
         history['sticky_logit_history'] = []
 
     best_val_loss = float('inf')
+    hybrid_graph_prior = getattr(model, 'variant', None) == 'switching_latent_balanced_hybrid_graph_prior'
+    if hybrid_graph_prior:
+        history['val5_diagnostic'] = []
+        history['best_val5_mae'] = float('inf')
+        history['best_val5_epoch'] = None
     best_model_state = None
     epochs_no_improve = 0
 
@@ -552,6 +613,13 @@ def train(
         history['val_loss'].append(val_loss)
         history['lr_history'].append(current_lr)
         history['switch_beta'].append(current_switch_beta)
+        if hybrid_graph_prior:
+            row = dict(epoch=epoch, **model._last_val5_diagnostic)
+            history['val5_diagnostic'].append(row)
+            if row['MAE'] < history['best_val5_mae']:
+                history['best_val5_mae'] = row['MAE']
+                history['best_val5_epoch'] = epoch
+            print(f"[D0B-HybridGraphPriorHeads secondary VAL5] {row}; formal selection remains multi-horizon validation loss")
         if five_only:
             row = {'epoch': epoch, 'train': dict(model._last_train_objective),
                    'val': dict(model._last_val_objective), 'lr': current_lr,
@@ -592,7 +660,19 @@ def train(
                    'lr':current_lr, 'switch_beta':current_switch_beta}
             history['objective_history'].append(row)
             print('[D0B-TargetScaleHuber epoch] ' + json.dumps(row), flush=True)
-        diagnostic_epochs = (1, 5, 10, 20) if no_switch else (1, 5, 10)
+        if horizon_readout or commodity_residual:
+            row = {'epoch': epoch, 'train': dict(model._last_train_objective),
+                   'val': dict(model._last_val_objective), 'lr': current_lr,
+                   'switch_beta': current_switch_beta}
+            history['objective_history'].append(row)
+            if commodity_residual:
+                row.update(alpha=model.commodity_residual_alpha.detach().item(),
+                           residual_head_weight_norm=model.commodity_residual_head.weight.detach().norm().item(),
+                           residual_head_distance_from_init=(model.commodity_residual_head.weight.detach()-initial_residual_weight).norm().item())
+                print('[D0B-CommodityResidualAdapter epoch] ' + json.dumps(row), flush=True)
+            else:
+                print('[D0B-HorizonSpecificStateReadout epoch] ' + json.dumps(row), flush=True)
+        diagnostic_epochs = (1, 5, 10, 20) if no_switch or commodity_residual else (1, 5, 10)
         if epoch_diagnostic is not None and epoch in diagnostic_epochs:
             history['epoch_diagnostics'][f'epoch{epoch}'] = (
                 epoch_diagnostic(model, f'epoch{epoch}')
@@ -638,11 +718,11 @@ def train(
                       f"at epoch {history['best_epoch']}")
                 break
 
-    if five_only or grouped or no_switch or target_scale:
+    if five_only or grouped or no_switch or target_scale or horizon_readout or commodity_residual:
         history['final_epoch'] = len(history['objective_history'])
-    if no_switch and epoch_diagnostic is not None:
+    if (no_switch or commodity_residual) and epoch_diagnostic is not None:
         history['epoch_diagnostics']['final'] = epoch_diagnostic(model, f"final(epoch {history['final_epoch']})")
-    if grouped or target_scale:
+    if grouped or target_scale or horizon_readout or commodity_residual:
         # Persist the elapsed training-loop time before checkpoint diagnostics.
         history['training_elapsed_seconds'] = time.time() - t0
     if learnable_persistence and history['alpha_history']:
@@ -738,6 +818,30 @@ def train(
                 'objective': 'sum_1d_5d_10d_20d',
                 'reference_beta_max': persistence_filter.beta_max,
                 'reference_warmup_epochs': persistence_filter.warmup_epochs,
+            })
+        if horizon_readout:
+            checkpoint.setdefault('metadata', {}).update({
+                'variant': model.variant, 'best_epoch': history['best_epoch'],
+                'best_val_loss': best_val_loss,
+                'parameter_count': sum(p.numel() for p in model.parameters()),
+                'training_elapsed_seconds': history['training_elapsed_seconds'],
+                'horizon_specific_state_readout': True, 'forecast_horizons': list(MULTI_HORIZONS),
+                '5d_uses_original_state_readout': True, 'extra_readout_parameter_count': 24768,
+                'loss_type': LOSS_TYPE, 'delta': HUBER_DELTA, 'switch_beta_max': 5e-4,
+            })
+        if commodity_residual:
+            checkpoint.setdefault('metadata', {}).update({
+                'variant': model.variant, 'seed': (checkpoint_metadata or {}).get('seed', 42),
+                'best_epoch': history['best_epoch'], 'best_val_loss': best_val_loss,
+                'parameter_count': sum(p.numel() for p in model.parameters()),
+                'training_elapsed_seconds': history['training_elapsed_seconds'],
+                'commodity_residual': True,
+                'commodity_residual_head': 'Linear(64,4,bias=False)',
+                'commodity_residual_shared_across_commodities': True,
+                'commodity_residual_alpha_init': 0.,
+                'commodity_residual_alpha_best': model.commodity_residual_alpha.detach().item(),
+                'commodity_residual_alpha_final_epoch': history['objective_history'][-1]['alpha'],
+                'loss': 'sum four-horizon Huber delta=.02', 'switch_beta_max': 5e-4,
             })
         torch.save(checkpoint, checkpoint_path)
         print(f"[Checkpoint] Saved to {checkpoint_path}")

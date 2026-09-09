@@ -11,6 +11,7 @@ D0 intentionally does not implement a backward network, future-target
 inference, Gaussian sampling/KL, or state-specific prediction emissions.
 """
 
+import copy
 import math
 
 import torch
@@ -321,11 +322,22 @@ class SwitchingLatentTransformerBranch(nn.Module):
                  use_regime_relative_memory: bool = False,
                  use_dynamic_slope: bool = False,
                  use_balanced_transition_input: bool = False,
-                 learnable_sticky_alpha: bool = False):
+                 learnable_sticky_alpha: bool = False,
+                 horizon_specific_state_readout: bool = False,
+                 forecast_horizons=None):
         super().__init__()
         self.K = int(K)
         self.z_dim = int(z_dim)
         self.balanced_readout = bool(balanced_readout)
+        self.horizon_specific_state_readout = bool(horizon_specific_state_readout)
+        self.forecast_horizons = tuple(forecast_horizons or (1, 5, 10, 20))
+        if self.horizon_specific_state_readout:
+            if self.forecast_horizons != (1, 5, 10, 20):
+                raise ValueError("Horizon state readout requires horizons (1, 5, 10, 20)")
+            if not balanced_readout or any((use_latent_memory, use_dynamic_slope,
+                    use_balanced_transition_input, learnable_sticky_alpha,
+                    use_regime_relative_memory)):
+                raise ValueError("Horizon state readout requires unchanged D0B dynamics")
         self.use_latent_memory = bool(use_latent_memory)
         self.zero_init_memory_projection = bool(
             zero_init_memory_projection
@@ -432,6 +444,14 @@ class SwitchingLatentTransformerBranch(nn.Module):
                 nn.Linear(d_model, 128, bias=False)
                 for _ in range(self.K)
             ])
+
+        if self.horizon_specific_state_readout:
+            # Deep copies consume no RNG, including for shared full-model
+            # modules constructed AFTER this branch. 5d keeps its original key.
+            self.horizon_state_readouts = nn.ModuleDict({
+                str(h): copy.deepcopy(self.state_readout)
+                for h in self.forecast_horizons if h != 5
+            })
 
     def centered_regime_relative_lag_bias(self) -> torch.Tensor:
         if not self.use_regime_relative_memory:
@@ -810,6 +830,31 @@ class SwitchingLatentTransformerBranch(nn.Module):
         self.last_h_temporal = output.detach()
         return output
 
+    def readout_by_horizon(self, h_last: torch.Tensor, z_last: torch.Tensor,
+                           zero_component: str = None,
+                           shared_readout: bool = False) -> torch.Tensor:
+        """Decode one shared state; shared_readout is a transient null control."""
+        if not self.horizon_specific_state_readout:
+            raise RuntimeError("Horizon-specific state readout is disabled")
+        if zero_component not in (None, "H", "Z"):
+            raise ValueError("zero_component must be None, 'H', or 'Z'")
+        h_long = self.long_memory_norm(self.long_memory_readout(h_last))
+        h_micro = self.micro_state_norm(self.micro_state_readout(z_last))
+        h = torch.zeros_like(h_long) if zero_component == "H" else h_long
+        z = torch.zeros_like(h_micro) if zero_component == "Z" else h_micro
+        u = torch.cat([h, z], dim=-1)
+        outputs = [
+            (self.state_readout if horizon == 5 or shared_readout else
+             self.horizon_state_readouts[str(horizon)])(u)
+            for horizon in self.forecast_horizons
+        ]
+        output = torch.stack(outputs, dim=1)
+        self.last_h_long, self.last_h_micro = h_long.detach(), h_micro.detach()
+        self.last_h_long_effective, self.last_h_micro_effective = h.detach(), z.detach()
+        self.last_balanced_concat = self.last_readout_input = u.detach()
+        self.last_h_temporal = output.detach()
+        return output
+
     def temporal_forward(self, tokens: torch.Tensor,
                          forced_probabilities: torch.Tensor = None,
                          zero_readout_component: str = None,
@@ -828,9 +873,14 @@ class SwitchingLatentTransformerBranch(nn.Module):
         )
         h_last = long_memory[:, -1]
         z_last = latent_states[:, -1]
-        output = self.readout(
-            h_last, z_last, zero_component=zero_readout_component
-        )
+        if self.horizon_specific_state_readout:
+            output = self.readout_by_horizon(
+                h_last, z_last, zero_component=zero_readout_component
+            )
+        else:
+            output = self.readout(
+                h_last, z_last, zero_component=zero_readout_component
+            )
         self.last_market_tokens = tokens.detach()
         self.last_long_memory = long_memory.detach()
         self.last_h_last = h_last.detach()

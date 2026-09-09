@@ -206,11 +206,16 @@ def fixed_sanity(model, x, label="D0E", raise_on_failure=True):
                  "p": branch.last_regime_probabilities.clone(), "Z": branch.last_latent_states.clone()}
         readouts = {key: [] for key in ("h_long", "h_micro", "h_temporal")}
         for t in range(values.shape[1]):
-            h = branch.readout(trace["H"][:, t], trace["Z"][:, t])
+            readout = (branch.readout_by_horizon if getattr(branch, "horizon_specific_state_readout", False)
+                       else branch.readout)
+            h = readout(trace["H"][:, t], trace["Z"][:, t])
             readouts["h_long"].append(branch.last_h_long.clone())
             readouts["h_micro"].append(branch.last_h_micro.clone())
             readouts["h_temporal"].append(h)
         trace.update({key: torch.stack(v, 1) for key, v in readouts.items()})
+        if getattr(branch, "horizon_specific_state_readout", False):
+            trace.update({f"h_temporal_{h}": trace["h_temporal"][:, :, i]
+                          for i, h in enumerate(branch.forecast_horizons)})
         return trace
 
     with diagnostic_context(model), torch.no_grad():

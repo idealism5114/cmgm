@@ -46,7 +46,7 @@ TRACE_KEYS = ('E', 'H', 'prior', 'p', 'candidates', 'Z', 'h_long', 'h_micro',
 
 def assert_backbone(model):
     b = model.switching_latent_transformer
-    assert model.variant in (BASE_VARIANT, VARIANT, GROUPED_VARIANT, NO_SWITCH_KL_VARIANT, TARGET_SCALE_VARIANT)
+    assert model.variant in (BASE_VARIANT, VARIANT, GROUPED_VARIANT, NO_SWITCH_KL_VARIANT, TARGET_SCALE_VARIANT, "switching_latent_balanced_horizon_readout")
     assert b.balanced_readout and b.K == 3
     assert not any((b.use_dynamic_slope, b.use_balanced_transition_input,
                     b.use_latent_memory, b.use_regime_relative_memory,
@@ -66,6 +66,8 @@ def full_reference(model, x):
         native, _ = normal_reference(model, x)
     finally:
         handle.remove()
+    if captured["h_spatial"].dim() == 3:
+        captured["h_spatial"] = captured["h_spatial"][:, 0]
     native.update(captured, E=model.switching_latent_transformer.last_market_tokens.clone())
     return native
 
