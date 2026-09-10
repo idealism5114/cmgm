@@ -1,0 +1,8 @@
+--- upstream/net.py
++++ local/net.py
+@@ -1,4 +1,4 @@
+-from layer import *
++from .layer import *
+ 
+ 
+ class gtnet(nn.Module):

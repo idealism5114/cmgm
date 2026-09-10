@@ -1,0 +1,44 @@
+{
+  "graphwavenet": {
+    "repository": "https://github.com/nnzhan/Graph-WaveNet",
+    "commit": "6b162e80c59a1d494809252eca055cff93dc66b1",
+    "license": "MIT",
+    "files": {
+      "model.py": {
+        "upstream_sha256": "f357319260657716c18916d691d31179e2380dcb882b9c41556c9a55912f1059",
+        "local_sha256": "f4a1692171791746cf103f29e63c74d637b49945f4a4cf082b037d7e42550f86"
+      },
+      "LICENSE": {
+        "upstream_sha256": "4ca2e57e06fec8b21ea58f1e19f6805052867be62de900ee9b12580bf1a033d8",
+        "local_sha256": "4ca2e57e06fec8b21ea58f1e19f6805052867be62de900ee9b12580bf1a033d8"
+      },
+      "README.md": {
+        "upstream_sha256": "2a8a15d0667c9d59b1fe98a9257cda4378b65dba3690df7f777936515f56eac9",
+        "local_sha256": "2a8a15d0667c9d59b1fe98a9257cda4378b65dba3690df7f777936515f56eac9"
+      }
+    }
+  },
+  "mtgnn": {
+    "repository": "https://github.com/nnzhan/MTGNN",
+    "commit": "f811746fa7022ebf336f9ecd2434af5f365ecbf6",
+    "license": "MIT",
+    "files": {
+      "net.py": {
+        "upstream_sha256": "b13f7d2544db5da1681f12073cde0942ea08dcddeef689fa8ec4c0d4473b3422",
+        "local_sha256": "f1e41ddaa289338efbe95b0c4b4ca1a23871a34a82c3e5ac1be7a43e599f2baf"
+      },
+      "layer.py": {
+        "upstream_sha256": "560058365e678654435b4141bb30775607c54a25e51c3f682bd5b9d181be71ef",
+        "local_sha256": "560058365e678654435b4141bb30775607c54a25e51c3f682bd5b9d181be71ef"
+      },
+      "LICENSE": {
+        "upstream_sha256": "7d6e241d8ec968616ec8ef1bb2cebdc9b741c34fac55419b3b3fe4c00d7fe676",
+        "local_sha256": "7d6e241d8ec968616ec8ef1bb2cebdc9b741c34fac55419b3b3fe4c00d7fe676"
+      },
+      "README.md": {
+        "upstream_sha256": "07fececda87446b4e68c00da871961cf287e19b9a4ed4fec18e54a8bb7909c6b",
+        "local_sha256": "07fececda87446b4e68c00da871961cf287e19b9a4ed4fec18e54a8bb7909c6b"
+      }
+    }
+  }
+}

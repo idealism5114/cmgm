@@ -114,7 +114,7 @@ class EdgeAttnMixHop(nn.Module):
                  dropout: float = 0.1, hard_mask: bool = False,
                  prior_scale: float = 1.0, self_heads: int = 4,
                  cross_mask: torch.Tensor = None,
-                 graph_prior_heads: int = None):
+                 graph_prior_heads: int = None, qk_norm: bool = False):
         super().__init__()
         self.K = K
         self.beta = beta
@@ -135,6 +135,8 @@ class EdgeAttnMixHop(nn.Module):
         if graph_prior_heads is not None and not hard_mask and cross_mask is not None:
             raise ValueError('Graph-prior partition must not combine with a cross-market mask')
         self.graph_prior_heads = graph_prior_heads
+        self.qk_norm = bool(qk_norm)
+        self.qk_norm_eps = 1e-6
         # Read-only, opt-in diagnostic capture. No parameter/buffer or RNG draw.
         self.capture_attention = False
         self.last_attention_diagnostics = []
@@ -183,6 +185,11 @@ class EdgeAttnMixHop(nn.Module):
                 Q = self.q(H).view(B, N, self.n_heads, self.head_dim)   # (B, N, h, d)
                 Kt = self.k(H).view(B, N, self.n_heads, self.head_dim)
                 V  = self.v(H).view(B, N, self.n_heads, self.head_dim)
+                if self.capture_attention:
+                    raw_Q, raw_K = Q, Kt
+                if self.qk_norm:
+                    Q = F.normalize(Q, p=2, dim=-1, eps=self.qk_norm_eps) * math.sqrt(self.head_dim)
+                    Kt = F.normalize(Kt, p=2, dim=-1, eps=self.qk_norm_eps) * math.sqrt(self.head_dim)
                 e = torch.einsum('bnhd,bmhd->bnmh', Q, Kt) / math.sqrt(self.head_dim)  # (B, N, M, h)
                 if self.capture_attention:
                     content_logits = e
@@ -200,7 +207,7 @@ class EdgeAttnMixHop(nn.Module):
                         ~self.cross_mask.unsqueeze(0).unsqueeze(-1), -1e9)
                 alpha = F.softmax(e, dim=2)                    # over source nodes
                 if self.capture_attention:
-                    self._capture(content_logits, e, alpha, log_prior, k)
+                    self._capture(content_logits, e, alpha, log_prior, k, (raw_Q, raw_K, Q, Kt))
                 alpha = self.attn_drop(alpha)
                 agg = torch.einsum('bnmh,bmhd->bnhd', alpha, V)   # (B, N, h, d)
                 agg = agg.reshape(B, N, -1)                    # (B, N, h*d)
@@ -208,6 +215,11 @@ class EdgeAttnMixHop(nn.Module):
                 Q = self.q(H).view(N, self.n_heads, self.head_dim)     # (N, h, d)
                 Kt = self.k(H).view(N, self.n_heads, self.head_dim)
                 V  = self.v(H).view(N, self.n_heads, self.head_dim)
+                if self.capture_attention:
+                    raw_Q, raw_K = Q, Kt
+                if self.qk_norm:
+                    Q = F.normalize(Q, p=2, dim=-1, eps=self.qk_norm_eps) * math.sqrt(self.head_dim)
+                    Kt = F.normalize(Kt, p=2, dim=-1, eps=self.qk_norm_eps) * math.sqrt(self.head_dim)
                 e = torch.einsum('nhd,mhd->nmh', Q, Kt) / math.sqrt(self.head_dim)  # (N, M, h)
                 if self.capture_attention:
                     content_logits = e
@@ -228,7 +240,7 @@ class EdgeAttnMixHop(nn.Module):
                         ~self.cross_mask.unsqueeze(-1), -1e9)
                 alpha = F.softmax(e, dim=1)                    # over source nodes
                 if self.capture_attention:
-                    self._capture(content_logits, e, alpha, log_prior, k)
+                    self._capture(content_logits, e, alpha, log_prior, k, (raw_Q, raw_K, Q, Kt))
                 alpha = self.attn_drop(alpha)
                 agg = torch.einsum('nmh,mhd->nhd', alpha, V)   # (N, h, d)
                 agg = agg.reshape(N, -1)                       # (N, h*d)
@@ -240,7 +252,7 @@ class EdgeAttnMixHop(nn.Module):
 
         return out
 
-    def _capture(self, content, logits, attention, log_prior, hop):
+    def _capture(self, content, logits, attention, log_prior, hop, qk=None):
         n_graph = self.n_heads if self.graph_prior_heads is None else self.graph_prior_heads
         coverage = log_prior.new_zeros(self.n_heads)
         if n_graph:
@@ -252,6 +264,11 @@ class EdgeAttnMixHop(nn.Module):
         self.last_attention_diagnostics.append(dict(
             hop=hop, content=self.last_content_logits, prior_bias=self.last_prior_bias,
             logits=self.last_attention_logits, attention=attention.detach().cpu().clone()))
+        if qk is not None:
+            self.last_attention_diagnostics[-1]['qk'] = {
+                name: value.detach().cpu().clone()
+                for name, value in zip(('raw_Q','raw_K','Q','K'),qk)
+            }
 
 
 class _CausalConv1d(nn.Module):
@@ -750,6 +767,9 @@ class HeteroMixHopCMGM(nn.Module):
             "switching_filter_rpe",
             "switching_latent_transformer",
             "switching_latent_balanced_readout",
+            "switching_latent_balanced_residual_complementary_fusion",
+            "switching_latent_balanced_pregnn_local_skip",
+            "switching_latent_balanced_qknorm_graph_attention",
             "switching_latent_balanced_hybrid_graph_prior",
             "switching_latent_balanced_commodity_residual",
             "switching_latent_balanced_horizon_readout",
@@ -782,6 +802,8 @@ class HeteroMixHopCMGM(nn.Module):
         self.attn_dropout = attn_dropout
         self.attn_prior_scale = attn_prior_scale
         self.attn_self_heads = attn_self_heads
+        if variant == 'switching_latent_balanced_qknorm_graph_attention' and attn_heads != 8:
+            raise ValueError('D0B-QKNormGraphAttention requires all 8 graph-prior heads')
         if variant == 'switching_latent_balanced_hybrid_graph_prior' and attn_heads != 8:
             raise ValueError('D0B-HybridGraphPriorHeads requires exactly 8 heads: 4 free + 4 graph')
         self.graph_cfg = graph_cfg
@@ -820,6 +842,9 @@ class HeteroMixHopCMGM(nn.Module):
                                                "switching_filter_rpe",
                                                "switching_latent_transformer",
                                                "switching_latent_balanced_readout",
+                                               "switching_latent_balanced_residual_complementary_fusion",
+                                               "switching_latent_balanced_pregnn_local_skip",
+                                               "switching_latent_balanced_qknorm_graph_attention",
                                                "switching_latent_balanced_hybrid_graph_prior",
                                                "switching_latent_balanced_commodity_residual",
                                                "switching_latent_balanced_horizon_readout",
@@ -857,6 +882,9 @@ class HeteroMixHopCMGM(nn.Module):
                                            "switching_filter_rpe",
                                            "switching_latent_transformer",
                                            "switching_latent_balanced_readout",
+                                           "switching_latent_balanced_residual_complementary_fusion",
+                                           "switching_latent_balanced_pregnn_local_skip",
+                                           "switching_latent_balanced_qknorm_graph_attention",
                                            "switching_latent_balanced_hybrid_graph_prior",
                                            "switching_latent_balanced_commodity_residual",
                                            "switching_latent_balanced_horizon_readout",
@@ -918,13 +946,15 @@ class HeteroMixHopCMGM(nn.Module):
                     n_heads=self.attn_heads, dropout=self.attn_dropout,
                     hard_mask=hard, prior_scale=self.attn_prior_scale,
                     self_heads=self.attn_self_heads, cross_mask=cross_mask,
-                    graph_prior_heads=(4 if variant == 'switching_latent_balanced_hybrid_graph_prior' else None))
+                    graph_prior_heads=(4 if variant == 'switching_latent_balanced_hybrid_graph_prior' else None),
+                    qk_norm=(variant == 'switching_latent_balanced_qknorm_graph_attention'))
                 self.attn_mixhop2 = EdgeAttnMixHop(
                     LSTM_HIDDEN_DIM, LSTM_HIDDEN_DIM, K=2, beta=0.05,
                     n_heads=self.attn_heads, dropout=self.attn_dropout,
                     hard_mask=hard, prior_scale=self.attn_prior_scale,
                     self_heads=self.attn_self_heads, cross_mask=cross_mask,
-                    graph_prior_heads=(4 if variant == 'switching_latent_balanced_hybrid_graph_prior' else None))
+                    graph_prior_heads=(4 if variant == 'switching_latent_balanced_hybrid_graph_prior' else None),
+                    qk_norm=(variant == 'switching_latent_balanced_qknorm_graph_attention'))
             else:
                 self.singlehop1 = _SingleHopGCN(LSTM_HIDDEN_DIM)
                 self.singlehop2 = _SingleHopGCN(LSTM_HIDDEN_DIM)
@@ -1108,6 +1138,9 @@ class HeteroMixHopCMGM(nn.Module):
                              "switching_null_control", "switching_filter_rpe",
                              "switching_latent_transformer",
                              "switching_latent_balanced_readout",
+                             "switching_latent_balanced_residual_complementary_fusion",
+                             "switching_latent_balanced_pregnn_local_skip",
+                             "switching_latent_balanced_qknorm_graph_attention",
                              "switching_latent_balanced_hybrid_graph_prior",
                              "switching_latent_balanced_commodity_residual",
                              "switching_latent_balanced_horizon_readout",
@@ -1294,6 +1327,9 @@ class HeteroMixHopCMGM(nn.Module):
         if variant in (
             "switching_latent_transformer",
             "switching_latent_balanced_readout",
+            "switching_latent_balanced_residual_complementary_fusion",
+            "switching_latent_balanced_pregnn_local_skip",
+            "switching_latent_balanced_qknorm_graph_attention",
             "switching_latent_balanced_hybrid_graph_prior",
             "switching_latent_balanced_commodity_residual",
             "switching_latent_balanced_horizon_readout",
@@ -1433,6 +1469,23 @@ class HeteroMixHopCMGM(nn.Module):
                 raise ValueError("Commodity residual requires the original four horizons")
             self.commodity_residual_head = nn.Linear(LSTM_HIDDEN_DIM, self.n_horizons, bias=False)
             self.commodity_residual_alpha = nn.Parameter(torch.tensor(0.0))
+
+        # Add only after every shared D0B module, preserving shared initialization.
+        if variant == "switching_latent_balanced_pregnn_local_skip":
+            if tuple(MULTI_HORIZONS) != (1, 5, 10, 20) or self.n_horizons != 4:
+                raise ValueError("PreGNN local skip requires the original four horizons")
+            self.pregnn_local_residual = nn.Sequential(
+                nn.Linear(128, 32), nn.ReLU(),
+                nn.Linear(32, len(MULTI_HORIZONS), bias=False),
+            )
+            nn.init.zeros_(self.pregnn_local_residual[-1].weight)
+
+        # Construct after all original D0B modules; shared initialization is unchanged.
+        if variant == "switching_latent_balanced_residual_complementary_fusion":
+            self.complementary_fusion_residual = nn.Sequential(
+                nn.Linear(128, 32), nn.ReLU(), nn.Linear(32, 64, bias=False),
+            )
+            nn.init.zeros_(self.complementary_fusion_residual[-1].weight)
 
     def _spatial_forward(self, x: torch.Tensor) -> torch.Tensor:
         """MixHop / single-hop branch → (B, 64)."""
@@ -2156,7 +2209,8 @@ class HeteroMixHopCMGM(nn.Module):
                   f"α={self.comm_alpha.item():.4f} z={list(z.shape)} pred={list(pred.shape)}")
         return pred
 
-    def _temp_weighted_spatial(self, x: torch.Tensor, return_nodes: bool = False):
+    def _temp_weighted_spatial(self, x: torch.Tensor, return_nodes: bool = False,
+                               return_pre_nodes: bool = False):
         """
         The TempWeighted spatial branch (shared by temporal_weighted_graph
         and the RegimeRPETransformer family):
@@ -2176,6 +2230,10 @@ class HeteroMixHopCMGM(nn.Module):
         h1 = F.relu(self.attn_mixhop1(H, A))                           # (B, N, 64)
         h2 = self.attn_mixhop2(h1, A)
         h = self.gcn_norm(h2)
+        if return_pre_nodes:
+            if return_nodes:
+                return self.type_pool(h), h, H
+            return self.type_pool(h), H
         if return_nodes:
             return self.type_pool(h), h                               # (B,64), (B,N,64)
         return self.type_pool(h)                                       # (B, 64)
@@ -2359,7 +2417,7 @@ class HeteroMixHopCMGM(nn.Module):
         return pred
 
     def _market_token_predict(self, h_spatial: torch.Tensor,
-                              h_temporal: torch.Tensor) -> torch.Tensor:
+                              h_temporal: torch.Tensor, return_fused: bool = False):
         """Apply the existing gated fusion and prediction head unchanged."""
         batch_size = h_spatial.shape[0]
         combined = torch.cat([h_spatial, h_temporal], dim=-1)
@@ -2368,7 +2426,16 @@ class HeteroMixHopCMGM(nn.Module):
             gate * self.lstm_proj(h_temporal)
             + (1 - gate) * self.gcn_proj(h_spatial)
         )
+        if self.variant == "switching_latent_balanced_residual_complementary_fusion":
+            residual = self.complementary_fusion_residual(combined)
+            self.last_fusion_base = fused.detach()
+            self.last_fusion_residual = residual.detach()
+            fused = fused + residual
+            self.last_fusion_fused = fused.detach()
         pred = self.head(fused)
+        if return_fused:
+            shape = (batch_size, self.n_horizons, self.n_commodities) if self.n_horizons > 1 else (batch_size, self.n_commodities)
+            return pred.view(*shape), fused
         if self.n_horizons > 1:
             return pred.view(batch_size, self.n_horizons, self.n_commodities)
         return pred.view(batch_size, self.n_commodities)
@@ -2480,6 +2547,26 @@ class HeteroMixHopCMGM(nn.Module):
                 f"h_temporal={list(h_temporal.shape)} → gate → {list(pred.shape)}"
             )
         return pred
+
+    def _pregnn_local_skip_forward(self, x: torch.Tensor, debug: bool = False):
+        """Unchanged D0B global path plus one shared pre-GNN local residual."""
+        h_spatial, h_pre = self._temp_weighted_spatial(x, return_pre_nodes=True)
+        h_temporal = self.switching_latent_transformer(x)
+        base_pred, fused = self._market_token_predict(h_spatial, h_temporal, return_fused=True)
+        fut_start = self.n_stock + self.n_bond
+        h_comm_pre = h_pre[:, fut_start:, :]
+        assert h_comm_pre.shape == (x.shape[0], self.n_commodities, 64)
+        context = fused[:, None, :].expand(-1, self.n_commodities, -1)
+        residual = self.pregnn_local_residual(torch.cat([context, h_comm_pre], dim=-1)).permute(0, 2, 1)
+        # Only diagnostic copies are detached; the actual residual inputs stay connected.
+        self.last_base_pred = base_pred.detach()
+        self.last_residual = residual.detach()
+        self.last_pregnn_nodes = h_pre.detach()
+        self.last_pregnn_comm = h_comm_pre.detach()
+        self.last_pregnn_fused = fused.detach()
+        if debug:
+            print(f"[{self.variant}] pre={list(h_pre.shape)} local={list(h_comm_pre.shape)} residual={list(residual.shape)}")
+        return base_pred + residual
 
     def _switching_latent_commodity_residual_forward(self, x: torch.Tensor,
                                                     debug: bool = False):
@@ -2723,11 +2810,16 @@ class HeteroMixHopCMGM(nn.Module):
             return self._switching_transformer_forward(x, debug)
         if self.variant == "switching_filter_rpe":
             return self._switching_filter_rpe_forward(x, debug)
+        if self.variant == "switching_latent_balanced_pregnn_local_skip":
+            return self._pregnn_local_skip_forward(x, debug)
         if self.variant == "switching_latent_balanced_commodity_residual":
             return self._switching_latent_commodity_residual_forward(x, debug)
         if self.variant in (
             "switching_latent_transformer",
             "switching_latent_balanced_readout",
+            "switching_latent_balanced_residual_complementary_fusion",
+            "switching_latent_balanced_pregnn_local_skip",
+            "switching_latent_balanced_qknorm_graph_attention",
             "switching_latent_balanced_hybrid_graph_prior",
             "switching_latent_balanced_commodity_residual",
             "switching_latent_balanced_horizon_readout",
@@ -2861,6 +2953,9 @@ class HeteroMixHopCMGM(nn.Module):
             "switching_filter_rpe",
             "switching_latent_transformer",
             "switching_latent_balanced_readout",
+            "switching_latent_balanced_residual_complementary_fusion",
+            "switching_latent_balanced_pregnn_local_skip",
+            "switching_latent_balanced_qknorm_graph_attention",
             "switching_latent_balanced_hybrid_graph_prior",
             "switching_latent_balanced_commodity_residual",
             "switching_latent_balanced_horizon_readout",
@@ -2883,6 +2978,9 @@ class HeteroMixHopCMGM(nn.Module):
                     if self.variant in (
                         "switching_latent_transformer",
                         "switching_latent_balanced_readout",
+                        "switching_latent_balanced_residual_complementary_fusion",
+                        "switching_latent_balanced_pregnn_local_skip",
+                        "switching_latent_balanced_qknorm_graph_attention",
                         "switching_latent_balanced_hybrid_graph_prior",
                         "switching_latent_balanced_commodity_residual",
                         "switching_latent_balanced_horizon_readout",

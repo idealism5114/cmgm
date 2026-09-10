@@ -50,6 +50,9 @@ VARIANTS = [
     ("S2F-SwitchingFilterRPE", "switching_filter_rpe"),
     ("D0-SwitchingLatentTransformer", "switching_latent_transformer"),
     ("D0B-BalancedLatentReadout", "switching_latent_balanced_readout"),
+    ("D0B-ResidualComplementaryFusion", "switching_latent_balanced_residual_complementary_fusion"),
+    ("D0B-PreGNNCommodityLocalSkip", "switching_latent_balanced_pregnn_local_skip"),
+    ("D0B-QKNormGraphAttention", "switching_latent_balanced_qknorm_graph_attention"),
     ("D0B-HybridGraphPriorHeads", "switching_latent_balanced_hybrid_graph_prior"),
     ("D0B-CommodityResidualAdapter", "switching_latent_balanced_commodity_residual"),
     ("D0B-HorizonSpecificStateReadout", "switching_latent_balanced_horizon_readout"),
@@ -76,6 +79,9 @@ VARIANTS = [
 D_SERIES_VARIANTS = frozenset({
     "switching_latent_transformer",
     "switching_latent_balanced_readout",
+    "switching_latent_balanced_residual_complementary_fusion",
+    "switching_latent_balanced_pregnn_local_skip",
+    "switching_latent_balanced_qknorm_graph_attention",
     "switching_latent_balanced_hybrid_graph_prior",
     "switching_latent_balanced_commodity_residual",
     "switching_latent_balanced_horizon_readout",
@@ -96,7 +102,7 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description=(
             "HeteroMixHop A/B/C/S0/S0D/S1/S1C/S2F/D0/D0B/D0B-5dOnlyObjective/D0E/D0D/D0C/D1A/D1A2/D1 "
-            "plus D0B-HybridGraphPriorHeads, D0B-CommodityResidualAdapter, D0B-HorizonSpecificStateReadout, D0B-TargetScaleHuber, D0B-NoSwitchKL, D0B-MidLongGroupedObjective and retained F/F2/G/H/I/J/K/L ablations"
+            "plus D0B-ResidualComplementaryFusion, D0B-PreGNNCommodityLocalSkip, D0B-QKNormGraphAttention, D0B-HybridGraphPriorHeads, D0B-CommodityResidualAdapter, D0B-HorizonSpecificStateReadout, D0B-TargetScaleHuber, D0B-NoSwitchKL, D0B-MidLongGroupedObjective and retained F/F2/G/H/I/J/K/L ablations"
         )
     )
     parser.add_argument("--epochs", type=int, default=NUM_EPOCHS)
@@ -111,14 +117,14 @@ def parse_args():
         default=Path("checkpoints"),
         help=(
             "Directory for best checkpoints of D0/D0B/D0B-5dOnlyObjective/D0E/D0D/D0C/D1A/D1A2/D1 "
-            "and D0B-HybridGraphPriorHeads/D0B-CommodityResidualAdapter/D0B-HorizonSpecificStateReadout/D0B-TargetScaleHuber/D0B-NoSwitchKL/D0B-MidLongGroupedObjective (default: ./checkpoints). Other variants are not saved."
+            "and D0B-PreGNNCommodityLocalSkip/D0B-QKNormGraphAttention/D0B-HybridGraphPriorHeads/D0B-CommodityResidualAdapter/D0B-HorizonSpecificStateReadout/D0B-TargetScaleHuber/D0B-NoSwitchKL/D0B-MidLongGroupedObjective (default: ./checkpoints). Other variants are not saved."
         ),
     )
     parser.add_argument(
         "--variants",
         help=(
             "Comma-separated display or internal names; defaults to "
-            "A/B/C/S0/S0D/S1/S1C/S2F/D0/D0B/D0B-HybridGraphPriorHeads/D0B-CommodityResidualAdapter/D0B-HorizonSpecificStateReadout/D0B-TargetScaleHuber/D0B-NoSwitchKL/D0B-5dOnlyObjective/D0B-MidLongGroupedObjective/D0E/D0D/D0C/D1A/D1A2/D1/F/F2/G/H/I/J/K/L"
+            "A/B/C/S0/S0D/S1/S1C/S2F/D0/D0B/D0B-PreGNNCommodityLocalSkip/D0B-QKNormGraphAttention/D0B-HybridGraphPriorHeads/D0B-CommodityResidualAdapter/D0B-HorizonSpecificStateReadout/D0B-TargetScaleHuber/D0B-NoSwitchKL/D0B-5dOnlyObjective/D0B-MidLongGroupedObjective/D0E/D0D/D0C/D1A/D1A2/D1/F/F2/G/H/I/J/K/L"
         ),
     )
     parser.add_argument('--d0b-checkpoint', type=Path,
@@ -135,6 +141,9 @@ def parse_args():
     parser.add_argument('--target-scale-report-dir', type=Path, default=Path('experiments/d0b_target_scale_huber'))
     parser.add_argument('--no-switch-report-dir', type=Path, default=Path('experiments/d0b_no_switch_kl'))
     parser.add_argument('--hybrid-report-dir', type=Path, default=Path('experiments/d0b_hybrid_graph_prior'))
+    parser.add_argument('--qknorm-report-dir', type=Path, default=Path('experiments/d0b_qknorm_graph_attention'))
+    parser.add_argument('--pregnn-report-dir', type=Path, default=Path('experiments/d0b_pregnn_local_skip'))
+    parser.add_argument('--fusion-report-dir', type=Path, default=Path('experiments/d0b_residual_complementary_fusion'))
     return parser.parse_args()
 
 
@@ -3659,6 +3668,15 @@ def _balanced_transition_input_diagnostic(model, batch, stage):
 
 
 def run_variant(name, variant, args, device, data):
+    if variant == 'switching_latent_balanced_residual_complementary_fusion':
+        from cmgm.scripts.d0b_residual_complementary_fusion import run_fusion
+        return run_fusion(args,device,data)
+    if variant == 'switching_latent_balanced_pregnn_local_skip':
+        from cmgm.scripts.d0b_pregnn_local_skip import run_pregnn
+        return run_pregnn(args,device,data)
+    if variant == 'switching_latent_balanced_qknorm_graph_attention':
+        from cmgm.scripts.d0b_qknorm_graph_attention import run_qknorm
+        return run_qknorm(args,device,data)
     if variant == 'switching_latent_balanced_hybrid_graph_prior':
         from cmgm.scripts.d0b_hybrid_graph_prior import run_hybrid
         return run_hybrid(args, device, data)

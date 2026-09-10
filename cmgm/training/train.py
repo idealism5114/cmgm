@@ -355,7 +355,12 @@ def validate_epoch(
     target_sums = {f'{kind}_huber_{h}': 0. for kind in ('raw','weighted') for h in MULTI_HORIZONS}
     val_switch_sum = 0.
     primary_abs, primary_squared, primary_count = 0., 0., 0
-    hybrid_graph_prior = getattr(model, 'variant', None) == 'switching_latent_balanced_hybrid_graph_prior'
+    spatial_secondary_val5 = getattr(model, 'variant', None) in (
+        'switching_latent_balanced_hybrid_graph_prior',
+        'switching_latent_balanced_qknorm_graph_attention',
+        'switching_latent_balanced_residual_complementary_fusion',
+        'switching_latent_balanced_pregnn_local_skip',
+    )
 
     for batch in loader:
         market_descriptor = None
@@ -386,7 +391,7 @@ def validate_epoch(
         else:
             pred = model(X_batch, cur_ei, cur_ew, debug=False)
         loss = _prediction_loss(model, pred, y_batch, criterion)
-        if hybrid_graph_prior:
+        if spatial_secondary_val5:
             idx5 = MULTI_HORIZONS.index(5)
             residual5 = pred[:, idx5].double() - y_batch[:, idx5].double()
             primary_abs += residual5.abs().sum().item()
@@ -445,7 +450,7 @@ def validate_epoch(
         model._last_val_objective = {k:v/max(num_batches,1) for k,v in target_sums.items()}
         model._last_val_objective.update(prediction_loss=total_loss/max(num_batches,1),
                                          MAE_5d=primary_abs/primary_count, MSE_5d=primary_squared/primary_count)
-    if hybrid_graph_prior:
+    if spatial_secondary_val5:
         model._last_val5_diagnostic = dict(MAE=primary_abs/primary_count,
             MSE=primary_squared/primary_count, count=primary_count)
     return total_loss / max(num_batches, 1)
@@ -576,8 +581,13 @@ def train(
         history['sticky_logit_history'] = []
 
     best_val_loss = float('inf')
-    hybrid_graph_prior = getattr(model, 'variant', None) == 'switching_latent_balanced_hybrid_graph_prior'
-    if hybrid_graph_prior:
+    spatial_secondary_val5 = getattr(model, 'variant', None) in (
+        'switching_latent_balanced_hybrid_graph_prior',
+        'switching_latent_balanced_qknorm_graph_attention',
+        'switching_latent_balanced_residual_complementary_fusion',
+        'switching_latent_balanced_pregnn_local_skip',
+    )
+    if spatial_secondary_val5:
         history['val5_diagnostic'] = []
         history['best_val5_mae'] = float('inf')
         history['best_val5_epoch'] = None
@@ -613,13 +623,13 @@ def train(
         history['val_loss'].append(val_loss)
         history['lr_history'].append(current_lr)
         history['switch_beta'].append(current_switch_beta)
-        if hybrid_graph_prior:
+        if spatial_secondary_val5:
             row = dict(epoch=epoch, **model._last_val5_diagnostic)
             history['val5_diagnostic'].append(row)
             if row['MAE'] < history['best_val5_mae']:
                 history['best_val5_mae'] = row['MAE']
                 history['best_val5_epoch'] = epoch
-            print(f"[D0B-HybridGraphPriorHeads secondary VAL5] {row}; formal selection remains multi-horizon validation loss")
+            print(f"[{model.variant} secondary VAL5] {row}; formal selection remains multi-horizon validation loss")
         if five_only:
             row = {'epoch': epoch, 'train': dict(model._last_train_objective),
                    'val': dict(model._last_val_objective), 'lr': current_lr,
