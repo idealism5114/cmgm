@@ -20,8 +20,10 @@ from cmgm.scripts.formal_v2_audit import ROOT,provenance,sanity
 
 def save(r,out):
     from cmgm.scripts.formal_v2_report import report
-    report(r,out)
+    # Persist completed jobs before rendering derived reports, so a report error
+    # cannot lose the recovery manifest or force a completed fit to be repeated.
     atomic_json(out/'results.json',r)
+    report(r,out)
 
 
 def job_id(stage,name,seed,candidate=None):
@@ -89,7 +91,7 @@ def fitted_sanity(estimator,x):
     order=np.arange(len(sample))[::-1]
     batch=float(np.max(np.abs(classical_predictions(estimator,sample[order])-p[order])))
     single=float(np.max(np.abs(classical_predictions(estimator,sample[:1])-p[:1])))
-    bound=32*np.finfo(np.float32).eps*max(1.,float(np.max(np.abs(p))))
+    bound=float(32*np.finfo(np.float32).eps*max(1.,float(np.max(np.abs(p)))))
     return dict(OutputShape=list(p.shape),Finite=bool(np.isfinite(p).all()),BatchPerm=batch,SingleSample=single,
         FullInformation=True,CommodityOrdering='reshape96 horizon-major commodity-minor',roundoff_bound=bound,
         PASS=np.isfinite(p).all().item() and max(batch,single)<=bound)
@@ -209,6 +211,8 @@ def final(r,out,data,device,args):
 
 
 def main():
+    raise SystemExit('Old V2 grid/multi-seed protocol is retired. Use python -m cmgm.scripts.formal_baseline_single_run instead; no old jobs were launched.')
+    # Historical implementation retained for provenance and artifact inspection.
     os.environ.setdefault('CUBLAS_WORKSPACE_CONFIG',':4096:8')
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--stage',choices=('preflight','tune','final','all'),default='preflight')

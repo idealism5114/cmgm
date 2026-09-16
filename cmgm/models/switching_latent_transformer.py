@@ -505,7 +505,8 @@ class SwitchingLatentTransformerBranch(nn.Module):
                        forced_rpe_probabilities: torch.Tensor = None,
                        slope_scale: float = 1.0):
         batch_size, time_steps, _ = long_memory.shape
-        transition = self.regime_filter.transition_matrix()
+        uniform_switching = getattr(self, 'formal_uniform_switching', False)
+        transition = None if uniform_switching else self.regime_filter.transition_matrix()
         p_prev = torch.full(
             (batch_size, self.K),
             1.0 / self.K,
@@ -576,9 +577,14 @@ class SwitchingLatentTransformerBranch(nn.Module):
         transition_z_inputs = []
         for step in range(time_steps):
             h_t = long_memory[:, step]
-            prior_t, evidence_t, p_t, kl_t = self.regime_filter.step(
-                h_t, p_prev, transition
-            )
+            if uniform_switching:
+                prior_t = p_t = long_memory.new_full((batch_size, self.K), 1.0 / self.K)
+                evidence_t = torch.zeros_like(p_t)
+                kl_t = long_memory.new_zeros(batch_size)
+            else:
+                prior_t, evidence_t, p_t, kl_t = self.regime_filter.step(
+                    h_t, p_prev, transition
+                )
             p_for_z = forced[:, step] if forced is not None else p_t
             h_for_transition, z_for_transition = self.transition_inputs(
                 h_t, z_prev, step
@@ -797,12 +803,16 @@ class SwitchingLatentTransformerBranch(nn.Module):
         if zero_component not in (None, "H", "Z"):
             raise ValueError("zero_component must be None, 'H', or 'Z'")
         if self.balanced_readout:
-            h_long = self.long_memory_norm(
-                self.long_memory_readout(h_last)
-            )
-            h_micro = self.micro_state_norm(
-                self.micro_state_readout(z_last)
-            )
+            if getattr(self, 'formal_bypass_balance', False):
+                h_long = self.long_memory_readout(h_last)
+                h_micro = self.micro_state_readout(z_last)
+            else:
+                h_long = self.long_memory_norm(
+                    self.long_memory_readout(h_last)
+                )
+                h_micro = self.micro_state_norm(
+                    self.micro_state_readout(z_last)
+                )
             # D0B null interventions are deliberately post-normalization:
             # zeroing raw inputs would leave projection/LN bias effects.
             h_effective = (

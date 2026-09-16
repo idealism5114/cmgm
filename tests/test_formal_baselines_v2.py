@@ -151,3 +151,27 @@ def test_training_autograd_is_finite_without_optimizer_step(name):
     assert all(torch.isfinite(g).all() for g in grads if g is not None)
     assert any(g is not None and torch.count_nonzero(g)>0 for g in grads)
     assert all(p.grad is None for p in m.parameters())
+
+
+def test_atomic_json_scientific_types_and_strict_nonfinite(tmp_path):
+    from cmgm.scripts.formal_v2_protocol import atomic_json
+    path=tmp_path/'result.json'
+    value=dict(bound=np.float32(1e-6),passed=np.bool_(True),count=np.int64(42),
+        nested=[dict(array=np.array([1.,2.],dtype=np.float32))],tensor=torch.tensor([3.,4.]))
+    atomic_json(path,value);saved=json.loads(path.read_text())
+    assert saved['bound']==float(value['bound']) and saved['passed'] is True
+    assert saved['count']==42 and saved['nested'][0]['array']==[1.,2.] and saved['tensor']==[3.,4.]
+    original=path.read_bytes()
+    for bad in (np.float32('nan'),np.float32('inf'),np.array([float('nan')]),torch.tensor(float('inf'))):
+        with pytest.raises(ValueError):atomic_json(path,dict(bad=bad))
+        assert path.read_bytes()==original
+
+
+def test_manifest_survives_report_rendering_failure(tmp_path,monkeypatch):
+    import cmgm.scripts.formal_v2_report as reporting
+    from cmgm.scripts.formal_baseline_benchmark_v2 import save
+    def fail(*args):raise RuntimeError('report-only failure')
+    monkeypatch.setattr(reporting,'report',fail)
+    state=dict(jobs={'finished':dict(status='DONE',bound=np.float32(.001))})
+    with pytest.raises(RuntimeError):save(state,tmp_path)
+    assert json.loads((tmp_path/'results.json').read_text())['jobs']['finished']['status']=='DONE'

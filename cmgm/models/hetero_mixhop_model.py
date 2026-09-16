@@ -2210,7 +2210,9 @@ class HeteroMixHopCMGM(nn.Module):
         return pred
 
     def _temp_weighted_spatial(self, x: torch.Tensor, return_nodes: bool = False,
-                               return_pre_nodes: bool = False):
+                               return_pre_nodes: bool = False,
+                               uniform_time: bool = False,
+                               bypass_graph: bool = False):
         """
         The TempWeighted spatial branch (shared by temporal_weighted_graph
         and the RegimeRPETransformer family):
@@ -2222,13 +2224,20 @@ class HeteroMixHopCMGM(nn.Module):
         seqs = [self.type_proj(x[:, t, :, :], self.n_stock, self.n_bond)
                 for t in range(T)]
         H_seq = torch.stack(seqs, dim=1)                               # (B, T, N, 64)
-        score = self.temporal_score(H_seq)                             # (B, T, N, 1)
-        alpha = F.softmax(score, dim=1)
-        H = (H_seq * alpha).sum(dim=1)                                 # (B, N, 64)
+        if uniform_time:
+            alpha = H_seq.new_full((*H_seq.shape[:3], 1), 1.0 / T)
+            H = H_seq.mean(dim=1)
+        else:
+            score = self.temporal_score(H_seq)                         # (B, T, N, 1)
+            alpha = F.softmax(score, dim=1)
+            H = (H_seq * alpha).sum(dim=1)                             # (B, N, 64)
         self.last_alpha = alpha.squeeze(-1).detach()
-        A = self.graph_learner() if self.use_learn_graph else self.static_A
-        h1 = F.relu(self.attn_mixhop1(H, A))                           # (B, N, 64)
-        h2 = self.attn_mixhop2(h1, A)
+        if bypass_graph:
+            h2 = H
+        else:
+            A = self.graph_learner() if self.use_learn_graph else self.static_A
+            h1 = F.relu(self.attn_mixhop1(H, A))                       # (B, N, 64)
+            h2 = self.attn_mixhop2(h1, A)
         h = self.gcn_norm(h2)
         if return_pre_nodes:
             if return_nodes:

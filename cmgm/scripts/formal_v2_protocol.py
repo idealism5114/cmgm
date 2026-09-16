@@ -54,10 +54,19 @@ def loader(dataset,seed):
     return DataLoader(dataset,batch_size=64,shuffle=False,drop_last=False,num_workers=0,generator=torch.Generator().manual_seed(seed))
 
 
+def _json_default(value):
+    """Serialize scientific numeric containers without hiding NaN/Inf as strings."""
+    if isinstance(value,np.generic):return value.item()
+    if isinstance(value,np.ndarray):return value.tolist()
+    if isinstance(value,torch.Tensor):return value.detach().cpu().tolist()
+    if isinstance(value,Path):return str(value)
+    raise TypeError(f'Object of type {type(value).__name__} is not JSON serializable')
+
+
 def atomic_json(path,value):
     path=Path(path);path.parent.mkdir(parents=True,exist_ok=True)
     temp=path.with_suffix(path.suffix+'.tmp')
-    temp.write_text(json.dumps(value,ensure_ascii=False,indent=2,allow_nan=False),encoding='utf-8');os.replace(temp,path)
+    temp.write_text(json.dumps(value,ensure_ascii=False,indent=2,allow_nan=False,default=_json_default),encoding='utf-8');os.replace(temp,path)
 
 
 def sha(path):return hashlib.sha256(Path(path).read_bytes()).hexdigest()
