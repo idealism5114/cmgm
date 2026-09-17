@@ -55,7 +55,10 @@ def report(r,out):
         runtime.append(dict(Model=n,Seconds=summary.get('train_seconds'),BestEpoch=summary.get('best_epoch'),Device=summary.get('device','CPU' if n in ORDER[:3] else None),
             Complexity=summary.get('complexity',300 if n=='Random Forest' and entry else None),Unit=summary.get('complexity_unit','trees' if n=='Random Forest' and entry else None),
             PeakGPUBytes=summary.get('peak_gpu_bytes'),PeakRSSKiB=summary.get('peak_cpu_RSS_KiB'),Source=entry.get('path'),SHA256=entry.get('sha256')))
-        config_rows.append([n,ARCHITECTURE[n],json.dumps(FIXED[n],ensure_ascii=False),row['Seed'],'(B,20,N,21)','(B,4,24)'])
+        architecture=ARCHITECTURE[n]
+        if n=='TCN' and r.get('repair'):
+            architecture='locuslab/TCN TemporalConvNet(N*21,[128,128,128],k3,dropout.1); WeightNorm+Chomp, dilations1/2/4; residual downsample only; Linear128→96'
+        config_rows.append([n,architecture,json.dumps(FIXED[n],ensure_ascii=False),row['Seed'],'(B,20,N,21)','(B,4,24)'])
     csv_file(out,'single_run_results.csv',list(rows[0]),rows)
     csv_file(out,'multi_horizon_results.csv',['Model','Split','Horizon','MAE','MSE','RMSE','Hit'],multi)
     csv_file(out,'per_commodity_results.csv',['Model','commodity','MAE','MSE'],commodity)
@@ -104,4 +107,7 @@ def report(r,out):
         ['Was each new model fitted once under its fixed configuration?', 'YES (RF reused, D0B frozen)' if complete else 'PENDING — missing fits have not run'],
         ['Were any results rerun because performance was poor?','NO'],['Was D0B modified or retrained?','NO']]),
         'Validity caveat: single-run predefined-configuration benchmark; no multi-seed statistical claim. STOP after completing this table.'])
+    if r.get('repair'):
+        sections.insert(1,'TCN REPAIR AMENDMENT: old TCN is INVALID_FOR_FINAL_BASELINE_TABLE (architecture fidelity issue). Exactly one corrected seed42 fit is permitted. The other eight source rows and checkpoints are preserved without retraining or reevaluation. Source: '+r['repair']['source_manifest'])
+        sections.insert(2,'Corrected TCN provenance and initialization compatibility are in ADAPTATION_NOTES.md and baseline_provenance.json. The old TCN metrics are retained only in results.json → invalidated_TCN, never as a valid final-table row.')
     write(out/'REPORT.md','\n\n'.join(sections)+'\n')

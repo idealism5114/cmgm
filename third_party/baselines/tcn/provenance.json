@@ -1,0 +1,15 @@
+{
+  "repository": "https://github.com/locuslab/TCN",
+  "commit": "2f8c2b817050206397458dfd1f5a25ce8a32fe65",
+  "license": "MIT",
+  "files": {
+    "tcn.py": "a666d8829a90131e2a0ebee8d593eaca90a9d7039fa013814b49d64f97cc19db",
+    "tcn.py.upstream": "f93c67de970f4c9e1a96a7d2bed1df89c521faf6ca94e36455267605b1ad585f",
+    "LICENSE": "7b9a89cb975f5891f02be043c0ca5c9b9d6c43ced216c2d508f0f7e4380a6cbd",
+    "tcn.py.patch": "ba163e073482e48fd0504afb1fe9dded2054476fe936ee810d246c2b85db28ec"
+  },
+  "adaptations": [
+    "Modern equivalent weight normalization API",
+    "Initialize underlying v and g to preserve intended N(0,.01) effective weights"
+  ]
+}

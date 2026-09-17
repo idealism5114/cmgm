@@ -1,0 +1,27 @@
+--- upstream/TCN/tcn.py
++++ local/tcn.py
+@@ -1,6 +1,6 @@
+ import torch
+ import torch.nn as nn
+-from torch.nn.utils import weight_norm
++from torch.nn.utils.parametrizations import weight_norm
+ 
+ 
+ class Chomp1d(nn.Module):
+@@ -34,8 +34,14 @@
+         self.init_weights()
+ 
+     def init_weights(self):
+-        self.conv1.weight.data.normal_(0, 0.01)
+-        self.conv2.weight.data.normal_(0, 0.01)
++        # Initialize the underlying direction and magnitude, not a transient
++        # computed weight: effective W = g * v / ||v|| must stay N(0,.01).
++        with torch.no_grad():
++            for conv in (self.conv1, self.conv2):
++                v = conv.parametrizations.weight.original1
++                g = conv.parametrizations.weight.original0
++                v.normal_(0, 0.01)
++                g.copy_(torch.linalg.vector_norm(v, dim=(1, 2), keepdim=True))
+         if self.downsample is not None:
+             self.downsample.weight.data.normal_(0, 0.01)
+ 

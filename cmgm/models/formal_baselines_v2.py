@@ -63,11 +63,11 @@ class TCNBlock(nn.Module):
 class TCN(SequenceModel):
     def __init__(self,n):
         super().__init__()
-        self.projection = nn.Conv1d(n*21,128,1)
-        self.blocks = nn.Sequential(*(TCNBlock(d) for d in (1,2,4)))
+        from third_party.baselines.tcn.tcn import TemporalConvNet
+        self.tcn = TemporalConvNet(n*21,[128,128,128],kernel_size=3,dropout=.1)
         self.head = nn.Linear(128,96)
     def temporal_states(self,x):
-        return self.blocks(self.projection(input_view('TCN',x).transpose(1,2))).transpose(1,2)
+        return self.tcn(input_view('TCN',x).transpose(1,2)).transpose(1,2)
     def forward(self,x):
         return self.output(self.temporal_states(x)[:,-1])
 
