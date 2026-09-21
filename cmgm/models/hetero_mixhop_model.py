@@ -768,6 +768,8 @@ class HeteroMixHopCMGM(nn.Module):
             "switching_latent_transformer",
             "switching_latent_balanced_readout",
             "switching_latent_balanced_residual_complementary_fusion",
+            "switching_latent_balanced_moe_fusion",
+            "switching_latent_balanced_candidate_2expert_moe",
             "switching_latent_balanced_pregnn_local_skip",
             "switching_latent_balanced_qknorm_graph_attention",
             "switching_latent_balanced_hybrid_graph_prior",
@@ -843,6 +845,8 @@ class HeteroMixHopCMGM(nn.Module):
                                                "switching_latent_transformer",
                                                "switching_latent_balanced_readout",
                                                "switching_latent_balanced_residual_complementary_fusion",
+                                               "switching_latent_balanced_moe_fusion",
+                                               "switching_latent_balanced_candidate_2expert_moe",
                                                "switching_latent_balanced_pregnn_local_skip",
                                                "switching_latent_balanced_qknorm_graph_attention",
                                                "switching_latent_balanced_hybrid_graph_prior",
@@ -883,6 +887,8 @@ class HeteroMixHopCMGM(nn.Module):
                                            "switching_latent_transformer",
                                            "switching_latent_balanced_readout",
                                            "switching_latent_balanced_residual_complementary_fusion",
+                                           "switching_latent_balanced_moe_fusion",
+                                           "switching_latent_balanced_candidate_2expert_moe",
                                            "switching_latent_balanced_pregnn_local_skip",
                                            "switching_latent_balanced_qknorm_graph_attention",
                                            "switching_latent_balanced_hybrid_graph_prior",
@@ -1139,6 +1145,8 @@ class HeteroMixHopCMGM(nn.Module):
                              "switching_latent_transformer",
                              "switching_latent_balanced_readout",
                              "switching_latent_balanced_residual_complementary_fusion",
+                             "switching_latent_balanced_moe_fusion",
+                             "switching_latent_balanced_candidate_2expert_moe",
                              "switching_latent_balanced_pregnn_local_skip",
                              "switching_latent_balanced_qknorm_graph_attention",
                              "switching_latent_balanced_hybrid_graph_prior",
@@ -1328,6 +1336,8 @@ class HeteroMixHopCMGM(nn.Module):
             "switching_latent_transformer",
             "switching_latent_balanced_readout",
             "switching_latent_balanced_residual_complementary_fusion",
+            "switching_latent_balanced_moe_fusion",
+            "switching_latent_balanced_candidate_2expert_moe",
             "switching_latent_balanced_pregnn_local_skip",
             "switching_latent_balanced_qknorm_graph_attention",
             "switching_latent_balanced_hybrid_graph_prior",
@@ -1486,6 +1496,27 @@ class HeteroMixHopCMGM(nn.Module):
                 nn.Linear(128, 32), nn.ReLU(), nn.Linear(32, 64, bias=False),
             )
             nn.init.zeros_(self.complementary_fusion_residual[-1].weight)
+
+        # Construct shared D0B modules in their original RNG order first.
+        if variant == "switching_latent_balanced_moe_fusion":
+            from cmgm.models.moe_fusion import SpatialTemporalMoEFusion
+            del self.gate_fc  # Replaced, not retained as an unused trainable gate.
+            self.moe_fusion = SpatialTemporalMoEFusion()
+
+        if variant == "switching_latent_balanced_candidate_2expert_moe":
+            from cmgm.models.candidate_moe_fusion import CandidateAwareTwoExpertFusion
+            del self.gate_fc
+            self.candidate_moe_fusion = CandidateAwareTwoExpertFusion()
+
+    def moe_balance_loss(self):
+        if self.variant != "switching_latent_balanced_moe_fusion":
+            raise ValueError("MoE balance loss is exclusive to D0B-MoEFusion")
+        return self.moe_fusion.balance_loss()
+
+    def set_moe_epoch(self, epoch):
+        if self.variant != "switching_latent_balanced_moe_fusion":
+            raise ValueError("MoE schedule is exclusive to D0B-MoEFusion")
+        self.moe_fusion.set_epoch(epoch)
 
     def _spatial_forward(self, x: torch.Tensor) -> torch.Tensor:
         """MixHop / single-hop branch → (B, 64)."""
@@ -2429,6 +2460,17 @@ class HeteroMixHopCMGM(nn.Module):
                               h_temporal: torch.Tensor, return_fused: bool = False):
         """Apply the existing gated fusion and prediction head unchanged."""
         batch_size = h_spatial.shape[0]
+        if self.variant == "switching_latent_balanced_moe_fusion":
+            fused = self.moe_fusion(h_spatial, h_temporal,
+                                    self.gcn_proj(h_spatial), self.lstm_proj(h_temporal))
+            pred = self.head(fused)
+            shape = (batch_size, self.n_horizons, self.n_commodities) if self.n_horizons > 1 else (batch_size, self.n_commodities)
+            return (pred.view(*shape), fused) if return_fused else pred.view(*shape)
+        if self.variant == "switching_latent_balanced_candidate_2expert_moe":
+            fused = self.candidate_moe_fusion(self.gcn_proj(h_spatial), self.lstm_proj(h_temporal))
+            self.candidate_moe_fusion.last.update(h_s=h_spatial.detach(), h_t=h_temporal.detach())
+            pred = self.head(fused).view(batch_size, self.n_horizons, self.n_commodities)
+            return (pred, fused) if return_fused else pred
         combined = torch.cat([h_spatial, h_temporal], dim=-1)
         gate = torch.sigmoid(self.gate_fc(combined))
         fused = (
@@ -2827,6 +2869,8 @@ class HeteroMixHopCMGM(nn.Module):
             "switching_latent_transformer",
             "switching_latent_balanced_readout",
             "switching_latent_balanced_residual_complementary_fusion",
+            "switching_latent_balanced_moe_fusion",
+            "switching_latent_balanced_candidate_2expert_moe",
             "switching_latent_balanced_pregnn_local_skip",
             "switching_latent_balanced_qknorm_graph_attention",
             "switching_latent_balanced_hybrid_graph_prior",
@@ -2954,6 +2998,26 @@ class HeteroMixHopCMGM(nn.Module):
 
     def get_gate_stats(self, x, edge_index=None, edge_weight=None):
         """Return gating statistics (only meaningful for gate variants)."""
+        if self.variant == "switching_latent_balanced_candidate_2expert_moe":
+            was_training = self.training
+            self.eval()
+            try:
+                with torch.no_grad():
+                    self.forward(x, edge_index, edge_weight)
+                return {"candidate_pi_mean": self.candidate_moe_fusion.last['pi'].mean(0).tolist()}
+            finally:
+                self.train(was_training)
+        if self.variant == "switching_latent_balanced_moe_fusion":
+            was_training = self.training
+            try:
+                self.eval()
+                with torch.no_grad():
+                    self(x)
+                return {"moe_pi_mean": self.moe_fusion.last_pi.mean(0).tolist(),
+                        "moe_effective_pi_mean": self.moe_fusion.last_effective_pi.mean(0).tolist(),
+                        "moe_gamma": self.moe_fusion.gamma}
+            finally:
+                self.train(was_training)
         if self.variant in (
             "market_token_transformer",
             "market_dispersion_transformer",
@@ -2963,6 +3027,8 @@ class HeteroMixHopCMGM(nn.Module):
             "switching_latent_transformer",
             "switching_latent_balanced_readout",
             "switching_latent_balanced_residual_complementary_fusion",
+            "switching_latent_balanced_moe_fusion",
+            "switching_latent_balanced_candidate_2expert_moe",
             "switching_latent_balanced_pregnn_local_skip",
             "switching_latent_balanced_qknorm_graph_attention",
             "switching_latent_balanced_hybrid_graph_prior",
@@ -2988,6 +3054,8 @@ class HeteroMixHopCMGM(nn.Module):
                         "switching_latent_transformer",
                         "switching_latent_balanced_readout",
                         "switching_latent_balanced_residual_complementary_fusion",
+                        "switching_latent_balanced_moe_fusion",
+                        "switching_latent_balanced_candidate_2expert_moe",
                         "switching_latent_balanced_pregnn_local_skip",
                         "switching_latent_balanced_qknorm_graph_attention",
                         "switching_latent_balanced_hybrid_graph_prior",

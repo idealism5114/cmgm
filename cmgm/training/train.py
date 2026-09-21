@@ -31,6 +31,10 @@ from cmgm.training.target_scale_huber import (
     detached_terms as _target_scale_detached_terms,
 )
 
+from cmgm.models.moe_fusion import VARIANT as MOE_VARIANT, BALANCE_COEFFICIENT, RoutingAccumulator
+
+from cmgm.models.candidate_moe_fusion import VARIANT as CANDIDATE_VARIANT, CandidateRoutingAccumulator
+
 FIVE_DAY_ONLY_VARIANT = 'switching_latent_balanced_readout_5d_only'
 FIVE_DAY_OBJECTIVE_MULTIPLIER = 4.0
 GROUPED_VARIANT = 'switching_latent_balanced_readout_5_10_20'
@@ -161,6 +165,11 @@ def train_epoch(
     model.train()
     total_loss = 0.0
     num_batches = 0
+    candidate = getattr(model, 'variant', None) == CANDIDATE_VARIANT
+    moe = getattr(model, 'variant', None) == MOE_VARIANT
+    candidate_stats = CandidateRoutingAccumulator() if candidate else None
+    moe_stats = RoutingAccumulator() if moe else None
+    moe_losses = dict(prediction_loss=0., switch_loss=0., weighted_balance_loss=0., total_loss=0.) if moe else None
     five_only = _is_five_day_only(model)
     objective_sums = dict(raw_L5=0., scaled_prediction_loss=0., switch_loss=0., total_loss=0.)
     grouped = getattr(model, 'variant', None) == GROUPED_VARIANT
@@ -226,6 +235,8 @@ def train_epoch(
 
         # Compute loss — supports multi-horizon (B,H,Nc) or single (B,Nc)
         loss = _prediction_loss(model, pred, y_batch, criterion)
+        if moe:
+            moe_losses['prediction_loss'] += loss.detach().item()
         if target_scale:
             target_scale_values = _target_scale_detached_terms(pred, y_batch, model.target_scale_huber, MULTI_HORIZONS)
             target_scale_values['prediction_loss'] = loss.detach().item()
@@ -268,6 +279,21 @@ def train_epoch(
         ):
             switch_loss = _effective_switch_loss(model, switching_branch)
             loss = loss + switch_loss
+
+        if candidate:
+            if not torch.isfinite(loss):
+                raise FloatingPointError('Nonfinite candidate MoE loss; stop')
+            candidate_stats.update(model.candidate_moe_fusion)
+
+        if moe:
+            weighted_balance = BALANCE_COEFFICIENT * model.moe_balance_loss()
+            loss = loss + weighted_balance
+            if not torch.isfinite(loss):
+                raise FloatingPointError('Nonfinite MoE training loss; stop without changing protocol')
+            moe_stats.update(model.moe_fusion)
+            moe_losses['switch_loss'] += switch_loss.detach().item()
+            moe_losses['weighted_balance_loss'] += weighted_balance.detach().item()
+            moe_losses['total_loss'] += loss.detach().item()
 
         if five_only:
             objective_sums['raw_L5'] += scaled_prediction_value / FIVE_DAY_OBJECTIVE_MULTIPLIER
@@ -312,6 +338,12 @@ def train_epoch(
         total_loss += loss.item()
         num_batches += 1
 
+    if candidate:
+        model._last_train_candidate = candidate_stats.summary()
+    if moe:
+        model._last_train_moe = moe_stats.summary(model.moe_fusion)
+        model._last_train_moe.update({k:v/max(num_batches,1) for k,v in moe_losses.items()})
+
     if five_only or grouped or no_switch or target_scale or horizon_readout or commodity_residual:
         model._last_train_objective = {k: v / max(num_batches, 1) for k, v in objective_sums.items()}
     if commodity_residual:
@@ -346,6 +378,10 @@ def validate_epoch(
     model.eval()
     total_loss = 0.0
     num_batches = 0
+    candidate = getattr(model, 'variant', None) == CANDIDATE_VARIANT
+    moe = getattr(model, 'variant', None) == MOE_VARIANT
+    candidate_stats = CandidateRoutingAccumulator() if candidate else None
+    moe_stats = RoutingAccumulator() if moe else None
     five_only = _is_five_day_only(model)
     horizon_sums = {str(h): 0. for h in MULTI_HORIZONS}
     grouped = getattr(model, 'variant', None) == GROUPED_VARIANT
@@ -359,6 +395,8 @@ def validate_epoch(
         'switching_latent_balanced_hybrid_graph_prior',
         'switching_latent_balanced_qknorm_graph_attention',
         'switching_latent_balanced_residual_complementary_fusion',
+        MOE_VARIANT,
+        CANDIDATE_VARIANT,
         'switching_latent_balanced_pregnn_local_skip',
     )
 
@@ -421,6 +459,10 @@ def validate_epoch(
         if aux_pred is not None and y_batch.dim() == 3:
             loss = loss + criterion(aux_pred, y_batch)
 
+        if candidate:
+            candidate_stats.update(model.candidate_moe_fusion)
+        if moe:
+            moe_stats.update(model.moe_fusion)
         total_loss += loss.item()
         num_batches += 1
 
@@ -453,6 +495,11 @@ def validate_epoch(
     if spatial_secondary_val5:
         model._last_val5_diagnostic = dict(MAE=primary_abs/primary_count,
             MSE=primary_squared/primary_count, count=primary_count)
+    if candidate:
+        model._last_val_candidate = candidate_stats.summary()
+    if moe:
+        model._last_val_moe = moe_stats.summary(model.moe_fusion)
+        model._last_val_moe['prediction_loss'] = total_loss/max(num_batches,1)
     return total_loss / max(num_batches, 1)
 
 
@@ -470,6 +517,7 @@ def train(
     checkpoint_path: Optional[str] = None,
     checkpoint_metadata: Optional[Dict] = None,
     epoch_diagnostic=None,
+    epoch_history_callback=None,
 ) -> Dict:
     """
     Full training loop with early stopping.
@@ -514,6 +562,8 @@ def train(
         if getattr(model, 'disable_switch_kl', False):
             raise ValueError('TargetScaleHuber must retain switching KL')
 
+    candidate = getattr(model, 'variant', None) == CANDIDATE_VARIANT
+    moe = getattr(model, 'variant', None) == MOE_VARIANT
     t0 = time.time()
 
     # Move model to device
@@ -546,6 +596,10 @@ def train(
         'switch_beta': [],
         'epoch_diagnostics': {},
     }
+    if candidate:
+        history['candidate_routing_history'] = []
+    if moe:
+        history['moe_routing_history'] = []
     five_only = _is_five_day_only(model)
     grouped = getattr(model, 'variant', None) == GROUPED_VARIANT
     no_switch = getattr(model, 'variant', None) == NO_SWITCH_KL_VARIANT
@@ -585,6 +639,8 @@ def train(
         'switching_latent_balanced_hybrid_graph_prior',
         'switching_latent_balanced_qknorm_graph_attention',
         'switching_latent_balanced_residual_complementary_fusion',
+        MOE_VARIANT,
+        CANDIDATE_VARIANT,
         'switching_latent_balanced_pregnn_local_skip',
     )
     if spatial_secondary_val5:
@@ -595,6 +651,8 @@ def train(
     epochs_no_improve = 0
 
     for epoch in range(1, num_epochs + 1):
+        if moe:
+            model.set_moe_epoch(epoch)
         switching_branch = _switching_branch(model)
         current_switch_beta = None
         if switching_branch is not None:
@@ -623,6 +681,14 @@ def train(
         history['val_loss'].append(val_loss)
         history['lr_history'].append(current_lr)
         history['switch_beta'].append(current_switch_beta)
+        if candidate:
+            candidate_row=dict(epoch=epoch, train=dict(model._last_train_candidate), val=dict(model._last_val_candidate))
+            history['candidate_routing_history'].append(candidate_row)
+            print('[Candidate routing] '+json.dumps(candidate_row), flush=True)
+        if moe:
+            row=dict(epoch=epoch, train=dict(model._last_train_moe), val=dict(model._last_val_moe))
+            history['moe_routing_history'].append(row)
+            print('[MoE routing] '+json.dumps(row), flush=True)
         if spatial_secondary_val5:
             row = dict(epoch=epoch, **model._last_val5_diagnostic)
             history['val5_diagnostic'].append(row)
@@ -682,6 +748,8 @@ def train(
                 print('[D0B-CommodityResidualAdapter epoch] ' + json.dumps(row), flush=True)
             else:
                 print('[D0B-HorizonSpecificStateReadout epoch] ' + json.dumps(row), flush=True)
+        if epoch_history_callback is not None:
+            epoch_history_callback(history)
         diagnostic_epochs = (1, 5, 10, 20) if no_switch or commodity_residual else (1, 5, 10)
         if epoch_diagnostic is not None and epoch in diagnostic_epochs:
             history['epoch_diagnostics'][f'epoch{epoch}'] = (
@@ -769,6 +837,9 @@ def train(
             'best_val_loss': best_val_loss,
             'best_epoch': history['best_epoch'],
         }
+        if moe:
+            checkpoint['moe_epoch'] = int(model.moe_fusion.epoch.item())
+            checkpoint['moe_gamma'] = model.moe_fusion.gamma
         if checkpoint_metadata:
             checkpoint['metadata'] = dict(checkpoint_metadata)
         if five_only:
