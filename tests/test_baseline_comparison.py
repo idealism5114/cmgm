@@ -84,7 +84,8 @@ def test_formal_selection_and_optimizer_protocol_without_parameter_updates(tmp_p
 
 
 def test_unified_zero_hit_includes_zero_targets_all_horizons():
- m=make_model('ZeroReturn',MI);x=torch.ones(5,20,30,21);y=torch.ones(5,4,24)*.1;y[0]=0
+ from cmgm.models.comparison_baselines import ZeroReturn
+ m=ZeroReturn(n_stock=4,n_bond=2);x=torch.ones(5,20,30,21);y=torch.ones(5,4,24)*.1;y[0]=0
  result=evaluate(m,{'test':DataLoader(TensorDataset(x,y),batch_size=3)},torch.device('cpu'),[str(i) for i in range(24)])
  assert len(result['per_commodity'])==24
  for values in result['metrics']['test'].values():
@@ -93,28 +94,32 @@ def test_unified_zero_hit_includes_zero_targets_all_horizons():
 
 def test_report_ranks_negative_improvement_truthfully(tmp_path):
  r=dict(status='SYNTHETIC',protocol={},models={},sanity={},model_status={},reference_check=dict(PASS=True))
- for name,mae in zip((*ORDER,'D0B'),(1.,.8,.7,.6,.5,.4,.55)):
+ from cmgm.scripts.baseline_comparison import OURS
+ for name,mae in zip((*ORDER,OURS),(1.,.8,.7,.6,.5,.4,.3,.2,.35)):
   metrics={s:{str(h):dict(MAE=mae,MSE=mae**2,RMSE=mae,Hit=.5) for h in (1,5,10,20)} for s in ('train','val','test')}
   r['models'][name]=dict(parameters=dict(trainable=1,nontrainable=0,buffer_elements=0),training=dict(best_epoch=2,train_seconds=1.,seconds_per_epoch_mean=.5),input_view='fixture',metrics=metrics,
       per_commodity=[dict(commodity=str(i),MAE=mae,MSE=mae**2) for i in range(24)])
-  if name!='D0B':r['sanity'][name]=dict(PASS=True);r['model_status'][name]='COMPLETE'
- write_report(r,tmp_path);text=(tmp_path/'REPORT.md').read_text()
- assert 'Strongest baseline: MTGNN' in text and 'D0B rank: 3 of 7' in text and 'The baseline outperforms D0B' in text
- assert r['tables']['overall'][0]['Model']=='MTGNN' and r['tables']['overall'][0]['D0B_improvement_percent']<0
- assert len(r['tables']['all_horizons'])==84
+  if name!=OURS:r['sanity'][name]=dict(PASS=True);r['model_status'][name]='COMPLETE'
+ write_report(r,tmp_path);text=(tmp_path/'FINAL_REPORT.md').read_text()
+ assert 'CrossGNN=0.2' in text and 'NO; exceptions:' in text
+ cross=next(v for v in r['tables']['overall'] if v['Model']=='CrossGNN')
+ assert cross['DeltaMAE_vs_Ours']<0
+ assert len(r['tables']['all_horizons'])==108
 
 
 def test_completed_training_recovery_validates_identity_without_optimizer(tmp_path,monkeypatch):
  from cmgm.scripts.baseline_comparison import completed_training,PROTOCOL
  monkeypatch.setattr(torch.optim,'Adam',lambda *a,**k:pytest.fail('Recovery must not create optimizer'))
- path=tmp_path/'linear_best.pt';audit=dict(split_fingerprint={'train':'fixture'})
- metadata=dict(model='Linear',protocol=PROTOCOL,data_fingerprint=audit['split_fingerprint'])
+ from cmgm.models.comparison_baselines import MODEL_CONFIGS
+ from cmgm.scripts.formal_v2_protocol import sha
+ path=tmp_path/'rnn_best.pt';audit=dict(split_fingerprint={'train':'fixture'});sources={'fixture':'source'}
+ metadata=dict(model='RNN',configuration=MODEL_CONFIGS['RNN'],protocol=PROTOCOL,data_fingerprint=audit['split_fingerprint'],source_hashes=sources)
  torch.save(dict(training_complete=True,metadata=metadata,training_summary={'best_epoch':2}),path)
- assert completed_training(path,'Linear',audit)['training_summary']['best_epoch']==2
- with pytest.raises(ValueError):completed_training(path,'GRU',audit)
- with pytest.raises(ValueError):completed_training(path,'Linear',dict(split_fingerprint={}))
+ assert completed_training(path,'RNN',audit,sources,sha(path))['training_summary']['best_epoch']==2
+ with pytest.raises(ValueError):completed_training(path,'GRU',audit,sources,sha(path))
+ with pytest.raises(ValueError):completed_training(path,'RNN',dict(split_fingerprint={}),sources,sha(path))
  torch.save(dict(training_complete=False),path)
- assert completed_training(path,'Linear',audit) is None
+ assert completed_training(path,'RNN',audit,sources,sha(path)) is None
 
 
 def test_flush_saves_current_tables_not_stale_tables(tmp_path,monkeypatch):

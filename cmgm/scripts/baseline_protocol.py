@@ -92,6 +92,7 @@ def evaluate(m,all_loaders,device,names):
         for batch in loader:
             p=m(batch[0].to(device));y=batch[1]
             if p.shape!=y.shape or p.shape[1:]!=(4,24):raise ValueError('Output/target order or shape failure')
+            if not torch.isfinite(p).all():raise FloatingPointError('Nonfinite evaluation prediction')
             ps.append(p.cpu().numpy());ys.append(y.numpy())
         p,y=np.concatenate(ps),np.concatenate(ys)
         metrics[split]={str(h):population_metrics(p[:,HORIZONS.index(h)],y[:,HORIZONS.index(h)]) for h in HORIZONS}
@@ -127,10 +128,13 @@ def _sanity(m,x):
             causal['past_state_max_diff']=float((a[:,:10]-b[:,:10]).abs().max())
         future=torch.cat([x,x[:,:5]+100],1);future[:,20:]*=-7
         causal['observed_window_interface_max_diff']=float((m(future[:,:20])-p).abs().max())
-        r=dict(OutputShape=list(p.shape),Finite=bool(torch.isfinite(p).all()),BatchPerm=batch,SingleSample=single,Causal=causal,
-            output_scale=float(p.abs().max()),causality_scope='GRU/temporal Transformer/MTGNN prefix states are checked. Linear and inverted tokens use exactly the 20 observed points; no temporal-prefix invariance is claimed for inverted full-window tokens.')
+        mechanism={}
+        if hasattr(m,'mechanism_sanity'):
+            m(x);mechanism=m.mechanism_sanity()
+        r=dict(Mechanism=mechanism,OutputShape=list(p.shape),Finite=bool(torch.isfinite(p).all()),BatchPerm=batch,SingleSample=single,Causal=causal,
+            output_scale=float(p.abs().max()),causality_scope='Recurrent/causal Transformer/GraphWaveNet/MTGNN prefix states are checked. MSGNet/CrossGNN use only the complete observed 20-step window; FFT and observed-window graph refinement are not prefix-causal encoders.')
         if hasattr(m,'graph'):r['graph_A_finite']=bool(torch.isfinite(m.graph()).all())
-        r['PASS']=r['Finite'] and p.shape==(len(x),4,24) and batch<1e-6 and single<1e-6 and max(causal.values())<1e-6 and r.get('graph_A_finite',True)
+        r['PASS']=r['Finite'] and p.shape==(len(x),4,24) and batch<1e-6 and single<1e-6 and max(causal.values())<1e-6 and r.get('graph_A_finite',True) and mechanism.get('PASS',True)
         return r
 
 

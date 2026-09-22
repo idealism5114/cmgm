@@ -1,34 +1,35 @@
 """Revised main-innovation controls. Historical/native model code stays untouched."""
 import torch
 from torch.nn import functional as F
-from cmgm.models.formal_d0b_ablation import FormalD0BAblation
+from torch import nn
+from cmgm.models.hetero_mixhop_model import HeteroMixHopCMGM
+from cmgm.models.candidate_moe_fusion import VARIANT as CANDIDATE
+from cmgm.models.global_mixture_fusion import GlobalTwoExpertMixture, VARIANT as GLOBAL
 from cmgm.models.model import MixHopPropagation
 from cmgm.models.switching_latent_transformer import LongMemoryTransformer, RegimeLatentTransition
 
-NAMES = ('w/o Spatial Branch', 'w/o Temporal Branch', 'w/o Spatial Temporal Attention',
-         'w/o Adaptive Graph', 'w/o EdgeAttnMixHop', 'w/o Relative Position Encoding',
-         'w/o Adaptive Regime Routing', 'w/o Regime-Specific Transitions',
-         'w/o Microstate', 'w/o Balanced Readout', 'w/o Adaptive Fusion', 'Full D0B')
-KEY = dict(zip(NAMES, ('no_spatial', 'no_temporal', 'no_spatial_temporal_attention',
-    'no_adaptive_graph', 'no_edge_attn_mixhop', 'no_rpe', 'no_adaptive_regime_routing',
-    'no_regime_specific_transition', 'no_microstate', 'no_balanced_readout', 'no_adaptive_fusion', 'full_d0b')))
-REUSE = dict(zip((NAMES[i] for i in (0,1,2,6,8,9,10,11)),
-    ('w/o Spatial Branch','w/o Temporal Branch','w/o TempWeighted','w/o Markov Switching',
-     'w/o Microstate','w/o Balanced Readout','w/o Adaptive Fusion Gate','FullD0B-Control')))
+FULL = 'Full Candidate-Aware 2-Expert MoE'
+NAMES = ('w/o Spatial Temporal Weighting', 'w/o Adaptive Graph', 'w/o EdgeAttnMixHop',
+         'w/o Relative Position Encoding', 'w/o Adaptive Regime Routing',
+         'w/o Regime-Specific Transitions', 'w/o Microstate', 'w/o Balanced Readout',
+         'w/o MoE Fusion', 'w/o Candidate-Aware Routing', FULL)
+KEY = dict(zip(NAMES, ('no_spatial_temporal_weighting', 'no_adaptive_graph', 'no_edge_attn_mixhop',
+    'no_rpe', 'no_adaptive_regime_routing', 'no_regime_specific_transition', 'no_microstate',
+    'no_balanced_readout', 'no_moe_fusion', 'no_candidate_aware_routing', 'full_candidate_2expert_moe')))
+REUSE = {FULL: CANDIDATE, 'w/o Candidate-Aware Routing': GLOBAL}
 NEW = tuple(n for n in NAMES if n not in REUSE)
 DEFINITIONS = dict(zip(NAMES, (
-    'h_fused=W_t h_temporal; spatial path inactive; original head',
-    'h_fused=W_s h_spatial; temporal path and Switch KL inactive; original head',
-    'H_pre=mean(H_seq,dim=1); graph and both EdgeAttnMixHop blocks retained',
-    'A=ones(N,N); graph learner inactive; both native EdgeAttnMixHop blocks retained',
-    'Same learned A into two ordinary MixHopPropagation(64,64,K=2,beta=.05) blocks',
-    'Zero BaseRPE bias; causal mask and complete Transformer retained',
-    'Uniform p/prior; three distinct generators retained; KL mathematically zero',
-    'Adaptive p and native KL retained; generator[0] shared across all three candidates',
-    'Effective post-normalization micro readout zero; original recurrence and KL retained',
-    'Bypass only long/micro LayerNorm; all readout projections retained',
-    'h_fused=.5 W_t h_temporal+.5 W_s h_spatial; original projections/head',
-    'Unmodified native switching_latent_balanced_readout')))
+    'H_pre=mean(H_seq,dim=1); remaining Candidate MoE Full unchanged',
+    'A=ones(N,N); graph learner inactive; both native EdgeAttnMixHop blocks and Candidate MoE retained',
+    'Same learned A into two ordinary MixHopPropagation(64,64,K=2,beta=.05); Candidate MoE retained',
+    'Zero BaseRPE bias; causal Transformer and Candidate MoE retained',
+    'Uniform p/prior; three distinct generators and Candidate MoE retained; KL mathematically zero',
+    'Adaptive p and native KL retained; G0 shared across three candidates; Candidate MoE retained',
+    'Post-normalization effective micro readout zero; recurrence, KL and Candidate MoE retained',
+    'Bypass only long/micro LayerNorm; all readout projections and Candidate MoE retained',
+    'Remove experts/router; Linear(128,64)([W_s h_s || W_t h_t]) into unchanged shared head',
+    'Exact same two experts, two zero-initialized global logits, softmax(2); no candidate router',
+    'Unmodified native switching_latent_balanced_candidate_2expert_moe')))
 
 
 class NoRPELongMemory(LongMemoryTransformer):
@@ -50,14 +51,36 @@ class SharedRegimeTransition(RegimeLatentTransition):
         return torch.einsum('bk,bkd->bd', probabilities, candidates), candidates
 
 
-class MainInnovationAblation(FormalD0BAblation):
+class MainInnovationAblation(HeteroMixHopCMGM):
     def __init__(self, name, data):
         if name not in NAMES:
             raise ValueError(name)
         # Construct every native module before any replacement, preserving shared RNG order.
-        super().__init__(REUSE.get(name, 'FullD0B-Control'), data)
+        mi=data['market_indices']
+        if mi['commodity'][1]-mi['commodity'][0]!=24:raise ValueError('Expected 24 ordered commodity targets')
+        super().__init__(data['n_nodes'],24,n_stock=mi['stock'][1]-mi['stock'][0],
+                         n_bond=mi['bond'][1]-mi['bond'][0],variant=CANDIDATE)
+        self.ablation_name=name;self.market_indices=mi;self.disable_switch_kl=False
+        self.components={}
         self.main_name = name
         branch = self.switching_latent_transformer
+        branch.formal_uniform_switching=name=='w/o Adaptive Regime Routing'
+        branch.formal_bypass_balance=name=='w/o Balanced Readout'
+        if name=='w/o MoE Fusion':
+            # Full construction (including experts/router) precedes this new Linear.
+            self.simple_fusion=nn.Linear(128,64)
+            del self.candidate_moe_fusion
+            self.variant=CANDIDATE+'_formal_linear_fusion'
+        elif name=='w/o Candidate-Aware Routing':
+            # Move initialized experts unchanged, without consuming any further RNG.
+            fusion=GlobalTwoExpertMixture.__new__(GlobalTwoExpertMixture)
+            nn.Module.__init__(fusion)
+            fusion.temporal_expert=self.candidate_moe_fusion.temporal_expert
+            fusion.interaction_expert=self.candidate_moe_fusion.interaction_expert
+            fusion.global_mixture_logits=nn.Parameter(torch.zeros(2))
+            self.global_mixture_fusion=fusion
+            del self.candidate_moe_fusion
+            self.variant=GLOBAL
         if name == 'w/o Relative Position Encoding':
             # Same existing module/parameters; only the overridable bias method changes.
             branch.long_memory.__class__ = NoRPELongMemory
@@ -66,6 +89,24 @@ class MainInnovationAblation(FormalD0BAblation):
         elif name == 'w/o EdgeAttnMixHop':
             self.ordinary_mixhop1 = MixHopPropagation(64,64,K=2,beta=.05)
             self.ordinary_mixhop2 = MixHopPropagation(64,64,K=2,beta=.05)
+
+    def forward(self,x,edge_index=None,edge_weight=None,debug=False):
+        hs,pre=self._temp_weighted_spatial(x,return_pre_nodes=True,
+            uniform_time=self.main_name=='w/o Spatial Temporal Weighting')
+        ht=self.switching_latent_transformer(x,
+            zero_readout_component='Z' if self.main_name=='w/o Microstate' else None)
+        s=self.gcn_proj(hs);t=self.lstm_proj(ht)
+        if self.main_name=='w/o MoE Fusion':
+            fused=self.simple_fusion(torch.cat([s,t],dim=-1))
+        elif self.main_name=='w/o Candidate-Aware Routing':
+            fused=self.global_mixture_fusion(s,t)
+        else:
+            fused=self.candidate_moe_fusion(s,t)
+        self.components={k:v.detach() for k,v in dict(h_spatial=hs,h_temporal=ht,H_pre=pre,s=s,t=t,fused=fused).items()}
+        return self.head(fused).reshape(len(x),self.n_horizons,self.n_commodities)
+
+    def auxiliary_loss(self):
+        return self.switching_latent_transformer.switch_loss()
 
     def _temp_weighted_spatial(self, x, return_nodes=False, return_pre_nodes=False,
                                uniform_time=False, bypass_graph=False):

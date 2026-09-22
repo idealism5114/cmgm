@@ -35,6 +35,10 @@ from cmgm.models.moe_fusion import VARIANT as MOE_VARIANT, BALANCE_COEFFICIENT, 
 
 from cmgm.models.candidate_moe_fusion import VARIANT as CANDIDATE_VARIANT, CandidateRoutingAccumulator
 
+from cmgm.models.utility_routed_moe import VARIANT as UTILITY_ROUTED_MOE_VARIANT, UtilityRoutingAccumulator
+
+from cmgm.models.global_mixture_fusion import VARIANT as GLOBAL_MIXTURE_VARIANT
+
 FIVE_DAY_ONLY_VARIANT = 'switching_latent_balanced_readout_5d_only'
 FIVE_DAY_OBJECTIVE_MULTIPLIER = 4.0
 GROUPED_VARIANT = 'switching_latent_balanced_readout_5_10_20'
@@ -165,8 +169,11 @@ def train_epoch(
     model.train()
     total_loss = 0.0
     num_batches = 0
+    global_mixture = getattr(model, 'variant', None) == GLOBAL_MIXTURE_VARIANT
+    utility = getattr(model, 'variant', None) == UTILITY_ROUTED_MOE_VARIANT
     candidate = getattr(model, 'variant', None) == CANDIDATE_VARIANT
     moe = getattr(model, 'variant', None) == MOE_VARIANT
+    utility_stats = UtilityRoutingAccumulator() if utility else None
     candidate_stats = CandidateRoutingAccumulator() if candidate else None
     moe_stats = RoutingAccumulator() if moe else None
     moe_losses = dict(prediction_loss=0., switch_loss=0., weighted_balance_loss=0., total_loss=0.) if moe else None
@@ -280,6 +287,16 @@ def train_epoch(
             switch_loss = _effective_switch_loss(model, switching_branch)
             loss = loss + switch_loss
 
+        if global_mixture and not torch.isfinite(loss):
+            raise FloatingPointError('Nonfinite Global Mixture training loss')
+
+        if utility:
+            route_loss, route_diag = model.utility_router_loss(y_batch)
+            loss = loss + route_loss
+            if not torch.isfinite(loss):
+                raise FloatingPointError('Implementation failure: nonfinite total utility MoE loss')
+            utility_stats.update(model, route_diag)
+
         if candidate:
             if not torch.isfinite(loss):
                 raise FloatingPointError('Nonfinite candidate MoE loss; stop')
@@ -338,6 +355,8 @@ def train_epoch(
         total_loss += loss.item()
         num_batches += 1
 
+    if utility:
+        model._last_train_utility = utility_stats.summary()
     if candidate:
         model._last_train_candidate = candidate_stats.summary()
     if moe:
@@ -378,8 +397,11 @@ def validate_epoch(
     model.eval()
     total_loss = 0.0
     num_batches = 0
+    global_mixture = getattr(model, 'variant', None) == GLOBAL_MIXTURE_VARIANT
+    utility = getattr(model, 'variant', None) == UTILITY_ROUTED_MOE_VARIANT
     candidate = getattr(model, 'variant', None) == CANDIDATE_VARIANT
     moe = getattr(model, 'variant', None) == MOE_VARIANT
+    utility_stats = UtilityRoutingAccumulator() if utility else None
     candidate_stats = CandidateRoutingAccumulator() if candidate else None
     moe_stats = RoutingAccumulator() if moe else None
     five_only = _is_five_day_only(model)
@@ -397,6 +419,8 @@ def validate_epoch(
         'switching_latent_balanced_residual_complementary_fusion',
         MOE_VARIANT,
         CANDIDATE_VARIANT,
+        GLOBAL_MIXTURE_VARIANT,
+        UTILITY_ROUTED_MOE_VARIANT,
         'switching_latent_balanced_pregnn_local_skip',
     )
 
@@ -459,6 +483,12 @@ def validate_epoch(
         if aux_pred is not None and y_batch.dim() == 3:
             loss = loss + criterion(aux_pred, y_batch)
 
+        if global_mixture and not torch.isfinite(loss):
+            raise FloatingPointError('Nonfinite Global Mixture validation loss')
+        if utility:
+            if not torch.isfinite(loss) or any(not torch.isfinite(v).all() for v in (pred, model._last_pred_T, model._last_pred_ST, model._last_utility_pi)):
+                raise FloatingPointError('Implementation failure: nonfinite utility MoE validation')
+            utility_stats.update(model)
         if candidate:
             candidate_stats.update(model.candidate_moe_fusion)
         if moe:
@@ -495,6 +525,8 @@ def validate_epoch(
     if spatial_secondary_val5:
         model._last_val5_diagnostic = dict(MAE=primary_abs/primary_count,
             MSE=primary_squared/primary_count, count=primary_count)
+    if utility:
+        model._last_val_utility = utility_stats.summary()
     if candidate:
         model._last_val_candidate = candidate_stats.summary()
     if moe:
@@ -562,6 +594,8 @@ def train(
         if getattr(model, 'disable_switch_kl', False):
             raise ValueError('TargetScaleHuber must retain switching KL')
 
+    global_mixture = getattr(model, 'variant', None) == GLOBAL_MIXTURE_VARIANT
+    utility = getattr(model, 'variant', None) == UTILITY_ROUTED_MOE_VARIANT
     candidate = getattr(model, 'variant', None) == CANDIDATE_VARIANT
     moe = getattr(model, 'variant', None) == MOE_VARIANT
     t0 = time.time()
@@ -596,6 +630,10 @@ def train(
         'switch_beta': [],
         'epoch_diagnostics': {},
     }
+    if global_mixture:
+        history['global_weight_history'] = []
+    if utility:
+        history['utility_routing_history'] = []
     if candidate:
         history['candidate_routing_history'] = []
     if moe:
@@ -641,6 +679,8 @@ def train(
         'switching_latent_balanced_residual_complementary_fusion',
         MOE_VARIANT,
         CANDIDATE_VARIANT,
+        GLOBAL_MIXTURE_VARIANT,
+        UTILITY_ROUTED_MOE_VARIANT,
         'switching_latent_balanced_pregnn_local_skip',
     )
     if spatial_secondary_val5:
@@ -681,6 +721,17 @@ def train(
         history['val_loss'].append(val_loss)
         history['lr_history'].append(current_lr)
         history['switch_beta'].append(current_switch_beta)
+        if global_mixture:
+            weights = model.global_mixture_fusion.weight_diagnostics()
+            # One end-of-epoch parameter snapshot shared by TRAIN and VAL.
+            row=dict(epoch=epoch, train=dict(weights), val=dict(weights),
+                     semantics='same end-of-epoch global parameters; not separate averages')
+            history['global_weight_history'].append(row)
+            print('[Global mixture] '+json.dumps(row), flush=True)
+        if utility:
+            utility_row=dict(epoch=epoch, train=dict(model._last_train_utility), val=dict(model._last_val_utility))
+            history['utility_routing_history'].append(utility_row)
+            print('[Utility routing] '+json.dumps(utility_row), flush=True)
         if candidate:
             candidate_row=dict(epoch=epoch, train=dict(model._last_train_candidate), val=dict(model._last_val_candidate))
             history['candidate_routing_history'].append(candidate_row)

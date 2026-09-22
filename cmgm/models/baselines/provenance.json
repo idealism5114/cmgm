@@ -1,0 +1,93 @@
+{
+  "MSGNet": {
+    "repository": "https://github.com/YoZhibo/MSGNet",
+    "commit": "953b8330a2ca469dab4955e804b46a61eb08a9c2",
+    "reference_files": [
+      {
+        "path": "models/MSGNet.py",
+        "url": "https://raw.githubusercontent.com/YoZhibo/MSGNet/953b8330a2ca469dab4955e804b46a61eb08a9c2/models/MSGNet.py",
+        "sha256": "08a5388ce828f3743ae2394c63a821b4b09758aa45702edc6560275183e469ea"
+      },
+      {
+        "path": "layers/MSGBlock.py",
+        "url": "https://raw.githubusercontent.com/YoZhibo/MSGNet/953b8330a2ca469dab4955e804b46a61eb08a9c2/layers/MSGBlock.py",
+        "sha256": "a545d558ca79cb2abce23f4352f2132fa42ee66aae36906f53db4b43df7a6d2a"
+      },
+      {
+        "path": "layers/Embed.py",
+        "url": "https://raw.githubusercontent.com/YoZhibo/MSGNet/953b8330a2ca469dab4955e804b46a61eb08a9c2/layers/Embed.py",
+        "sha256": "9448bacd680c0ce98f78aacad8587f4eea6263fbae484b6ec20fbcae17ddc6f8"
+      },
+      {
+        "path": "scripts/ETTh1.sh",
+        "url": "https://raw.githubusercontent.com/YoZhibo/MSGNet/953b8330a2ca469dab4955e804b46a61eb08a9c2/scripts/ETTh1.sh",
+        "sha256": "77c11e69ff1462138e988d3143dca36c987b91c6979e641a83b68bc757ee8f1f"
+      },
+      {
+        "path": "run_longExp.py",
+        "url": "https://raw.githubusercontent.com/YoZhibo/MSGNet/953b8330a2ca469dab4955e804b46a61eb08a9c2/run_longExp.py",
+        "sha256": "726cb8ffe120436039f330cf1e810e380e71697265a7d712e20fa88c16341977"
+      }
+    ],
+    "local_core": "cmgm/models/baselines/msgnet.py",
+    "adaptations": "cmgm/models/baselines/ADAPTATION_NOTES.md",
+    "configuration_reference": "scripts/ETTh1.sh + run_longExp.py defaults",
+    "exact_official_reproduction": false
+  },
+  "CrossGNN": {
+    "repository": "https://github.com/hqh0728/CrossGNN",
+    "commit": "0407abd085ee8342abe0bbe6de5b2ab17c44373c",
+    "reference_files": [
+      {
+        "path": "models/CrossGNN.py",
+        "url": "https://raw.githubusercontent.com/hqh0728/CrossGNN/0407abd085ee8342abe0bbe6de5b2ab17c44373c/models/CrossGNN.py",
+        "sha256": "23ebc4fd5bb56b082738f490cdded7cccdd06658024d68f4dd0659892b20ade5"
+      },
+      {
+        "path": "run_longExp.py",
+        "url": "https://raw.githubusercontent.com/hqh0728/CrossGNN/0407abd085ee8342abe0bbe6de5b2ab17c44373c/run_longExp.py",
+        "sha256": "9c3942103379698f39f34884e1abe6540b3a586d6d556d8926b381f7a12f5f07"
+      },
+      {
+        "path": "README.md",
+        "url": "https://raw.githubusercontent.com/hqh0728/CrossGNN/0407abd085ee8342abe0bbe6de5b2ab17c44373c/README.md",
+        "sha256": "0c18f7e5ae9d9680c8e9a7ed6779e550e4acdc4d09925ebfc49c9f188768af56"
+      }
+    ],
+    "local_core": "cmgm/models/baselines/crossgnn.py",
+    "adaptations": "cmgm/models/baselines/ADAPTATION_NOTES.md",
+    "configuration_reference": "run_longExp.py defaults",
+    "exact_official_reproduction": false
+  },
+  "GraphWaveNet": {
+    "repository": "https://github.com/nnzhan/Graph-WaveNet",
+    "commit": "6b162e80c59a1d494809252eca055cff93dc66b1",
+    "license": "MIT",
+    "files": {
+      "model.py": {
+        "upstream_sha256": "f357319260657716c18916d691d31179e2380dcb882b9c41556c9a55912f1059",
+        "local_sha256": "f4a1692171791746cf103f29e63c74d637b49945f4a4cf082b037d7e42550f86"
+      },
+      "LICENSE": {
+        "upstream_sha256": "4ca2e57e06fec8b21ea58f1e19f6805052867be62de900ee9b12580bf1a033d8",
+        "local_sha256": "4ca2e57e06fec8b21ea58f1e19f6805052867be62de900ee9b12580bf1a033d8"
+      },
+      "README.md": {
+        "upstream_sha256": "2a8a15d0667c9d59b1fe98a9257cda4378b65dba3690df7f777936515f56eac9",
+        "local_sha256": "2a8a15d0667c9d59b1fe98a9257cda4378b65dba3690df7f777936515f56eac9"
+      }
+    },
+    "local_core": "cmgm/models/baselines/graph_wavenet.py",
+    "adaptations": "cmgm/models/baselines/ADAPTATION_NOTES.md",
+    "configuration_reference": "official gwnet defaults + requested dropout=.1 / input21 / output4 / node28",
+    "exact_official_reproduction": false
+  },
+  "MTGNN": {
+    "local_core": "cmgm/models/comparison_baselines.py:MTGNNBaseline",
+    "implementation": "unchanged project MTGNN-style; not official reproduction",
+    "primitives": [
+      "cmgm.graph.adaptive_graph.AdaptiveGraphLearner",
+      "cmgm.models.model.MixHopPropagation"
+    ]
+  }
+}
