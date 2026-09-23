@@ -4,7 +4,7 @@ from torch.nn import functional as F
 from torch import nn
 from cmgm.models.hetero_mixhop_model import HeteroMixHopCMGM
 from cmgm.models.candidate_moe_fusion import VARIANT as CANDIDATE
-from cmgm.models.global_mixture_fusion import GlobalTwoExpertMixture, VARIANT as GLOBAL
+from cmgm.models.global_mixture_fusion import GlobalTwoExpertMixture, VARIANT as GLOBAL, TS_VARIANT
 from cmgm.models.model import MixHopPropagation
 from cmgm.models.switching_latent_transformer import LongMemoryTransformer, RegimeLatentTransition
 
@@ -21,7 +21,7 @@ NEW = tuple(n for n in NAMES if n not in REUSE)
 DEFINITIONS = dict(zip(NAMES, (
     'H_pre=mean(H_seq,dim=1); remaining Candidate MoE Full unchanged',
     'A=ones(N,N); graph learner inactive; both native EdgeAttnMixHop blocks and Candidate MoE retained',
-    'Same learned A into two ordinary MixHopPropagation(64,64,K=2,beta=.05); Candidate MoE retained',
+    'Same learned directed A into two single-hop GCN(64,64) layers: D^(-1/2)(A+I)D^(-1/2)H W + b; Candidate MoE retained',
     'Zero BaseRPE bias; causal Transformer and Candidate MoE retained',
     'Uniform p/prior; three distinct generators and Candidate MoE retained; KL mathematically zero',
     'Adaptive p and native KL retained; G0 shared across three candidates; Candidate MoE retained',
@@ -30,6 +30,43 @@ DEFINITIONS = dict(zip(NAMES, (
     'Remove experts/router; Linear(128,64)([W_s h_s || W_t h_t]) into unchanged shared head',
     'Exact same two experts, two zero-initialized global logits, softmax(2); no candidate router',
     'Unmodified native switching_latent_balanced_candidate_2expert_moe')))
+
+
+GLOBAL_FULL = 'Full Global Dual-Expert Mixture'
+GLOBAL_NAMES = ('w/o Adaptive Regime Routing', 'w/o Regime-Specific Transitions',
+                'w/o Microstate', GLOBAL_FULL)
+GLOBAL_DEFINITIONS = {n: DEFINITIONS[n].replace('Candidate MoE', 'Global Dual-Expert Mixture')
+                      for n in GLOBAL_NAMES[:-1]}
+GLOBAL_DEFINITIONS[GLOBAL_FULL] = 'Unmodified native ' + GLOBAL
+KEY[GLOBAL_FULL] = 'full_global_dual_expert_mixture'
+REUSE[GLOBAL_FULL] = GLOBAL
+
+
+TS_FULL = 'Full T+S Global Dual-Expert Mixture'
+TS_NAMES = (*GLOBAL_NAMES[:-1], 'w/o EdgeAttnMixHop', TS_FULL)
+TS_DEFINITIONS = {n: GLOBAL_DEFINITIONS[n].replace('Global Dual-Expert Mixture', 'T+S Global Dual-Expert Mixture')
+                  for n in GLOBAL_NAMES[:-1]}
+TS_DEFINITIONS['w/o EdgeAttnMixHop'] = 'Same learned A into two ordinary MixHopPropagation(64,64,K=2,beta=.05) blocks; branch-specific T+S global experts retained'
+TS_DEFINITIONS[TS_FULL] = 'Unmodified native ' + TS_VARIANT
+KEY[TS_FULL] = 'full_ts_global_dual_expert_mixture'
+
+
+class StandardGraphPropagation(nn.Module):
+    """Single-hop GCN aggregation on the unchanged learned weighted adjacency.
+
+    A[i,j] sends node j into i. Add self-loops and use row-degree two-sided
+    normalization; do NOT symmetrize the learned directed graph itself.
+    No attention, hop concatenation/summation, beta recurrence or residual.
+    """
+    def __init__(self,in_dim=64,out_dim=64):
+        super().__init__()
+        self.linear=nn.Linear(in_dim,out_dim)
+
+    def forward(self,x,A):
+        augmented=A+torch.eye(A.shape[0],device=A.device,dtype=A.dtype)
+        inv_degree=augmented.sum(dim=1).clamp_min(1e-8).rsqrt()
+        normalized=inv_degree[:,None]*augmented*inv_degree[None,:]
+        return self.linear(normalized @ x)
 
 
 class NoRPELongMemory(LongMemoryTransformer):
@@ -52,14 +89,16 @@ class SharedRegimeTransition(RegimeLatentTransition):
 
 
 class MainInnovationAblation(HeteroMixHopCMGM):
-    def __init__(self, name, data):
-        if name not in NAMES:
+    def __init__(self, name, data, mode='candidate'):
+        if mode not in ('candidate','global-temporal','ts-global-expert'):raise ValueError(mode)
+        if name not in (TS_NAMES if mode=='ts-global-expert' else GLOBAL_NAMES if mode=='global-temporal' else NAMES):
             raise ValueError(name)
         # Construct every native module before any replacement, preserving shared RNG order.
         mi=data['market_indices']
         if mi['commodity'][1]-mi['commodity'][0]!=24:raise ValueError('Expected 24 ordered commodity targets')
         super().__init__(data['n_nodes'],24,n_stock=mi['stock'][1]-mi['stock'][0],
-                         n_bond=mi['bond'][1]-mi['bond'][0],variant=CANDIDATE)
+                         n_bond=mi['bond'][1]-mi['bond'][0],variant=TS_VARIANT if mode=='ts-global-expert' else GLOBAL if mode=='global-temporal' else CANDIDATE)
+        self.ablation_mode=mode
         self.ablation_name=name;self.market_indices=mi;self.disable_switch_kl=False
         self.components={}
         self.main_name = name
@@ -87,8 +126,12 @@ class MainInnovationAblation(HeteroMixHopCMGM):
         elif name == 'w/o Regime-Specific Transitions':
             branch.latent_transition.__class__ = SharedRegimeTransition
         elif name == 'w/o EdgeAttnMixHop':
-            self.ordinary_mixhop1 = MixHopPropagation(64,64,K=2,beta=.05)
-            self.ordinary_mixhop2 = MixHopPropagation(64,64,K=2,beta=.05)
+            if mode=='ts-global-expert':
+                self.ordinary_mixhop1=MixHopPropagation(64,64,K=2,beta=.05)
+                self.ordinary_mixhop2=MixHopPropagation(64,64,K=2,beta=.05)
+            else:
+                self.standard_gcn1 = StandardGraphPropagation(64,64)
+                self.standard_gcn2 = StandardGraphPropagation(64,64)
 
     def forward(self,x,edge_index=None,edge_weight=None,debug=False):
         hs,pre=self._temp_weighted_spatial(x,return_pre_nodes=True,
@@ -98,7 +141,7 @@ class MainInnovationAblation(HeteroMixHopCMGM):
         s=self.gcn_proj(hs);t=self.lstm_proj(ht)
         if self.main_name=='w/o MoE Fusion':
             fused=self.simple_fusion(torch.cat([s,t],dim=-1))
-        elif self.main_name=='w/o Candidate-Aware Routing':
+        elif hasattr(self,'global_mixture_fusion'):
             fused=self.global_mixture_fusion(s,t)
         else:
             fused=self.candidate_moe_fusion(s,t)
@@ -124,7 +167,10 @@ class MainInnovationAblation(HeteroMixHopCMGM):
             h = self.attn_mixhop2(F.relu(self.attn_mixhop1(pre, A)), A)
         else:
             A = self.graph_learner()
-            h = self.ordinary_mixhop2(F.relu(self.ordinary_mixhop1(pre, A)), A)
+            if self.ablation_mode=='ts-global-expert':
+                h=self.ordinary_mixhop2(F.relu(self.ordinary_mixhop1(pre,A)),A)
+            else:
+                h = self.standard_gcn2(F.relu(self.standard_gcn1(pre, A)), A)
         self.last_ablation_adjacency = A.detach()
         h = self.gcn_norm(h)
         pooled = self.type_pool(h)

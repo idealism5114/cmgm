@@ -37,7 +37,7 @@ from cmgm.models.candidate_moe_fusion import VARIANT as CANDIDATE_VARIANT, Candi
 
 from cmgm.models.utility_routed_moe import VARIANT as UTILITY_ROUTED_MOE_VARIANT, UtilityRoutingAccumulator
 
-from cmgm.models.global_mixture_fusion import VARIANT as GLOBAL_MIXTURE_VARIANT
+from cmgm.models.global_mixture_fusion import VARIANT as GLOBAL_MIXTURE_VARIANT, TS_VARIANT
 
 FIVE_DAY_ONLY_VARIANT = 'switching_latent_balanced_readout_5d_only'
 FIVE_DAY_OBJECTIVE_MULTIPLIER = 4.0
@@ -169,7 +169,7 @@ def train_epoch(
     model.train()
     total_loss = 0.0
     num_batches = 0
-    global_mixture = getattr(model, 'variant', None) == GLOBAL_MIXTURE_VARIANT
+    global_mixture = getattr(model, 'variant', None) in (GLOBAL_MIXTURE_VARIANT, TS_VARIANT)
     utility = getattr(model, 'variant', None) == UTILITY_ROUTED_MOE_VARIANT
     candidate = getattr(model, 'variant', None) == CANDIDATE_VARIANT
     moe = getattr(model, 'variant', None) == MOE_VARIANT
@@ -397,7 +397,7 @@ def validate_epoch(
     model.eval()
     total_loss = 0.0
     num_batches = 0
-    global_mixture = getattr(model, 'variant', None) == GLOBAL_MIXTURE_VARIANT
+    global_mixture = getattr(model, 'variant', None) in (GLOBAL_MIXTURE_VARIANT, TS_VARIANT)
     utility = getattr(model, 'variant', None) == UTILITY_ROUTED_MOE_VARIANT
     candidate = getattr(model, 'variant', None) == CANDIDATE_VARIANT
     moe = getattr(model, 'variant', None) == MOE_VARIANT
@@ -420,6 +420,7 @@ def validate_epoch(
         MOE_VARIANT,
         CANDIDATE_VARIANT,
         GLOBAL_MIXTURE_VARIANT,
+        TS_VARIANT,
         UTILITY_ROUTED_MOE_VARIANT,
         'switching_latent_balanced_pregnn_local_skip',
     )
@@ -594,7 +595,7 @@ def train(
         if getattr(model, 'disable_switch_kl', False):
             raise ValueError('TargetScaleHuber must retain switching KL')
 
-    global_mixture = getattr(model, 'variant', None) == GLOBAL_MIXTURE_VARIANT
+    global_mixture = getattr(model, 'variant', None) in (GLOBAL_MIXTURE_VARIANT, TS_VARIANT)
     utility = getattr(model, 'variant', None) == UTILITY_ROUTED_MOE_VARIANT
     candidate = getattr(model, 'variant', None) == CANDIDATE_VARIANT
     moe = getattr(model, 'variant', None) == MOE_VARIANT
@@ -680,6 +681,7 @@ def train(
         MOE_VARIANT,
         CANDIDATE_VARIANT,
         GLOBAL_MIXTURE_VARIANT,
+        TS_VARIANT,
         UTILITY_ROUTED_MOE_VARIANT,
         'switching_latent_balanced_pregnn_local_skip',
     )

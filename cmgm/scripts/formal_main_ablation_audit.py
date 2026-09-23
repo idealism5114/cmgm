@@ -1,6 +1,6 @@
 """Candidate-MoE shared initialization, causal and single-mechanism audits."""
 import torch
-from cmgm.models.formal_d0b_main_ablation import MainInnovationAblation,FULL,CANDIDATE,GLOBAL
+from cmgm.models.formal_d0b_main_ablation import MainInnovationAblation,FULL,CANDIDATE,GLOBAL,GLOBAL_FULL,TS_VARIANT,TS_FULL
 from cmgm.models.hetero_mixhop_model import HeteroMixHopCMGM
 from cmgm.scripts.baseline_protocol import seed_all,prediction_loss
 
@@ -11,9 +11,9 @@ def native(data,variant=CANDIDATE):
         n_bond=mi['bond'][1]-mi['bond'][0],variant=variant)
 
 
-def init_audit(name,data,device,x):
-    seed_all(42);full=native(data).to(device)
-    seed_all(42);model=MainInnovationAblation(name,data).to(device)
+def init_audit(name,data,device,x,mode='candidate'):
+    seed_all(42);full=native(data,TS_VARIANT if mode=='ts-global-expert' else GLOBAL if mode=='global-temporal' else CANDIDATE).to(device)
+    seed_all(42);model=MainInnovationAblation(name,data,mode=mode).to(device)
     a=dict(full.named_parameters());b=dict(model.named_parameters());diffs={};removed=[];mismatch=[]
     for key,p in a.items():
         target=key
@@ -27,22 +27,30 @@ def init_audit(name,data,device,x):
         if q is None or p.shape!=q.shape:mismatch.append(key);continue
         diffs[key]=float((p-q).detach().abs().max())
         if diffs[key]!=0:mismatch.append(key)
-    expected_extra=('ordinary_mixhop',) if name=='w/o EdgeAttnMixHop' else ('simple_fusion.',) if name=='w/o MoE Fusion' else ('global_mixture_fusion.',) if name=='w/o Candidate-Aware Routing' else ()
+    expected_extra=(('ordinary_mixhop',) if mode=='ts-global-expert' else ('standard_gcn',)) if name=='w/o EdgeAttnMixHop' else ('simple_fusion.',) if name=='w/o MoE Fusion' else ('global_mixture_fusion.',) if name=='w/o Candidate-Aware Routing' else ()
     extra=sorted(set(b)-set(a));unexpected=[k for k in extra if not k.startswith(expected_extra)]
     check=dict(shared_parameter_initial_max_abs_diff=max(diffs.values()),shared_parameter_count=sum(a[k].numel() for k in diffs),
         mismatch_count=len(mismatch)+len(unexpected),mismatches=mismatch,unexpected=unexpected,removed_tensors=removed,extra_tensors=extra,
         full_total_instantiated=sum(p.numel() for p in a.values()),total_instantiated=sum(p.numel() for p in b.values()),
         shared_differences=diffs,PASS=not mismatch and not unexpected)
-    if name in (FULL,'w/o Candidate-Aware Routing'):
-        seed_all(42);reference=native(data,GLOBAL if name!='Full Candidate-Aware 2-Expert MoE' else CANDIDATE).to(device)
+    if name in (FULL,GLOBAL_FULL,TS_FULL,'w/o Candidate-Aware Routing'):
+        seed_all(42);reference=native(data,TS_VARIANT if name==TS_FULL else GLOBAL if name!=FULL else CANDIDATE).to(device)
         reference.eval();model.eval()
         state_ok=all(torch.equal(v,model.state_dict()[k]) for k,v in reference.state_dict().items()) and reference.state_dict().keys()==model.state_dict().keys()
         with torch.no_grad():diff=float((reference(x)-model(x)).abs().max())
         check.update(native_state_exact=state_ok,native_forward_max_diff=diff)
         check['PASS'] &= state_ok and diff<1e-7
-    if name=='w/o Candidate-Aware Routing':
+    if hasattr(model,'global_mixture_fusion'):
         check['initial_alpha_max_error']=float((model.global_mixture_fusion.global_mixture_logits.softmax(0)-.5).abs().max())
         check['PASS'] &= check['initial_alpha_max_error']==0
+    if mode=='ts-global-expert':
+        seed_all(42);old=native(data,GLOBAL).to(device)
+        old_params=dict(old.named_parameters())
+        shared={k:float((p-old_params[k]).detach().abs().max()) for k,p in model.named_parameters()
+                if k in old_params and p.shape==old_params[k].shape}
+        check['tst_shared_initialization']=dict(max_abs_diff=max(shared.values()),mismatch_count=sum(v!=0 for v in shared.values()),
+            parameter_count=sum(dict(model.named_parameters())[k].numel() for k in shared),PASS=all(v==0 for v in shared.values()))
+        check['PASS'] &= check['tst_shared_initialization']['PASS']
     return model,check
 
 
@@ -81,6 +89,7 @@ def _base_sanity(m,x,y):
             checks['uniform_time_error']=err(comps['H_pre'],seq.mean(dim=1));checks['score_bypass']=calls['temporal_score']==0
         if name=='w/o Adaptive Regime Routing':
             checks['uniform_p_error']=err(b.last_regime_probabilities,torch.full_like(b.last_regime_probabilities,1/3))
+            checks['uniform_prior_error']=err(b.last_regime_priors,torch.full_like(b.last_regime_priors,1/3))
             checks['three_generators']=all(calls[f'G{i}']==x.shape[1] for i in range(3))
         if name=='w/o Microstate':checks['zero_micro']=float(b.last_h_micro_effective.abs().max())
         if name=='w/o Balanced Readout':checks['LN_bypass']=calls['LN_H']==calls['LN_Z']==0
@@ -97,7 +106,7 @@ def _base_sanity(m,x,y):
     checks['switch_KL']=dict(value=float(aux.detach()),requires_grad=aux.requires_grad,beta=b.regime_filter.current_beta)
     if name=='w/o Adaptive Regime Routing':checks['KL_zero']=abs(float(aux.detach()))<1e-8
     b.set_epoch(epoch)
-    errors=[checks[k] for k in ('batch_permutation','single_sample','prediction_observed_prefix','uniform_time_error','uniform_p_error','zero_micro') if k in checks]+list(checks['causal_prefix'].values())
+    errors=[checks[k] for k in ('batch_permutation','single_sample','prediction_observed_prefix','uniform_time_error','uniform_p_error','uniform_prior_error','zero_micro') if k in checks]+list(checks['causal_prefix'].values())
     flags=[v for v in checks.values() if isinstance(v,bool)]
     checks['PASS']=all(flags) and pred.shape==(len(x),4,24) and max(errors)<1e-6
     return checks
@@ -111,13 +120,14 @@ def sanity(model,x,y):
              **{f'transformer{i}.{p}':getattr(layer.attention,p) for i,layer in enumerate(b.long_memory.layers) for p in ('q','k','v')},
              'long_readout':b.long_memory_readout,'micro_readout':b.micro_state_readout,'state_readout':b.state_readout}
     for layer in (1,2):
-        key=f'ordinary_mixhop{layer}'
-        if hasattr(model,key):tracked[key]=getattr(model,key)
+        for prefix in ('standard_gcn','ordinary_mixhop'):
+            key=f'{prefix}{layer}'
+            if hasattr(model,key):tracked[key]=getattr(model,key)
     for key,module in tracked.items():
         calls[key]=0
         def hook(module,inputs,output,key=key):
             calls[key]+=1
-            if key.startswith('ordinary_mixhop'):adjacencies.append(inputs[1])
+            if key.startswith(('standard_gcn','ordinary_mixhop')):adjacencies.append(inputs[1])
         handles.append(module.register_forward_hook(hook))
     if name=='w/o Adaptive Graph':
         for layer in (model.attn_mixhop1,model.attn_mixhop2):layer.capture_attention=True
@@ -133,20 +143,37 @@ def sanity(model,x,y):
                 checks['simple_fusion_parameter_count']=sum(p.numel() for p in model.simple_fusion.parameters())
                 checks['fusion_error']=float((c['fused']-model.simple_fusion(torch.cat([c['s'],c['t']],-1))).abs().max())
             else:
-                static=name=='w/o Candidate-Aware Routing'
+                static=hasattr(model,'global_mixture_fusion')
                 f=model.global_mixture_fusion if static else model.candidate_moe_fusion
                 d={k:v.clone() for k,v in f.last.items()}
-                checks['expert_shapes']=all(d[k].shape==(len(x),64) for k in ('e_T','e_ST'))
+                ts=hasattr(f,'spatial_expert')
+                second='e_S' if ts else 'e_ST'
+                checks['expert_shapes']=all(d[k].shape==(len(x),64) for k in ('e_T',second))
                 checks['temporal_wiring_error']=float((d['e_T']-f.temporal_expert(c['t'])).abs().max())
-                checks['interaction_wiring_error']=float((d['e_ST']-f.interaction_expert(torch.cat([c['s'],c['t']],-1))).abs().max())
+                if ts:
+                    from cmgm.models.candidate_moe_fusion import SpatialTemporalInteractionExpert
+                    checks['spatial_wiring_error']=float((d['e_S']-f.spatial_expert(c['s'])).abs().max())
+                    checks['temporal_residual_error']=float((d['e_T']-c['t']-f.temporal_expert.mlp(c['t'])).abs().max())
+                    checks['spatial_residual_error']=float((d['e_S']-c['s']-f.spatial_expert.mlp(c['s'])).abs().max())
+                    counts=[sum(p.numel() for p in expert.parameters()) for expert in (f.temporal_expert,f.spatial_expert)]
+                    checks['expert_parameters']=dict(Temporal=counts[0],Spatial=counts[1])
+                    checks['expert_symmetry']=counts[0]==counts[1] and repr(f.temporal_expert.mlp)==repr(f.spatial_expert.mlp)
+                    checks['no_interaction_expert']=not hasattr(f,'interaction_expert') and not any(isinstance(v,SpatialTemporalInteractionExpert) for v in f.modules())
+                    f(c['s']+2,c['t']);checks['temporal_independent_of_spatial_error']=float((f.last['e_T']-d['e_T']).abs().max())
+                    f(c['s'],c['t']+2);checks['spatial_independent_of_temporal_error']=float((f.last['e_S']-d['e_S']).abs().max())
+                    checks['branch_specific_expert_wiring']=all(checks[k]<1e-6 for k in ('temporal_wiring_error','spatial_wiring_error','temporal_independent_of_spatial_error','spatial_independent_of_temporal_error'))
+                else:
+                    checks['interaction_wiring_error']=float((d['e_ST']-f.interaction_expert(torch.cat([c['s'],c['t']],-1))).abs().max())
                 weights=d['alpha'] if static else d['pi']
                 checks['weight_shape']=weights.shape==((2,) if static else (len(x),2))
                 checks['weight_sum_error']=float((weights.sum(-1)-1).abs().max())
-                expected=(weights.reshape(-1,2,1)*torch.stack([d['e_T'],d['e_ST']],1)).sum(1)
+                expected=(weights.reshape(-1,2,1)*torch.stack([d['e_T'],d[second]],1)).sum(1)
                 checks['fusion_error']=float((c['fused']-expected).abs().max())
                 if static:
                     checks['candidate_router_absent']=not hasattr(f,'router') and not hasattr(model,'candidate_moe_fusion')
                     checks['global_logits_shape']=f.global_mixture_logits.shape==(2,)
+                    checks['global_logits_trainable']=f.global_mixture_logits.requires_grad
+                    checks['router_parameters_absent']=not any('router' in k or 'temporal_norm' in k or 'interaction_norm' in k for k,_ in f.named_parameters())
                     model(x*2+1);checks['input_invariant_alpha_error']=float((f.last['alpha']-weights).abs().max())
                 else:
                     perm=torch.arange(len(x)-1,-1,-1,device=x.device);model(x[perm])
@@ -154,6 +181,8 @@ def sanity(model,x,y):
                     model(x[:1]);checks['pi_single_sample_error']=float((f.last['pi']-weights[:1]).abs().max())
                 model(x)
         active=result['parameter_counts']['active_parameter_names']
+        if hasattr(model,'global_mixture_fusion'):
+            checks['global_logits_prediction_connected']='global_mixture_fusion.global_mixture_logits' in active
         cc=result['call_counts']
         if name=='w/o Adaptive Graph':
             checks['ones_error']=float((model.last_ablation_adjacency-1).abs().max())
@@ -167,7 +196,15 @@ def sanity(model,x,y):
         elif name=='w/o EdgeAttnMixHop':
             checks['learned_graph_active']=cc['graph']>0 and any(k.startswith('graph_learner') for k in active)
             checks['same_A_both_blocks']=len(adjacencies)==2 and adjacencies[0] is adjacencies[1] and torch.equal(adjacencies[0].detach(),model.last_ablation_adjacency)
-            checks['ordinary_blocks_active']=calls['ordinary_mixhop1']==calls['ordinary_mixhop2']==1
+            if model.ablation_mode=='ts-global-expert':
+                from cmgm.models.model import MixHopPropagation
+                checks['ordinary_mixhop_blocks_active']=calls['ordinary_mixhop1']==calls['ordinary_mixhop2']==1
+                checks['ordinary_mixhop_exact']=all(type(getattr(model,f'ordinary_mixhop{i}')) is MixHopPropagation and getattr(model,f'ordinary_mixhop{i}').K==2 and getattr(model,f'ordinary_mixhop{i}').beta==.05 for i in (1,2))
+                checks['no_gcn_replacement']=not hasattr(model,'standard_gcn1')
+            else:
+                checks['standard_gcn_blocks_active']=calls['standard_gcn1']==calls['standard_gcn2']==1
+                checks['single_hop_linear_only']=all(type(getattr(model,f'standard_gcn{i}').linear) is torch.nn.Linear and len(list(getattr(model,f'standard_gcn{i}').children()))==1 for i in (1,2))
+                checks['no_mixhop_modules']=not any('ordinary_mixhop' in k for k,_ in model.named_modules())
             checks['edge_qkv_inactive']=all(calls[f'edge{l}.{p}']==0 for l in (1,2) for p in ('q','k','v')) and not any(k.startswith('attn_mixhop') for k in active)
         elif name=='w/o Relative Position Encoding':
             checks['rpe_bias_error']=float(b.long_memory.last_base_relative_bias.abs().max())
@@ -186,6 +223,9 @@ def sanity(model,x,y):
         elif name=='w/o Adaptive Regime Routing':
             gs=b.latent_transition.generators
             checks['generator_parameters_distinct']=all(not torch.equal(gs[0][0].weight,g[0].weight) for g in gs[1:])
+        elif name=='w/o Microstate':
+            checks['recurrence_retained']=all(cc[f'G{i}']==x.shape[1] for i in range(3))
+            checks['KL_retained']=result['switch_KL']['requires_grad'] and result['switch_KL']['beta']==.0005
         elif name=='w/o Balanced Readout':
             checks['readout_projections_active']=all(calls[k]>0 for k in ('long_readout','micro_readout','state_readout'))
         flags=[v for v in checks.values() if isinstance(v,bool)]

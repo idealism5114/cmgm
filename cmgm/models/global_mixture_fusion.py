@@ -27,3 +27,37 @@ class GlobalTwoExpertMixture(nn.Module):
     def weight_diagnostics(self):
         a=self.global_mixture_logits.softmax(0);l=self.global_mixture_logits
         return dict(alpha_T=float(a[0]),alpha_ST=float(a[1]),global_logit_T=float(l[0]),global_logit_ST=float(l[1]))
+
+
+TS_VARIANT = 'switching_latent_balanced_ts_2expert_global_mixture'
+
+
+class SpatialResidualExpert(TemporalResidualExpert):
+    """Same residual MLP definition; a separate instance receiving only s."""
+    def forward(self,s):
+        return s+self.mlp(s)
+
+
+class GlobalTSExpertMixture(nn.Module):
+    """Branch-specific T/S residual experts with a single global soft mixture."""
+    def __init__(self):
+        super().__init__()
+        self.temporal_expert=TemporalResidualExpert()
+        self.spatial_expert=SpatialResidualExpert()
+        self.global_mixture_logits=nn.Parameter(torch.zeros(2))
+
+    def forward(self,s,t):
+        if s.ndim!=2 or s.shape!=t.shape or s.shape[-1]!=64:
+            raise ValueError('Expected B×64 projected branches')
+        e_t=self.temporal_expert(t)
+        e_s=self.spatial_expert(s)
+        alpha=self.global_mixture_logits.softmax(dim=0)
+        fused=(alpha.view(1,2,1)*torch.stack([e_t,e_s],dim=1)).sum(dim=1)
+        self.last={k:v.detach() for k,v in dict(s=s,t=t,e_T=e_t,e_S=e_s,alpha=alpha,
+                   global_logits=self.global_mixture_logits,fused=fused).items()}
+        return fused
+
+    @torch.no_grad()
+    def weight_diagnostics(self):
+        a=self.global_mixture_logits.softmax(0);l=self.global_mixture_logits
+        return dict(alpha_T=float(a[0]),alpha_S=float(a[1]),global_logit_T=float(l[0]),global_logit_S=float(l[1]))

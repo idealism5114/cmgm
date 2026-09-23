@@ -771,6 +771,7 @@ class HeteroMixHopCMGM(nn.Module):
             "switching_latent_balanced_moe_fusion",
             "switching_latent_balanced_candidate_2expert_moe",
             "switching_latent_balanced_candidate_2expert_global_mixture",
+            "switching_latent_balanced_ts_2expert_global_mixture",
             "switching_latent_balanced_utility_routed_moe",
             "switching_latent_balanced_pregnn_local_skip",
             "switching_latent_balanced_qknorm_graph_attention",
@@ -850,6 +851,7 @@ class HeteroMixHopCMGM(nn.Module):
                                                "switching_latent_balanced_moe_fusion",
                                                "switching_latent_balanced_candidate_2expert_moe",
                                                "switching_latent_balanced_candidate_2expert_global_mixture",
+                                               "switching_latent_balanced_ts_2expert_global_mixture",
                                                "switching_latent_balanced_utility_routed_moe",
                                                "switching_latent_balanced_pregnn_local_skip",
                                                "switching_latent_balanced_qknorm_graph_attention",
@@ -894,6 +896,7 @@ class HeteroMixHopCMGM(nn.Module):
                                            "switching_latent_balanced_moe_fusion",
                                            "switching_latent_balanced_candidate_2expert_moe",
                                            "switching_latent_balanced_candidate_2expert_global_mixture",
+                                           "switching_latent_balanced_ts_2expert_global_mixture",
                                            "switching_latent_balanced_utility_routed_moe",
                                            "switching_latent_balanced_pregnn_local_skip",
                                            "switching_latent_balanced_qknorm_graph_attention",
@@ -1154,6 +1157,7 @@ class HeteroMixHopCMGM(nn.Module):
                              "switching_latent_balanced_moe_fusion",
                              "switching_latent_balanced_candidate_2expert_moe",
                              "switching_latent_balanced_candidate_2expert_global_mixture",
+                             "switching_latent_balanced_ts_2expert_global_mixture",
                              "switching_latent_balanced_utility_routed_moe",
                              "switching_latent_balanced_pregnn_local_skip",
                              "switching_latent_balanced_qknorm_graph_attention",
@@ -1347,6 +1351,7 @@ class HeteroMixHopCMGM(nn.Module):
             "switching_latent_balanced_moe_fusion",
             "switching_latent_balanced_candidate_2expert_moe",
             "switching_latent_balanced_candidate_2expert_global_mixture",
+            "switching_latent_balanced_ts_2expert_global_mixture",
             "switching_latent_balanced_utility_routed_moe",
             "switching_latent_balanced_pregnn_local_skip",
             "switching_latent_balanced_qknorm_graph_attention",
@@ -1529,6 +1534,11 @@ class HeteroMixHopCMGM(nn.Module):
             from cmgm.models.global_mixture_fusion import GlobalTwoExpertMixture
             del self.gate_fc
             self.global_mixture_fusion = GlobalTwoExpertMixture()
+
+        if variant == "switching_latent_balanced_ts_2expert_global_mixture":
+            from cmgm.models.global_mixture_fusion import GlobalTSExpertMixture
+            del self.gate_fc
+            self.global_mixture_fusion = GlobalTSExpertMixture()
 
     def utility_router_loss(self, target):
         from cmgm.models.utility_routed_moe import supervised_router_loss
@@ -2515,7 +2525,7 @@ class HeteroMixHopCMGM(nn.Module):
             if return_fused:
                 raise ValueError("Utility MoE mixes predictions; no shared fused-head representation exists")
             return pred
-        if self.variant == "switching_latent_balanced_candidate_2expert_global_mixture":
+        if self.variant in ("switching_latent_balanced_candidate_2expert_global_mixture", "switching_latent_balanced_ts_2expert_global_mixture"):
             fused = self.global_mixture_fusion(self.gcn_proj(h_spatial), self.lstm_proj(h_temporal))
             pred = self.head(fused).view(batch_size, self.n_horizons, self.n_commodities)
             self.global_mixture_fusion.last.update(h_s=h_spatial.detach(), h_t=h_temporal.detach())
@@ -2921,6 +2931,7 @@ class HeteroMixHopCMGM(nn.Module):
             "switching_latent_balanced_moe_fusion",
             "switching_latent_balanced_candidate_2expert_moe",
             "switching_latent_balanced_candidate_2expert_global_mixture",
+            "switching_latent_balanced_ts_2expert_global_mixture",
             "switching_latent_balanced_utility_routed_moe",
             "switching_latent_balanced_pregnn_local_skip",
             "switching_latent_balanced_qknorm_graph_attention",
@@ -3058,7 +3069,7 @@ class HeteroMixHopCMGM(nn.Module):
                 return {"utility_pi_mean": self._last_utility_pi.mean(0).tolist()}
             finally:
                 self.train(was_training)
-        if self.variant == "switching_latent_balanced_candidate_2expert_global_mixture":
+        if self.variant in ("switching_latent_balanced_candidate_2expert_global_mixture", "switching_latent_balanced_ts_2expert_global_mixture"):
             return self.global_mixture_fusion.weight_diagnostics()
         if self.variant == "switching_latent_balanced_candidate_2expert_moe":
             was_training = self.training
@@ -3092,6 +3103,7 @@ class HeteroMixHopCMGM(nn.Module):
             "switching_latent_balanced_moe_fusion",
             "switching_latent_balanced_candidate_2expert_moe",
             "switching_latent_balanced_candidate_2expert_global_mixture",
+            "switching_latent_balanced_ts_2expert_global_mixture",
             "switching_latent_balanced_utility_routed_moe",
             "switching_latent_balanced_pregnn_local_skip",
             "switching_latent_balanced_qknorm_graph_attention",
@@ -3121,6 +3133,7 @@ class HeteroMixHopCMGM(nn.Module):
                         "switching_latent_balanced_moe_fusion",
                         "switching_latent_balanced_candidate_2expert_moe",
                         "switching_latent_balanced_candidate_2expert_global_mixture",
+                        "switching_latent_balanced_ts_2expert_global_mixture",
                         "switching_latent_balanced_utility_routed_moe",
                         "switching_latent_balanced_pregnn_local_skip",
                         "switching_latent_balanced_qknorm_graph_attention",
