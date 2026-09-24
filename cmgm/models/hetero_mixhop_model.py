@@ -770,9 +770,12 @@ class HeteroMixHopCMGM(nn.Module):
             "switching_latent_balanced_residual_complementary_fusion",
             "switching_latent_balanced_moe_fusion",
             "switching_latent_balanced_candidate_2expert_moe",
+            "switching_latent_balanced_candidate_2expert_moe_bottleneck16",
+            "switching_latent_balanced_candidate_gated_interaction_residual",
             "switching_latent_balanced_candidate_2expert_global_mixture",
             "switching_latent_balanced_ts_2expert_global_mixture",
             "switching_latent_balanced_utility_routed_moe",
+            "switching_latent_balanced_4source_utility_moe",
             "switching_latent_balanced_pregnn_local_skip",
             "switching_latent_balanced_qknorm_graph_attention",
             "switching_latent_balanced_hybrid_graph_prior",
@@ -850,9 +853,12 @@ class HeteroMixHopCMGM(nn.Module):
                                                "switching_latent_balanced_residual_complementary_fusion",
                                                "switching_latent_balanced_moe_fusion",
                                                "switching_latent_balanced_candidate_2expert_moe",
+                                               "switching_latent_balanced_candidate_2expert_moe_bottleneck16",
+                                               "switching_latent_balanced_candidate_gated_interaction_residual",
                                                "switching_latent_balanced_candidate_2expert_global_mixture",
                                                "switching_latent_balanced_ts_2expert_global_mixture",
                                                "switching_latent_balanced_utility_routed_moe",
+                                               "switching_latent_balanced_4source_utility_moe",
                                                "switching_latent_balanced_pregnn_local_skip",
                                                "switching_latent_balanced_qknorm_graph_attention",
                                                "switching_latent_balanced_hybrid_graph_prior",
@@ -895,9 +901,12 @@ class HeteroMixHopCMGM(nn.Module):
                                            "switching_latent_balanced_residual_complementary_fusion",
                                            "switching_latent_balanced_moe_fusion",
                                            "switching_latent_balanced_candidate_2expert_moe",
+                                           "switching_latent_balanced_candidate_2expert_moe_bottleneck16",
+                                           "switching_latent_balanced_candidate_gated_interaction_residual",
                                            "switching_latent_balanced_candidate_2expert_global_mixture",
                                            "switching_latent_balanced_ts_2expert_global_mixture",
                                            "switching_latent_balanced_utility_routed_moe",
+                                           "switching_latent_balanced_4source_utility_moe",
                                            "switching_latent_balanced_pregnn_local_skip",
                                            "switching_latent_balanced_qknorm_graph_attention",
                                            "switching_latent_balanced_hybrid_graph_prior",
@@ -1156,9 +1165,12 @@ class HeteroMixHopCMGM(nn.Module):
                              "switching_latent_balanced_residual_complementary_fusion",
                              "switching_latent_balanced_moe_fusion",
                              "switching_latent_balanced_candidate_2expert_moe",
+                             "switching_latent_balanced_candidate_2expert_moe_bottleneck16",
+                             "switching_latent_balanced_candidate_gated_interaction_residual",
                              "switching_latent_balanced_candidate_2expert_global_mixture",
                              "switching_latent_balanced_ts_2expert_global_mixture",
                              "switching_latent_balanced_utility_routed_moe",
+                             "switching_latent_balanced_4source_utility_moe",
                              "switching_latent_balanced_pregnn_local_skip",
                              "switching_latent_balanced_qknorm_graph_attention",
                              "switching_latent_balanced_hybrid_graph_prior",
@@ -1350,9 +1362,12 @@ class HeteroMixHopCMGM(nn.Module):
             "switching_latent_balanced_residual_complementary_fusion",
             "switching_latent_balanced_moe_fusion",
             "switching_latent_balanced_candidate_2expert_moe",
+            "switching_latent_balanced_candidate_2expert_moe_bottleneck16",
+            "switching_latent_balanced_candidate_gated_interaction_residual",
             "switching_latent_balanced_candidate_2expert_global_mixture",
             "switching_latent_balanced_ts_2expert_global_mixture",
             "switching_latent_balanced_utility_routed_moe",
+            "switching_latent_balanced_4source_utility_moe",
             "switching_latent_balanced_pregnn_local_skip",
             "switching_latent_balanced_qknorm_graph_attention",
             "switching_latent_balanced_hybrid_graph_prior",
@@ -1518,10 +1533,20 @@ class HeteroMixHopCMGM(nn.Module):
             del self.gate_fc  # Replaced, not retained as an unused trainable gate.
             self.moe_fusion = SpatialTemporalMoEFusion()
 
-        if variant == "switching_latent_balanced_candidate_2expert_moe":
-            from cmgm.models.candidate_moe_fusion import CandidateAwareTwoExpertFusion
+        if variant in ("switching_latent_balanced_candidate_2expert_moe", "switching_latent_balanced_candidate_2expert_moe_bottleneck16", "switching_latent_balanced_candidate_gated_interaction_residual"):
+            from cmgm.models.candidate_moe_fusion import (
+                CandidateAwareTwoExpertFusion, CandidateAwareBottleneck16Fusion,
+                BOTTLENECK16_VARIANT,
+            )
+            from cmgm.models.gated_interaction_residual import (
+                VARIANT as GATED_INTERACTION_VARIANT, CandidateGatedInteractionResidual,
+            )
             del self.gate_fc
-            self.candidate_moe_fusion = CandidateAwareTwoExpertFusion()
+            fusion_cls = (CandidateAwareBottleneck16Fusion if variant == BOTTLENECK16_VARIANT
+                          else CandidateAwareTwoExpertFusion)
+            if variant == GATED_INTERACTION_VARIANT:
+                fusion_cls = CandidateGatedInteractionResidual
+            self.candidate_moe_fusion = fusion_cls()
 
         if variant == "switching_latent_balanced_utility_routed_moe":
             import copy
@@ -1539,6 +1564,13 @@ class HeteroMixHopCMGM(nn.Module):
             from cmgm.models.global_mixture_fusion import GlobalTSExpertMixture
             del self.gate_fc
             self.global_mixture_fusion = GlobalTSExpertMixture()
+
+        if variant == "switching_latent_balanced_4source_utility_moe":
+            from cmgm.models.four_source_utility_moe import FourSourcePredictiveMoE
+            self.four_source_moe = FourSourcePredictiveMoE(self.head)
+            for name in ('gate_fc', 'gcn_proj', 'lstm_proj', 'head'):
+                delattr(self, name)
+            del self.switching_latent_transformer.state_readout
 
     def utility_router_loss(self, target):
         from cmgm.models.utility_routed_moe import supervised_router_loss
@@ -2502,7 +2534,7 @@ class HeteroMixHopCMGM(nn.Module):
             pred = self.head(fused)
             shape = (batch_size, self.n_horizons, self.n_commodities) if self.n_horizons > 1 else (batch_size, self.n_commodities)
             return (pred.view(*shape), fused) if return_fused else pred.view(*shape)
-        if self.variant == "switching_latent_balanced_candidate_2expert_moe":
+        if self.variant in ("switching_latent_balanced_candidate_2expert_moe", "switching_latent_balanced_candidate_2expert_moe_bottleneck16", "switching_latent_balanced_candidate_gated_interaction_residual"):
             fused = self.candidate_moe_fusion(self.gcn_proj(h_spatial), self.lstm_proj(h_temporal))
             self.candidate_moe_fusion.last.update(h_s=h_spatial.detach(), h_t=h_temporal.detach())
             pred = self.head(fused).view(batch_size, self.n_horizons, self.n_commodities)
@@ -2882,6 +2914,10 @@ class HeteroMixHopCMGM(nn.Module):
                 edge_index=None, edge_weight=None,
                 debug: bool = False,
                 market_descriptor=None) -> torch.Tensor:
+        if self.variant == "switching_latent_balanced_4source_utility_moe":
+            spatial = self._temp_weighted_spatial(x)
+            long, micro = self.switching_latent_transformer.forward_live_components(x)
+            return self.four_source_moe(long, micro, spatial)
         if self.variant == "multiscale_graph":
             return self._multiscale_graph_forward(x, debug)
         if self.variant == "node_level":
@@ -2930,9 +2966,12 @@ class HeteroMixHopCMGM(nn.Module):
             "switching_latent_balanced_residual_complementary_fusion",
             "switching_latent_balanced_moe_fusion",
             "switching_latent_balanced_candidate_2expert_moe",
+            "switching_latent_balanced_candidate_2expert_moe_bottleneck16",
+            "switching_latent_balanced_candidate_gated_interaction_residual",
             "switching_latent_balanced_candidate_2expert_global_mixture",
             "switching_latent_balanced_ts_2expert_global_mixture",
             "switching_latent_balanced_utility_routed_moe",
+            "switching_latent_balanced_4source_utility_moe",
             "switching_latent_balanced_pregnn_local_skip",
             "switching_latent_balanced_qknorm_graph_attention",
             "switching_latent_balanced_hybrid_graph_prior",
@@ -3060,6 +3099,9 @@ class HeteroMixHopCMGM(nn.Module):
 
     def get_gate_stats(self, x, edge_index=None, edge_weight=None):
         """Return gating statistics (only meaningful for gate variants)."""
+        if self.variant == "switching_latent_balanced_4source_utility_moe":
+            return {"four_source_pi_mean": self.four_source_moe.pi.detach().mean(0).tolist()}
+
         if self.variant == "switching_latent_balanced_utility_routed_moe":
             was_training = self.training
             self.eval()
@@ -3071,7 +3113,7 @@ class HeteroMixHopCMGM(nn.Module):
                 self.train(was_training)
         if self.variant in ("switching_latent_balanced_candidate_2expert_global_mixture", "switching_latent_balanced_ts_2expert_global_mixture"):
             return self.global_mixture_fusion.weight_diagnostics()
-        if self.variant == "switching_latent_balanced_candidate_2expert_moe":
+        if self.variant in ("switching_latent_balanced_candidate_2expert_moe", "switching_latent_balanced_candidate_2expert_moe_bottleneck16", "switching_latent_balanced_candidate_gated_interaction_residual"):
             was_training = self.training
             self.eval()
             try:
@@ -3102,9 +3144,12 @@ class HeteroMixHopCMGM(nn.Module):
             "switching_latent_balanced_residual_complementary_fusion",
             "switching_latent_balanced_moe_fusion",
             "switching_latent_balanced_candidate_2expert_moe",
+            "switching_latent_balanced_candidate_2expert_moe_bottleneck16",
+            "switching_latent_balanced_candidate_gated_interaction_residual",
             "switching_latent_balanced_candidate_2expert_global_mixture",
             "switching_latent_balanced_ts_2expert_global_mixture",
             "switching_latent_balanced_utility_routed_moe",
+            "switching_latent_balanced_4source_utility_moe",
             "switching_latent_balanced_pregnn_local_skip",
             "switching_latent_balanced_qknorm_graph_attention",
             "switching_latent_balanced_hybrid_graph_prior",
@@ -3132,9 +3177,12 @@ class HeteroMixHopCMGM(nn.Module):
                         "switching_latent_balanced_residual_complementary_fusion",
                         "switching_latent_balanced_moe_fusion",
                         "switching_latent_balanced_candidate_2expert_moe",
+                        "switching_latent_balanced_candidate_2expert_moe_bottleneck16",
+                        "switching_latent_balanced_candidate_gated_interaction_residual",
                         "switching_latent_balanced_candidate_2expert_global_mixture",
                         "switching_latent_balanced_ts_2expert_global_mixture",
                         "switching_latent_balanced_utility_routed_moe",
+                        "switching_latent_balanced_4source_utility_moe",
                         "switching_latent_balanced_pregnn_local_skip",
                         "switching_latent_balanced_qknorm_graph_attention",
                         "switching_latent_balanced_hybrid_graph_prior",

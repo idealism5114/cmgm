@@ -33,8 +33,10 @@ from cmgm.training.target_scale_huber import (
 
 from cmgm.models.moe_fusion import VARIANT as MOE_VARIANT, BALANCE_COEFFICIENT, RoutingAccumulator
 
-from cmgm.models.candidate_moe_fusion import VARIANT as CANDIDATE_VARIANT, CandidateRoutingAccumulator
+from cmgm.models.gated_interaction_residual import VARIANT as GATED_INTERACTION_VARIANT
+from cmgm.models.candidate_moe_fusion import VARIANT as CANDIDATE_VARIANT, BOTTLENECK16_VARIANT, CandidateRoutingAccumulator
 
+from cmgm.models.four_source_utility_moe import VARIANT as FOUR_SOURCE_VARIANT, SourceAccumulator
 from cmgm.models.utility_routed_moe import VARIANT as UTILITY_ROUTED_MOE_VARIANT, UtilityRoutingAccumulator
 
 from cmgm.models.global_mixture_fusion import VARIANT as GLOBAL_MIXTURE_VARIANT, TS_VARIANT
@@ -170,8 +172,10 @@ def train_epoch(
     total_loss = 0.0
     num_batches = 0
     global_mixture = getattr(model, 'variant', None) in (GLOBAL_MIXTURE_VARIANT, TS_VARIANT)
+    four_source = getattr(model, 'variant', None) == FOUR_SOURCE_VARIANT
+    source_stats = SourceAccumulator() if four_source else None
     utility = getattr(model, 'variant', None) == UTILITY_ROUTED_MOE_VARIANT
-    candidate = getattr(model, 'variant', None) == CANDIDATE_VARIANT
+    candidate = getattr(model, 'variant', None) in (CANDIDATE_VARIANT, BOTTLENECK16_VARIANT, GATED_INTERACTION_VARIANT)
     moe = getattr(model, 'variant', None) == MOE_VARIANT
     utility_stats = UtilityRoutingAccumulator() if utility else None
     candidate_stats = CandidateRoutingAccumulator() if candidate else None
@@ -290,6 +294,14 @@ def train_epoch(
         if global_mixture and not torch.isfinite(loss):
             raise FloatingPointError('Nonfinite Global Mixture training loss')
 
+        if four_source:
+            prediction_value_four = loss.detach() - switch_loss.detach()
+            route_loss, route_diag = model.four_source_moe.utility_loss(y_batch)
+            loss = loss + route_loss
+            if not torch.isfinite(loss):
+                raise FloatingPointError("Nonfinite four-source total loss")
+            source_stats.update(model, prediction_value_four, loss.detach(), route_diag)
+
         if utility:
             route_loss, route_diag = model.utility_router_loss(y_batch)
             loss = loss + route_loss
@@ -355,6 +367,8 @@ def train_epoch(
         total_loss += loss.item()
         num_batches += 1
 
+    if four_source:
+        model._last_train_four_source = source_stats.summary()
     if utility:
         model._last_train_utility = utility_stats.summary()
     if candidate:
@@ -398,8 +412,10 @@ def validate_epoch(
     total_loss = 0.0
     num_batches = 0
     global_mixture = getattr(model, 'variant', None) in (GLOBAL_MIXTURE_VARIANT, TS_VARIANT)
+    four_source = getattr(model, 'variant', None) == FOUR_SOURCE_VARIANT
+    source_stats = SourceAccumulator() if four_source else None
     utility = getattr(model, 'variant', None) == UTILITY_ROUTED_MOE_VARIANT
-    candidate = getattr(model, 'variant', None) == CANDIDATE_VARIANT
+    candidate = getattr(model, 'variant', None) in (CANDIDATE_VARIANT, BOTTLENECK16_VARIANT, GATED_INTERACTION_VARIANT)
     moe = getattr(model, 'variant', None) == MOE_VARIANT
     utility_stats = UtilityRoutingAccumulator() if utility else None
     candidate_stats = CandidateRoutingAccumulator() if candidate else None
@@ -419,9 +435,11 @@ def validate_epoch(
         'switching_latent_balanced_residual_complementary_fusion',
         MOE_VARIANT,
         CANDIDATE_VARIANT,
+        BOTTLENECK16_VARIANT,
+        GATED_INTERACTION_VARIANT,
         GLOBAL_MIXTURE_VARIANT,
         TS_VARIANT,
-        UTILITY_ROUTED_MOE_VARIANT,
+        UTILITY_ROUTED_MOE_VARIANT, FOUR_SOURCE_VARIANT,
         'switching_latent_balanced_pregnn_local_skip',
     )
 
@@ -486,6 +504,8 @@ def validate_epoch(
 
         if global_mixture and not torch.isfinite(loss):
             raise FloatingPointError('Nonfinite Global Mixture validation loss')
+        if four_source:
+            source_stats.update(model, loss.detach(), loss.detach())
         if utility:
             if not torch.isfinite(loss) or any(not torch.isfinite(v).all() for v in (pred, model._last_pred_T, model._last_pred_ST, model._last_utility_pi)):
                 raise FloatingPointError('Implementation failure: nonfinite utility MoE validation')
@@ -526,6 +546,8 @@ def validate_epoch(
     if spatial_secondary_val5:
         model._last_val5_diagnostic = dict(MAE=primary_abs/primary_count,
             MSE=primary_squared/primary_count, count=primary_count)
+    if four_source:
+        model._last_val_four_source = source_stats.summary()
     if utility:
         model._last_val_utility = utility_stats.summary()
     if candidate:
@@ -596,8 +618,10 @@ def train(
             raise ValueError('TargetScaleHuber must retain switching KL')
 
     global_mixture = getattr(model, 'variant', None) in (GLOBAL_MIXTURE_VARIANT, TS_VARIANT)
+    four_source = getattr(model, 'variant', None) == FOUR_SOURCE_VARIANT
+    source_stats = SourceAccumulator() if four_source else None
     utility = getattr(model, 'variant', None) == UTILITY_ROUTED_MOE_VARIANT
-    candidate = getattr(model, 'variant', None) == CANDIDATE_VARIANT
+    candidate = getattr(model, 'variant', None) in (CANDIDATE_VARIANT, BOTTLENECK16_VARIANT, GATED_INTERACTION_VARIANT)
     moe = getattr(model, 'variant', None) == MOE_VARIANT
     t0 = time.time()
 
@@ -633,6 +657,8 @@ def train(
     }
     if global_mixture:
         history['global_weight_history'] = []
+    if four_source:
+        history['four_source_history'] = []
     if utility:
         history['utility_routing_history'] = []
     if candidate:
@@ -680,9 +706,11 @@ def train(
         'switching_latent_balanced_residual_complementary_fusion',
         MOE_VARIANT,
         CANDIDATE_VARIANT,
+        BOTTLENECK16_VARIANT,
+        GATED_INTERACTION_VARIANT,
         GLOBAL_MIXTURE_VARIANT,
         TS_VARIANT,
-        UTILITY_ROUTED_MOE_VARIANT,
+        UTILITY_ROUTED_MOE_VARIANT, FOUR_SOURCE_VARIANT,
         'switching_latent_balanced_pregnn_local_skip',
     )
     if spatial_secondary_val5:
@@ -730,6 +758,9 @@ def train(
                      semantics='same end-of-epoch global parameters; not separate averages')
             history['global_weight_history'].append(row)
             print('[Global mixture] '+json.dumps(row), flush=True)
+        if four_source:
+            history['four_source_history'].append(dict(epoch=epoch, train=model._last_train_four_source,
+                val=model._last_val_four_source, lr=current_lr, switch_beta=current_switch_beta))
         if utility:
             utility_row=dict(epoch=epoch, train=dict(model._last_train_utility), val=dict(model._last_val_utility))
             history['utility_routing_history'].append(utility_row)

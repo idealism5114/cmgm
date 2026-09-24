@@ -35,18 +35,18 @@ def set_seed(seed: int = RANDOM_SEED):
     torch.backends.cudnn.benchmark = False
 
 
-def load_stock_prices(filepath: Path) -> pd.DataFrame:
+def load_stock_prices(filepath: Path, *, read_csv_kwargs=None) -> pd.DataFrame:
     """Load CSI 300 constituent stock closing prices."""
-    df = pd.read_csv(filepath, encoding='utf-8-sig')
+    df = pd.read_csv(filepath, encoding='utf-8-sig', **(read_csv_kwargs or {}))
     df['date'] = pd.to_datetime(df['date'])
     df = df.set_index('date')
     df = df.dropna(axis=1, how='all')
     return df
 
 
-def load_bond_prices(filepath: Path) -> pd.DataFrame:
+def load_bond_prices(filepath: Path, *, read_csv_kwargs=None) -> pd.DataFrame:
     """Load treasury futures closing prices."""
-    df = pd.read_csv(filepath, encoding='utf-8-sig')
+    df = pd.read_csv(filepath, encoding='utf-8-sig', **(read_csv_kwargs or {}))
     df['date'] = pd.to_datetime(df['date'])
     pivoted = df.pivot_table(
         index='date', columns='品种', values='close', aggfunc='first'
@@ -56,9 +56,9 @@ def load_bond_prices(filepath: Path) -> pd.DataFrame:
     return pivoted
 
 
-def load_commodity_prices(filepath: Path) -> pd.DataFrame:
+def load_commodity_prices(filepath: Path, *, read_csv_kwargs=None) -> pd.DataFrame:
     """Load commodity futures closing prices."""
-    df = pd.read_csv(filepath, encoding='utf-8-sig')
+    df = pd.read_csv(filepath, encoding='utf-8-sig', **(read_csv_kwargs or {}))
     df['date'] = pd.to_datetime(df['date'])
     pivoted = df.pivot_table(
         index='date', columns='品种', values='close', aggfunc='first'

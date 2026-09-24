@@ -798,6 +798,25 @@ class SwitchingLatentTransformerBranch(nn.Module):
             ).detach()
         return p, z, candidates
 
+    def forward_live_components(self, x: torch.Tensor):
+        """Explicit balanced component interface; no merged state_readout.
+
+        Used only by the four-source predictive variant. One encoder/filter/
+        recurrence execution; return live tensors, not diagnostic caches.
+        """
+        if not self.balanced_readout:
+            raise ValueError("Live components require balanced projections")
+        tokens = self.encode_market_tokens(x)
+        memory = self.long_memory(tokens)
+        _, states, _ = self.latent_forward(memory)
+        long = self.long_memory_norm(self.long_memory_readout(memory[:, -1]))
+        micro = self.micro_state_norm(self.micro_state_readout(states[:, -1]))
+        self.last_market_tokens = tokens.detach()
+        self.last_long_memory = memory.detach()
+        self.last_h_last, self.last_z_last = memory[:, -1].detach(), states[:, -1].detach()
+        self.last_h_long, self.last_h_micro = long.detach(), micro.detach()
+        return long, micro
+
     def readout(self, h_last: torch.Tensor, z_last: torch.Tensor,
                 zero_component: str = None) -> torch.Tensor:
         if zero_component not in (None, "H", "Z"):

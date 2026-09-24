@@ -156,13 +156,14 @@ def _checkpoint_path_for_variant(variant, checkpoint_dir):
     return directory / f"{variant}_best.pt"
 
 
-def build_data(args):
+def build_data(args, *, prepared_train_val=None):
     """Build the shared 21-feature train/validation/test pipeline once."""
-    data = create_data_loaders(batch_size=args.batch_size, seq_len=args.seq_len)
-    raw_full = np.concatenate(
-        [data["raw_prices_train"], data["raw_prices_val"], data["raw_prices_test"]],
-        axis=0,
-    )
+    # Optional prefiltered TRAIN/VAL source: same feature/target code, no TEST dataset.
+    # The caller must freeze original split boundaries and audit numeric fingerprints.
+    data = (create_data_loaders(batch_size=args.batch_size, seq_len=args.seq_len)
+            if prepared_train_val is None else dict(prepared_train_val))
+    split_names = ("train", "val", "test") if prepared_train_val is None else ("train", "val")
+    raw_full = np.concatenate([data["raw_prices_" + s] for s in split_names], axis=0)
     feat_raw, _ = build_feature_matrix(raw_full)
     train_size = data["raw_prices_train"].shape[0]
     feat_mean = feat_raw[:train_size].mean(axis=0, keepdims=True)
@@ -174,15 +175,12 @@ def build_data(args):
     norm_mean = data["norm_stats"]["mean"]
     norm_std = data["norm_stats"]["std"]
     normalized = (raw_full - norm_mean) / norm_std
-    train_end = int(len(raw_full) * 0.7)
-    val_end = train_end + int(len(raw_full) * 0.15)
+    train_end = int(len(raw_full) * 0.7) if prepared_train_val is None else train_size
+    val_end = (train_end + int(len(raw_full) * 0.15)
+               if prepared_train_val is None else len(raw_full))
     feature_splits = [features[:train_end], features[train_end:val_end], features[val_end:]]
     norm_splits = [normalized[:train_end], normalized[train_end:val_end], normalized[val_end:]]
-    raw_splits = [
-        data["raw_prices_train"],
-        data["raw_prices_val"],
-        data["raw_prices_test"],
-    ]
+    raw_splits = [data["raw_prices_" + s] for s in split_names]
     descriptors, descriptors_raw, descriptor_stats = build_market_descriptor_timeline(
         raw_full,
         data["market_indices"],
@@ -206,7 +204,7 @@ def build_data(args):
             horizons=horizons,
         )
         for split, norm, feature, raw in zip(
-            ("train", "val", "test"),
+            split_names,
             norm_splits,
             feature_splits,
             raw_splits,
@@ -224,7 +222,7 @@ def build_data(args):
             market_descriptors=descriptor,
         )
         for split, norm, feature, raw, descriptor in zip(
-            ("train", "val", "test"),
+            split_names,
             norm_splits,
             feature_splits,
             raw_splits,

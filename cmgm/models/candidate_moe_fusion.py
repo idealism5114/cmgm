@@ -76,3 +76,22 @@ class CandidateRoutingAccumulator:
                               ('min',p[:,i].min()),('max',p[:,i].max())]:
                 result[f'{key}_pi_{label}']=float(value)
         return result
+
+
+BOTTLENECK16_VARIANT = 'switching_latent_balanced_candidate_2expert_moe_bottleneck16'
+
+
+class CandidateAwareBottleneck16Fusion(CandidateAwareTwoExpertFusion):
+    """Only expert capacity changes; preserve the original router RNG sequence.
+
+    All original classes above remain unchanged, including state keys and defaults.
+    Build the complete original fusion BEFORE replacing experts. No trained weights
+    are copied, no auxiliary objective or routing warm-up is introduced.
+    """
+    def __init__(self):
+        super().__init__()
+        # Preserve the original residual forward: t + MLP(t).
+        self.temporal_expert.mlp = nn.Sequential(
+            nn.Linear(64, 16), nn.ReLU(), nn.Dropout(.1), nn.Linear(16, 64))
+        self.interaction_expert = nn.Sequential(
+            nn.Linear(128, 16), nn.ReLU(), nn.Dropout(.1), nn.Linear(16, 64))
