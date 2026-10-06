@@ -31,15 +31,9 @@ from cmgm.training.target_scale_huber import (
     detached_terms as _target_scale_detached_terms,
 )
 
-from cmgm.models.moe_fusion import VARIANT as MOE_VARIANT, BALANCE_COEFFICIENT, RoutingAccumulator
 
-from cmgm.models.gated_interaction_residual import VARIANT as GATED_INTERACTION_VARIANT
-from cmgm.models.candidate_moe_fusion import VARIANT as CANDIDATE_VARIANT, BOTTLENECK16_VARIANT, CandidateRoutingAccumulator
 
-from cmgm.models.four_source_utility_moe import VARIANT as FOUR_SOURCE_VARIANT, SourceAccumulator
-from cmgm.models.utility_routed_moe import VARIANT as UTILITY_ROUTED_MOE_VARIANT, UtilityRoutingAccumulator
 
-from cmgm.models.global_mixture_fusion import VARIANT as GLOBAL_MIXTURE_VARIANT, TS_VARIANT
 
 FIVE_DAY_ONLY_VARIANT = 'switching_latent_balanced_readout_5d_only'
 FIVE_DAY_OBJECTIVE_MULTIPLIER = 4.0
@@ -50,6 +44,12 @@ GROUPED_OBJECTIVE = '4/3*(5d+10d+20d)'
 COMMODITY_RESIDUAL_VARIANT = 'switching_latent_balanced_commodity_residual'
 HORIZON_READOUT_VARIANT = 'switching_latent_balanced_horizon_readout'
 NO_SWITCH_KL_VARIANT = 'switching_latent_balanced_readout_no_switch_kl'
+# Retired model IDs remain only as inert identifiers for legacy history code.
+MOE_VARIANT='__retired_moe__'; CANDIDATE_VARIANT='__retired_candidate__'
+BOTTLENECK16_VARIANT='__retired_bottleneck__'; GATED_INTERACTION_VARIANT='__retired_gated__'
+FOUR_SOURCE_VARIANT='__retired_four_source__'; UTILITY_ROUTED_MOE_VARIANT='__retired_utility__'
+GLOBAL_MIXTURE_VARIANT='__retired_global__'; TS_VARIANT='__retired_ts__'
+BALANCE_COEFFICIENT=.0001
 
 
 def _effective_switch_loss(model, branch):
@@ -439,6 +439,7 @@ def validate_epoch(
         GATED_INTERACTION_VARIANT,
         GLOBAL_MIXTURE_VARIANT,
         TS_VARIANT,
+        'switching_latent_balanced_horizon_tensor_fusion',
         UTILITY_ROUTED_MOE_VARIANT, FOUR_SOURCE_VARIANT,
         'switching_latent_balanced_pregnn_local_skip',
     )
@@ -710,6 +711,7 @@ def train(
         GATED_INTERACTION_VARIANT,
         GLOBAL_MIXTURE_VARIANT,
         TS_VARIANT,
+        'switching_latent_balanced_horizon_tensor_fusion',
         UTILITY_ROUTED_MOE_VARIANT, FOUR_SOURCE_VARIANT,
         'switching_latent_balanced_pregnn_local_skip',
     )

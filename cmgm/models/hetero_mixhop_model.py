@@ -741,56 +741,19 @@ class HeteroMixHopCMGM(nn.Module):
 
     def __init__(self, num_nodes: int, n_commodities: int,
                  n_stock: int = 248, n_bond: int = 12,
-                 variant: str = "edge_attn", feat_dim: int = FEATURE_DIM,
+                 variant: str = "switching_latent_balanced_readout",
+                 feat_dim: int = FEATURE_DIM,
                  attn_heads: int = 8, attn_dropout: float = 0.1,
                  attn_prior_scale: float = 0.5, attn_self_heads: int = 4,
                  graph_cfg: str = "full", use_embedding: bool = True,
                  relations: str = "cc"):
         super().__init__()
+        # The supported research model surface is intentionally reduced to the
+        # maintained formal D0B readout and its isolated tensor-fusion study.
+        # Historical artifacts remain on disk but cannot be instantiated.
         supported_variants = {
-            "edge_attn",
-            "temporal_weighted_graph",
-            "regime_dynamic_transformer",
-            "regime_dynamic_semantic",
-            "semantic_router",
-            "loss_rebalance",
-            "routing_strength",
-            "context_calibrated",
-            "context_balance",
-            "adapter_orthogonal",
-            "transformer_temporal",
-            "transformer_rpe",
-            "market_token_transformer",
-            "market_dispersion_transformer",
-            "switching_transformer",
-            "switching_null_control",
-            "switching_filter_rpe",
-            "switching_latent_transformer",
             "switching_latent_balanced_readout",
-            "switching_latent_balanced_residual_complementary_fusion",
-            "switching_latent_balanced_moe_fusion",
-            "switching_latent_balanced_candidate_2expert_moe",
-            "switching_latent_balanced_candidate_2expert_moe_bottleneck16",
-            "switching_latent_balanced_candidate_gated_interaction_residual",
-            "switching_latent_balanced_candidate_2expert_global_mixture",
-            "switching_latent_balanced_ts_2expert_global_mixture",
-            "switching_latent_balanced_utility_routed_moe",
-            "switching_latent_balanced_4source_utility_moe",
-            "switching_latent_balanced_pregnn_local_skip",
-            "switching_latent_balanced_qknorm_graph_attention",
-            "switching_latent_balanced_hybrid_graph_prior",
-            "switching_latent_balanced_commodity_residual",
-            "switching_latent_balanced_horizon_readout",
-            "switching_latent_balanced_readout_no_switch_kl",
-            "switching_latent_balanced_readout_5_10_20",
-            "switching_latent_balanced_readout_target_scale_huber",
-            "switching_latent_balanced_readout_5d_only",
-            "switching_latent_learnable_persistence",
-            "switching_latent_balanced_transition",
-            "switching_latent_dynamic_slope",
-            "switching_latent_memory",
-            "switching_active_latent_memory",
-            "switching_regime_relative_latent_memory",
+            "switching_latent_balanced_horizon_tensor_fusion",
         }
         if variant not in supported_variants:
             supported = ", ".join(sorted(supported_variants))
@@ -850,6 +813,7 @@ class HeteroMixHopCMGM(nn.Module):
                                                "switching_filter_rpe",
                                                "switching_latent_transformer",
                                                "switching_latent_balanced_readout",
+            "switching_latent_balanced_horizon_tensor_fusion",
                                                "switching_latent_balanced_residual_complementary_fusion",
                                                "switching_latent_balanced_moe_fusion",
                                                "switching_latent_balanced_candidate_2expert_moe",
@@ -898,6 +862,7 @@ class HeteroMixHopCMGM(nn.Module):
                                            "switching_filter_rpe",
                                            "switching_latent_transformer",
                                            "switching_latent_balanced_readout",
+            "switching_latent_balanced_horizon_tensor_fusion",
                                            "switching_latent_balanced_residual_complementary_fusion",
                                            "switching_latent_balanced_moe_fusion",
                                            "switching_latent_balanced_candidate_2expert_moe",
@@ -1162,6 +1127,7 @@ class HeteroMixHopCMGM(nn.Module):
                              "switching_null_control", "switching_filter_rpe",
                              "switching_latent_transformer",
                              "switching_latent_balanced_readout",
+            "switching_latent_balanced_horizon_tensor_fusion",
                              "switching_latent_balanced_residual_complementary_fusion",
                              "switching_latent_balanced_moe_fusion",
                              "switching_latent_balanced_candidate_2expert_moe",
@@ -1359,6 +1325,7 @@ class HeteroMixHopCMGM(nn.Module):
         if variant in (
             "switching_latent_transformer",
             "switching_latent_balanced_readout",
+            "switching_latent_balanced_horizon_tensor_fusion",
             "switching_latent_balanced_residual_complementary_fusion",
             "switching_latent_balanced_moe_fusion",
             "switching_latent_balanced_candidate_2expert_moe",
@@ -1564,6 +1531,16 @@ class HeteroMixHopCMGM(nn.Module):
             from cmgm.models.global_mixture_fusion import GlobalTSExpertMixture
             del self.gate_fc
             self.global_mixture_fusion = GlobalTSExpertMixture()
+
+        if variant == "switching_latent_balanced_horizon_tensor_fusion":
+            from cmgm.models.horizon_tensor_fusion import HorizonTensorFusion
+            if tuple(MULTI_HORIZONS) != (1, 5, 10, 20) or self.n_horizons != 4:
+                raise ValueError("HorizonTensorFusion requires horizons [1,5,10,20]")
+            # Shared D0B modules, including the original gate/projections/head,
+            # were constructed in their original order above. Remove only the
+            # replaced gate, then allocate the new fusion parameters.
+            del self.gate_fc
+            self.horizon_tensor_fusion = HorizonTensorFusion()
 
         if variant == "switching_latent_balanced_4source_utility_moe":
             from cmgm.models.four_source_utility_moe import FourSourcePredictiveMoE
@@ -2528,6 +2505,12 @@ class HeteroMixHopCMGM(nn.Module):
                               h_temporal: torch.Tensor, return_fused: bool = False):
         """Apply the existing gated fusion and prediction head unchanged."""
         batch_size = h_spatial.shape[0]
+        if self.variant == "switching_latent_balanced_horizon_tensor_fusion":
+            fused = self.horizon_tensor_fusion(
+                self.gcn_proj(h_spatial), self.lstm_proj(h_temporal)
+            )
+            pred = self._predict_from_horizon_states(fused)
+            return (pred, fused) if return_fused else pred
         if self.variant == "switching_latent_balanced_moe_fusion":
             fused = self.moe_fusion(h_spatial, h_temporal,
                                     self.gcn_proj(h_spatial), self.lstm_proj(h_temporal))
@@ -2581,6 +2564,11 @@ class HeteroMixHopCMGM(nn.Module):
         if self.n_horizons > 1:
             return pred.view(batch_size, self.n_horizons, self.n_commodities)
         return pred.view(batch_size, self.n_commodities)
+
+    def _predict_from_horizon_states(self, fused: torch.Tensor) -> torch.Tensor:
+        """Apply the original head body and horizon-aligned output rows."""
+        from cmgm.models.horizon_tensor_fusion import predict_by_horizon
+        return predict_by_horizon(self.head, fused, self.n_commodities)
 
     def _market_token_predict_by_horizon(self, h_spatial: torch.Tensor,
                                         h_temporal: torch.Tensor) -> torch.Tensor:
@@ -2963,6 +2951,7 @@ class HeteroMixHopCMGM(nn.Module):
         if self.variant in (
             "switching_latent_transformer",
             "switching_latent_balanced_readout",
+            "switching_latent_balanced_horizon_tensor_fusion",
             "switching_latent_balanced_residual_complementary_fusion",
             "switching_latent_balanced_moe_fusion",
             "switching_latent_balanced_candidate_2expert_moe",
@@ -3099,6 +3088,18 @@ class HeteroMixHopCMGM(nn.Module):
 
     def get_gate_stats(self, x, edge_index=None, edge_weight=None):
         """Return gating statistics (only meaningful for gate variants)."""
+        if self.variant == "switching_latent_balanced_horizon_tensor_fusion":
+            was_training = self.training
+            self.eval()
+            try:
+                with torch.no_grad():
+                    h_spatial = self._temp_weighted_spatial(x)
+                    h_temporal = self.switching_latent_transformer(x)
+                    return self.horizon_tensor_fusion.diagnostics(
+                        self.gcn_proj(h_spatial), self.lstm_proj(h_temporal)
+                    )
+            finally:
+                self.train(was_training)
         if self.variant == "switching_latent_balanced_4source_utility_moe":
             return {"four_source_pi_mean": self.four_source_moe.pi.detach().mean(0).tolist()}
 

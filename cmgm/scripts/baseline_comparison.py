@@ -12,7 +12,7 @@ import torch
 from cmgm import config
 from cmgm.models.comparison_baselines import ORDER,TRAINABLE,MODEL_CONFIGS,INPUT_VIEWS,make_model
 from cmgm.models.hetero_mixhop_model import HeteroMixHopCMGM
-from cmgm.models.candidate_moe_fusion import VARIANT as BASE
+BASE = 'switching_latent_balanced_readout'
 from cmgm.scripts.baseline_protocol import seed_all,loaders,parameter_counts,sanity,evaluate,train_one,data_audit
 from cmgm.scripts.d0b_5d_error_regime_diagnostic import ROOT,checkpoint_payload,sha256
 from cmgm.scripts.formal_v2_protocol import atomic_json
