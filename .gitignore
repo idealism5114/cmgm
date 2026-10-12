@@ -40,6 +40,9 @@ nohup.out
 # Keep source scripts in "fetch data/" and documentation in "docs/" tracked.
 /Data/
 /experiments/
+/interpretability/
+*.npz
+*.parquet
 
 # Model checkpoints (large binary files)
 /checkpoints/

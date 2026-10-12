@@ -12,7 +12,6 @@ LSTM captures temporal patterns from raw prices.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.utils import scatter
 
 from cmgm.config import (
     GCN_INPUT_DIM, GCN_OUTPUT_DIM, GCN_NUM_LAYERS,
@@ -86,6 +85,10 @@ class MeanConcatGCNLayer(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+        # MixHopPropagation and the D0B models do not use PyG. Import it only
+        # when this legacy sparse GCN layer is actually executed.
+        from torch_geometric.utils import scatter
+
         source_idx, target_idx = edge_index[0], edge_index[1]
 
         # Mean aggregation of neighbor features

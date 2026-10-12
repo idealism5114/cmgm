@@ -37,6 +37,7 @@ Architecture (edge_attn):
 """
 
 import math
+from typing import Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -57,6 +58,19 @@ from cmgm.models.switching_transformer import (
 from cmgm.models.switching_latent_transformer import (
     SwitchingLatentTransformerBranch,
 )
+from cmgm.models.node_history_readout import (
+    ALL_VARIANTS as NODE_HISTORY_ALL_VARIANTS,
+    CONCAT_VARIANT as NODE_HISTORY_CONCAT_VARIANT,
+    NODE_ATTENTION_VARIANT,
+    NODE_HISTORY_VARIANTS,
+    NodeHistoryReadout,
+    apply_original_head_per_node,
+)
+from cmgm.models.task_conditioned_moe import (
+    MOE_VARIANTS as TASK_MOE_VARIANTS,
+)
+from cmgm.models.four_task_moe import FOUR_TASK_VARIANTS
+from cmgm.models.short_long_mask_moe import MASK_MOE_VARIANTS
 
 
 class _TypeInputProjection(nn.Module):
@@ -746,14 +760,22 @@ class HeteroMixHopCMGM(nn.Module):
                  attn_heads: int = 8, attn_dropout: float = 0.1,
                  attn_prior_scale: float = 0.5, attn_self_heads: int = 4,
                  graph_cfg: str = "full", use_embedding: bool = True,
-                 relations: str = "cc"):
+                 relations: str = "cc",
+                 commodity_indices: Tuple[int, int] = None):
         super().__init__()
         # The supported research model surface is intentionally reduced to the
         # maintained formal D0B readout and its isolated tensor-fusion study.
         # Historical artifacts remain on disk but cannot be instantiated.
         supported_variants = {
             "switching_latent_balanced_readout",
+            *TASK_MOE_VARIANTS,
+            *FOUR_TASK_VARIANTS,
+            *MASK_MOE_VARIANTS,
+            "switching_latent_balanced_lag_factor_fusion",
             "switching_latent_balanced_horizon_tensor_fusion",
+            "switching_latent_balanced_mean_fusion",
+            "switching_latent_balanced_consensus_discrepancy_fusion",
+            *NODE_HISTORY_ALL_VARIANTS,
         }
         if variant not in supported_variants:
             supported = ", ".join(sorted(supported_variants))
@@ -765,6 +787,15 @@ class HeteroMixHopCMGM(nn.Module):
         self.n_stock = n_stock
         self.n_bond = n_bond
         self.variant = variant
+        self.commodity_indices = commodity_indices
+        if variant in NODE_HISTORY_VARIANTS:
+            if commodity_indices is None:
+                raise ValueError(
+                    f"{variant} requires the dataset commodity node interval explicitly"
+                )
+            start, end = commodity_indices
+            if not (0 <= start < end <= num_nodes) or end - start != n_commodities:
+                raise ValueError("commodity_indices must match the dataset target commodity mapping")
         # Loss configuration only; never consulted by model forward.
         if variant == "switching_latent_balanced_readout_no_switch_kl":
             self.disable_switch_kl = True
@@ -813,7 +844,14 @@ class HeteroMixHopCMGM(nn.Module):
                                                "switching_filter_rpe",
                                                "switching_latent_transformer",
                                                "switching_latent_balanced_readout",
-            "switching_latent_balanced_horizon_tensor_fusion",
+                                               *TASK_MOE_VARIANTS,
+                                               *FOUR_TASK_VARIANTS,
+                                               *MASK_MOE_VARIANTS,
+            "switching_latent_balanced_lag_factor_fusion",
+                                               "switching_latent_balanced_horizon_tensor_fusion",
+                                               "switching_latent_balanced_mean_fusion",
+                                               "switching_latent_balanced_consensus_discrepancy_fusion",
+                                               *NODE_HISTORY_ALL_VARIANTS,
                                                "switching_latent_balanced_residual_complementary_fusion",
                                                "switching_latent_balanced_moe_fusion",
                                                "switching_latent_balanced_candidate_2expert_moe",
@@ -862,7 +900,14 @@ class HeteroMixHopCMGM(nn.Module):
                                            "switching_filter_rpe",
                                            "switching_latent_transformer",
                                            "switching_latent_balanced_readout",
-            "switching_latent_balanced_horizon_tensor_fusion",
+                                           *TASK_MOE_VARIANTS,
+                                           *FOUR_TASK_VARIANTS,
+                                           *MASK_MOE_VARIANTS,
+            "switching_latent_balanced_lag_factor_fusion",
+                                           "switching_latent_balanced_horizon_tensor_fusion",
+                                           "switching_latent_balanced_mean_fusion",
+                                           "switching_latent_balanced_consensus_discrepancy_fusion",
+                                           *NODE_HISTORY_ALL_VARIANTS,
                                            "switching_latent_balanced_residual_complementary_fusion",
                                            "switching_latent_balanced_moe_fusion",
                                            "switching_latent_balanced_candidate_2expert_moe",
@@ -1127,7 +1172,14 @@ class HeteroMixHopCMGM(nn.Module):
                              "switching_null_control", "switching_filter_rpe",
                              "switching_latent_transformer",
                              "switching_latent_balanced_readout",
-            "switching_latent_balanced_horizon_tensor_fusion",
+                             *TASK_MOE_VARIANTS,
+                             *FOUR_TASK_VARIANTS,
+                             *MASK_MOE_VARIANTS,
+            "switching_latent_balanced_lag_factor_fusion",
+                             "switching_latent_balanced_horizon_tensor_fusion",
+                             "switching_latent_balanced_mean_fusion",
+                             "switching_latent_balanced_consensus_discrepancy_fusion",
+                             *NODE_HISTORY_ALL_VARIANTS,
                              "switching_latent_balanced_residual_complementary_fusion",
                              "switching_latent_balanced_moe_fusion",
                              "switching_latent_balanced_candidate_2expert_moe",
@@ -1325,7 +1377,14 @@ class HeteroMixHopCMGM(nn.Module):
         if variant in (
             "switching_latent_transformer",
             "switching_latent_balanced_readout",
+            *TASK_MOE_VARIANTS,
+            *FOUR_TASK_VARIANTS,
+            *MASK_MOE_VARIANTS,
+            "switching_latent_balanced_lag_factor_fusion",
             "switching_latent_balanced_horizon_tensor_fusion",
+            "switching_latent_balanced_mean_fusion",
+            "switching_latent_balanced_consensus_discrepancy_fusion",
+            *NODE_HISTORY_ALL_VARIANTS,
             "switching_latent_balanced_residual_complementary_fusion",
             "switching_latent_balanced_moe_fusion",
             "switching_latent_balanced_candidate_2expert_moe",
@@ -1541,6 +1600,67 @@ class HeteroMixHopCMGM(nn.Module):
             # replaced gate, then allocate the new fusion parameters.
             del self.gate_fc
             self.horizon_tensor_fusion = HorizonTensorFusion()
+
+        if variant == "switching_latent_balanced_lag_factor_fusion":
+            from cmgm.models.lag_factor_fusion import LagFactorFusion
+            if commodity_indices is None or commodity_indices[1] - commodity_indices[0] != n_commodities:
+                raise ValueError('LagFactorFusion needs the verified dataset commodity interval')
+            if tuple(MULTI_HORIZONS) != (1, 5, 10, 20) or self.n_horizons != 4:
+                raise ValueError('LagFactorFusion requires the original four horizon order')
+            # Shared D0B modules have already been constructed in their exact
+            # original order. The old gate is replaced, with no inactive weights.
+            del self.gate_fc
+            self.lag_factor_fusion = LagFactorFusion(n_commodities)
+
+        if variant in (
+            "switching_latent_balanced_mean_fusion",
+            "switching_latent_balanced_consensus_discrepancy_fusion",
+        ):
+            # Keep all original modules (including gate_fc) in their historical
+            # construction order, then remove only the replaced gate.
+            del self.gate_fc
+            if variant == "switching_latent_balanced_consensus_discrepancy_fusion":
+                from cmgm.models.consensus_discrepancy_fusion import ConsensusDiscrepancyFusion
+                self.consensus_discrepancy_fusion = ConsensusDiscrepancyFusion()
+
+        # All shared D0B modules, including the temporal branch and original
+        # prediction head, are initialized before constructing these readouts.
+        if variant in NODE_HISTORY_ALL_VARIANTS:
+            del self.gate_fc
+            if variant == NODE_HISTORY_CONCAT_VARIANT:
+                self.global_concat_fusion = nn.Linear(128, LSTM_HIDDEN_DIM)
+            else:
+                self.node_history_readout = NodeHistoryReadout(
+                    attention=(variant == NODE_ATTENTION_VARIANT),
+                    hidden_dim=LSTM_HIDDEN_DIM,
+                    memory_dim=self.switching_latent_transformer.d_model,
+                )
+
+        # Build the original D0B first to preserve every shared tensor's RNG
+        # initialization, then replace only its final gate with matched MoE.
+        if variant in TASK_MOE_VARIANTS:
+            from cmgm.models.task_conditioned_moe import TaskConditionedThreeExpertFusion
+            if tuple(MULTI_HORIZONS) != (1, 5, 10, 20) or self.n_horizons != 4:
+                raise ValueError("Task-conditioned MoE requires horizons [1,5,10,20]")
+            del self.gate_fc
+            self.task_moe_fusion = TaskConditionedThreeExpertFusion(variant)
+
+        if variant in FOUR_TASK_VARIANTS:
+            from cmgm.models.four_task_moe import FourTaskMoEFusion
+            if tuple(MULTI_HORIZONS) != (1, 5, 10, 20) or self.n_horizons != 4:
+                raise ValueError("Four-task MoE requires horizons [1,5,10,20]")
+            # The original D0B shared modules are already constructed in their
+            # normal RNG order. Only the replaced gate is removed.
+            del self.gate_fc
+            self.four_task_moe_fusion = FourTaskMoEFusion(variant)
+
+        if variant in MASK_MOE_VARIANTS:
+            from cmgm.models.short_long_mask_moe import ShortLongMaskedMoE
+            if tuple(MULTI_HORIZONS) != (1, 5, 10, 20) or self.n_horizons != 4:
+                raise ValueError("Short/long masked MoE requires horizons [1,5,10,20]")
+            # Build the unchanged D0B modules first; the old gate is replaced.
+            del self.gate_fc
+            self.short_long_mask_moe = ShortLongMaskedMoE(variant)
 
         if variant == "switching_latent_balanced_4source_utility_moe":
             from cmgm.models.four_source_utility_moe import FourSourcePredictiveMoE
@@ -2288,7 +2408,8 @@ class HeteroMixHopCMGM(nn.Module):
     def _temp_weighted_spatial(self, x: torch.Tensor, return_nodes: bool = False,
                                return_pre_nodes: bool = False,
                                uniform_time: bool = False,
-                               bypass_graph: bool = False):
+                               bypass_graph: bool = False,
+                               return_sequence: bool = False):
         """
         The TempWeighted spatial branch (shared by temporal_weighted_graph
         and the RegimeRPETransformer family):
@@ -2317,10 +2438,18 @@ class HeteroMixHopCMGM(nn.Module):
         h = self.gcn_norm(h2)
         if return_pre_nodes:
             if return_nodes:
+                if return_sequence:
+                    return self.type_pool(h), h, H, H_seq
                 return self.type_pool(h), h, H
+            if return_sequence:
+                return self.type_pool(h), H, H_seq
             return self.type_pool(h), H
         if return_nodes:
+            if return_sequence:
+                return self.type_pool(h), h, H_seq
             return self.type_pool(h), h                               # (B,64), (B,N,64)
+        if return_sequence:
+            return self.type_pool(h), H_seq
         return self.type_pool(h)                                       # (B, 64)
 
     def _temporal_weighted_graph_forward(self, x: torch.Tensor,
@@ -2502,14 +2631,56 @@ class HeteroMixHopCMGM(nn.Module):
         return pred
 
     def _market_token_predict(self, h_spatial: torch.Tensor,
-                              h_temporal: torch.Tensor, return_fused: bool = False):
+                              h_temporal: torch.Tensor, return_fused: bool = False,
+                              *, s_nodes: torch.Tensor = None,
+                              history: torch.Tensor = None,
+                              force_uniform_history_attention: bool = False,
+                              return_aux: bool = False):
         """Apply the existing gated fusion and prediction head unchanged."""
         batch_size = h_spatial.shape[0]
+        if self.variant == NODE_HISTORY_CONCAT_VARIANT:
+            s_global, t_global = self.gcn_proj(h_spatial), self.lstm_proj(h_temporal)
+            fused = F.gelu(self.global_concat_fusion(torch.cat([s_global, t_global], dim=-1)))
+            pred = self.head(fused).view(batch_size, self.n_horizons, self.n_commodities)
+            return (pred, fused) if return_fused else pred
+        if self.variant in NODE_HISTORY_VARIANTS:
+            if s_nodes is None or history is None:
+                raise ValueError("Node-history variants require live commodity nodes and temporal history")
+            s_global, t_global = self.gcn_proj(h_spatial), self.lstm_proj(h_temporal)
+            f_nodes, aux = self.node_history_readout(
+                s_nodes, history, s_global, t_global,
+                force_uniform_attention=force_uniform_history_attention,
+                return_attention=True,
+            )
+            pred = apply_original_head_per_node(
+                self.head, f_nodes, self.n_horizons, self.n_commodities
+            )
+            return (pred, aux) if return_aux else pred
         if self.variant == "switching_latent_balanced_horizon_tensor_fusion":
             fused = self.horizon_tensor_fusion(
                 self.gcn_proj(h_spatial), self.lstm_proj(h_temporal)
             )
             pred = self._predict_from_horizon_states(fused)
+            return (pred, fused) if return_fused else pred
+        if self.variant in TASK_MOE_VARIANTS:
+            fused = self.task_moe_fusion(
+                self.gcn_proj(h_spatial), self.lstm_proj(h_temporal),
+                h_spatial, h_temporal,
+            )
+            pred = self._predict_from_horizon_states(fused)
+            return (pred, fused) if return_fused else pred
+        if self.variant in (
+            "switching_latent_balanced_mean_fusion",
+            "switching_latent_balanced_consensus_discrepancy_fusion",
+        ):
+            s, t = self.gcn_proj(h_spatial), self.lstm_proj(h_temporal)
+            if self.variant == "switching_latent_balanced_mean_fusion":
+                fused = 0.5 * (s + t)
+            else:
+                fused = self.consensus_discrepancy_fusion(s, t)
+            pred = self.head(fused)
+            shape = (batch_size, self.n_horizons, self.n_commodities) if self.n_horizons > 1 else (batch_size, self.n_commodities)
+            pred = pred.view(*shape)
             return (pred, fused) if return_fused else pred
         if self.variant == "switching_latent_balanced_moe_fusion":
             fused = self.moe_fusion(h_spatial, h_temporal,
@@ -2657,6 +2828,43 @@ class HeteroMixHopCMGM(nn.Module):
         slope_scale: float = 1.0,
     ) -> torch.Tensor:
         """D0 temporal replacement with the unchanged spatial/fusion/head path."""
+        if self.variant == "switching_latent_balanced_lag_factor_fusion":
+            return self.lag_factor_forward(x)
+        if self.variant in NODE_HISTORY_VARIANTS:
+            prediction, _ = self.node_history_forward(
+                x, temporal_kwargs={
+                    "forced_probabilities": forced_probabilities,
+                    "zero_readout_component": zero_readout_component,
+                    "zero_latent_memory": zero_latent_memory,
+                    "zero_regime_memory_bias": zero_regime_memory_bias,
+                    "forced_rpe_probabilities": forced_rpe_probabilities,
+                    "slope_scale": slope_scale,
+                },
+            )
+            return prediction
+        if self.variant in (*FOUR_TASK_VARIANTS, *MASK_MOE_VARIANTS):
+            h_spatial = self._temp_weighted_spatial(x)
+            h_temporal, live_memory, live_latent = self.switching_latent_transformer(
+                x,
+                forced_probabilities=forced_probabilities,
+                zero_readout_component=zero_readout_component,
+                zero_latent_memory=zero_latent_memory,
+                zero_regime_memory_bias=zero_regime_memory_bias,
+                forced_rpe_probabilities=forced_rpe_probabilities,
+                slope_scale=slope_scale,
+                return_live_sequences=True,
+            )
+            fusion = (self.four_task_moe_fusion if self.variant in FOUR_TASK_VARIANTS
+                      else self.short_long_mask_moe)
+            fused = fusion(
+                self.gcn_proj(h_spatial), self.lstm_proj(h_temporal),
+                live_memory, live_latent,
+            )
+            pred = fusion.predict(self.head, fused, self.n_commodities)
+            if debug:
+                print(f"  [{self.variant}] live H={list(live_memory.shape)} "
+                      f"live Z={list(live_latent.shape)} → {list(pred.shape)}")
+            return pred
         h_spatial = self._temp_weighted_spatial(x)
         h_temporal = self.switching_latent_transformer(
             x,
@@ -2672,11 +2880,62 @@ class HeteroMixHopCMGM(nn.Module):
         else:
             pred = self._market_token_predict(h_spatial, h_temporal)
         if debug:
+            fusion_name = "task-conditioned MoE" if self.variant in TASK_MOE_VARIANTS else "gate"
             print(
                 f"  [{self.variant}] h_spatial={list(h_spatial.shape)} "
-                f"h_temporal={list(h_temporal.shape)} → gate → {list(pred.shape)}"
+                f"h_temporal={list(h_temporal.shape)} → {fusion_name} → {list(pred.shape)}"
             )
         return pred
+
+    def lag_factor_forward(self, x: torch.Tensor, *,
+                           remove_correction: bool = False,
+                           uniform_lags: bool = False,
+                           exposure_permutation: torch.Tensor = None,
+                           return_components: bool = False):
+        """One unchanged spatial and temporal pass, with live factor inputs."""
+        if self.variant != "switching_latent_balanced_lag_factor_fusion":
+            raise ValueError('Only the lag-factor variant uses this prediction path')
+        h_spatial, nodes = self._temp_weighted_spatial(x, return_nodes=True)
+        h_temporal, history, regime = self.switching_latent_transformer(
+            x, return_memory=True, return_live_probabilities=True
+        )
+        start, end = self.commodity_indices
+        commodity_nodes = nodes[:, start:end]
+        assert commodity_nodes.shape == (x.shape[0], self.n_commodities, 64)
+        return self.lag_factor_fusion(
+            self.gcn_proj(h_spatial), self.lstm_proj(h_temporal),
+            commodity_nodes, history, regime, self.head,
+            remove_correction=remove_correction, uniform_lags=uniform_lags,
+            exposure_permutation=exposure_permutation,
+            return_components=return_components,
+        )
+
+    def node_history_forward(self, x: torch.Tensor, *,
+                             force_uniform_attention: bool = False,
+                             temporal_kwargs: dict = None):
+        """Run both existing encoders once and return prediction plus live-readout diagnostics.
+
+        This explicit interface is used for post-fit readout diagnostics. Returned
+        predictions remain connected to both encoders; callers detach only when
+        serializing diagnostics.
+        """
+        if self.variant not in NODE_HISTORY_VARIANTS:
+            raise ValueError("node_history_forward is available only for node-history variants")
+        h_spatial, spatial_nodes = self._temp_weighted_spatial(x, return_nodes=True)
+        kwargs = dict(temporal_kwargs or {})
+        h_temporal, history = self.switching_latent_transformer(
+            x, **kwargs, return_memory=True
+        )
+        start, end = self.commodity_indices
+        node_indices = torch.arange(start, end, device=spatial_nodes.device)
+        commodity_nodes = spatial_nodes.index_select(1, node_indices)
+        s_nodes = self.gcn_proj(commodity_nodes)
+        prediction, aux = self._market_token_predict(
+            h_spatial, h_temporal, s_nodes=s_nodes, history=history,
+            force_uniform_history_attention=force_uniform_attention,
+            return_aux=True,
+        )
+        return prediction, aux
 
     def _pregnn_local_skip_forward(self, x: torch.Tensor, debug: bool = False):
         """Unchanged D0B global path plus one shared pre-GNN local residual."""
@@ -2951,7 +3210,14 @@ class HeteroMixHopCMGM(nn.Module):
         if self.variant in (
             "switching_latent_transformer",
             "switching_latent_balanced_readout",
+            *TASK_MOE_VARIANTS,
+            *FOUR_TASK_VARIANTS,
+            *MASK_MOE_VARIANTS,
+            "switching_latent_balanced_lag_factor_fusion",
             "switching_latent_balanced_horizon_tensor_fusion",
+            "switching_latent_balanced_mean_fusion",
+            "switching_latent_balanced_consensus_discrepancy_fusion",
+            *NODE_HISTORY_ALL_VARIANTS,
             "switching_latent_balanced_residual_complementary_fusion",
             "switching_latent_balanced_moe_fusion",
             "switching_latent_balanced_candidate_2expert_moe",
@@ -3088,6 +3354,21 @@ class HeteroMixHopCMGM(nn.Module):
 
     def get_gate_stats(self, x, edge_index=None, edge_weight=None):
         """Return gating statistics (only meaningful for gate variants)."""
+        if self.variant == "switching_latent_balanced_mean_fusion":
+            return {"fusion": "parameter_free_mean", "trainable_fusion_parameters": 0}
+        if self.variant == "switching_latent_balanced_consensus_discrepancy_fusion":
+            modes = [(module, module.training) for module in self.modules()]
+            self.eval()
+            try:
+                with torch.no_grad():
+                    h_spatial = self._temp_weighted_spatial(x)
+                    h_temporal = self.switching_latent_transformer(x)
+                    return self.consensus_discrepancy_fusion.diagnostics(
+                        self.gcn_proj(h_spatial), self.lstm_proj(h_temporal)
+                    )
+            finally:
+                for module, training in modes:
+                    module.training = training
         if self.variant == "switching_latent_balanced_horizon_tensor_fusion":
             was_training = self.training
             self.eval()
@@ -3134,6 +3415,7 @@ class HeteroMixHopCMGM(nn.Module):
                         "moe_gamma": self.moe_fusion.gamma}
             finally:
                 self.train(was_training)
+
         if self.variant in (
             "market_token_transformer",
             "market_dispersion_transformer",
@@ -3142,6 +3424,7 @@ class HeteroMixHopCMGM(nn.Module):
             "switching_filter_rpe",
             "switching_latent_transformer",
             "switching_latent_balanced_readout",
+            "switching_latent_balanced_lag_factor_fusion",
             "switching_latent_balanced_residual_complementary_fusion",
             "switching_latent_balanced_moe_fusion",
             "switching_latent_balanced_candidate_2expert_moe",
@@ -3175,6 +3458,7 @@ class HeteroMixHopCMGM(nn.Module):
                     if self.variant in (
                         "switching_latent_transformer",
                         "switching_latent_balanced_readout",
+            "switching_latent_balanced_lag_factor_fusion",
                         "switching_latent_balanced_residual_complementary_fusion",
                         "switching_latent_balanced_moe_fusion",
                         "switching_latent_balanced_candidate_2expert_moe",
@@ -3348,3 +3632,40 @@ class HeteroMixHopCMGM(nn.Module):
             'gate_max':  gate.max().item(),
             'mixhop_diff': (h1 - h2).norm().item(),
         }
+
+    @torch.no_grad()
+    def consensus_discrepancy_diagnostic(self, x: torch.Tensor, *,
+                                         disable_correction: bool = False) -> dict:
+        """Read-only diagnostics; optionally intervene with fused=c.
+
+        This frozen-model intervention does not alter parameters, training state,
+        optimizer state, or the normal prediction path.
+        """
+        if self.variant != "switching_latent_balanced_consensus_discrepancy_fusion":
+            raise ValueError("Consensus-discrepancy diagnostics require its dedicated variant")
+        modes = [(module, module.training) for module in self.modules()]
+        self.eval()
+        try:
+            h_spatial = self._temp_weighted_spatial(x)
+            h_temporal = self.switching_latent_transformer(x)
+            s, t = self.gcn_proj(h_spatial), self.lstm_proj(h_temporal)
+            fused, parts = self.consensus_discrepancy_fusion(
+                s, t, disable_correction=disable_correction, return_components=True
+            )
+            prediction = self.head(fused)
+            if self.n_horizons > 1:
+                prediction = prediction.view(x.shape[0], self.n_horizons, self.n_commodities)
+            else:
+                prediction = prediction.view(x.shape[0], self.n_commodities)
+            return {
+                **self.consensus_discrepancy_fusion.diagnostics(s, t),
+                "disable_correction": bool(disable_correction),
+                "prediction": prediction,
+                "fused": fused,
+                "applied_delta_l2_mean_per_sample": float(
+                    parts["applied_delta"].norm(dim=-1).mean()
+                ),
+            }
+        finally:
+            for module, training in modes:
+                module.training = training

@@ -328,6 +328,7 @@ class SwitchingLatentTransformerBranch(nn.Module):
         super().__init__()
         self.K = int(K)
         self.z_dim = int(z_dim)
+        self.d_model = int(d_model)
         self.balanced_readout = bool(balanced_readout)
         self.horizon_specific_state_readout = bool(horizon_specific_state_readout)
         self.forecast_horizons = tuple(forecast_horizons or (1, 5, 10, 20))
@@ -890,9 +891,12 @@ class SwitchingLatentTransformerBranch(nn.Module):
                          zero_latent_memory: bool = False,
                          zero_regime_memory_bias: bool = False,
                          forced_rpe_probabilities: torch.Tensor = None,
-                         slope_scale: float = 1.0) -> torch.Tensor:
+                         slope_scale: float = 1.0,
+                         return_memory: bool = False,
+                         return_live_probabilities: bool = False,
+                         return_live_sequences: bool = False):
         long_memory = self.long_memory(tokens)
-        _, latent_states, _ = self.latent_forward(
+        probabilities, latent_states, _ = self.latent_forward(
             long_memory,
             forced_probabilities=forced_probabilities,
             zero_latent_memory=zero_latent_memory,
@@ -914,7 +918,15 @@ class SwitchingLatentTransformerBranch(nn.Module):
         self.last_long_memory = long_memory.detach()
         self.last_h_last = h_last.detach()
         self.last_z_last = z_last.detach()
-        return output
+        if return_live_sequences:
+            if return_memory or return_live_probabilities:
+                raise ValueError('return_live_sequences is a separate live-tensor interface')
+            return output, long_memory, latent_states
+        if return_live_probabilities:
+            if not return_memory:
+                raise ValueError('Live probabilities require return_memory=True')
+            return output, long_memory, probabilities[:, -1]
+        return (output, long_memory) if return_memory else output
 
     def forward(self, x: torch.Tensor,
                 forced_probabilities: torch.Tensor = None,
@@ -922,7 +934,10 @@ class SwitchingLatentTransformerBranch(nn.Module):
                 zero_latent_memory: bool = False,
                 zero_regime_memory_bias: bool = False,
                 forced_rpe_probabilities: torch.Tensor = None,
-                slope_scale: float = 1.0) -> torch.Tensor:
+                slope_scale: float = 1.0,
+                return_memory: bool = False,
+                return_live_probabilities: bool = False,
+                return_live_sequences: bool = False):
         tokens = self.encode_market_tokens(x)
         return self.temporal_forward(
             tokens,
@@ -932,6 +947,9 @@ class SwitchingLatentTransformerBranch(nn.Module):
             zero_regime_memory_bias=zero_regime_memory_bias,
             forced_rpe_probabilities=forced_rpe_probabilities,
             slope_scale=slope_scale,
+            return_memory=return_memory,
+            return_live_probabilities=return_live_probabilities,
+            return_live_sequences=return_live_sequences,
         )
 
     def set_epoch(self, epoch: int) -> float:

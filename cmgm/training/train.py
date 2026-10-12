@@ -440,6 +440,11 @@ def validate_epoch(
         GLOBAL_MIXTURE_VARIANT,
         TS_VARIANT,
         'switching_latent_balanced_horizon_tensor_fusion',
+        'switching_latent_balanced_mean_fusion',
+        'switching_latent_balanced_consensus_discrepancy_fusion',
+        'switching_latent_balanced_concat_fusion',
+        'switching_latent_balanced_node_history_mean',
+        'switching_latent_balanced_node_history_attention',
         UTILITY_ROUTED_MOE_VARIANT, FOUR_SOURCE_VARIANT,
         'switching_latent_balanced_pregnn_local_skip',
     )
@@ -712,6 +717,11 @@ def train(
         GLOBAL_MIXTURE_VARIANT,
         TS_VARIANT,
         'switching_latent_balanced_horizon_tensor_fusion',
+        'switching_latent_balanced_mean_fusion',
+        'switching_latent_balanced_consensus_discrepancy_fusion',
+        'switching_latent_balanced_concat_fusion',
+        'switching_latent_balanced_node_history_mean',
+        'switching_latent_balanced_node_history_attention',
         UTILITY_ROUTED_MOE_VARIANT, FOUR_SOURCE_VARIANT,
         'switching_latent_balanced_pregnn_local_skip',
     )

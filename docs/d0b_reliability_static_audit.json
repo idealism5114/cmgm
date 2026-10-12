@@ -1,0 +1,32 @@
+{
+  "status": "STATIC_AND_SYNTHETIC_CHECKS_ONLY",
+  "git_commit": "3b0d13463d03a1d0fccf0107a06292b64dfd5018",
+  "worktree_status_before_manifest_write": " M cmgm/models/hetero_mixhop_model.py\n M cmgm/models/switching_latent_transformer.py\n M cmgm/training/train.py\n?? cmgm/interpretability/\n?? cmgm/models/consensus_discrepancy_fusion.py\n?? cmgm/models/directed_relation_readout.py\n?? cmgm/models/lag_factor_fusion.py\n?? cmgm/models/node_history_readout.py\n?? cmgm/models/phase4_variants.py\n?? cmgm/models/phase5_variants.py\n?? cmgm/models/phase6_variants.py\n?? cmgm/scripts/d0b_consensus_discrepancy_fusion.py\n?? cmgm/scripts/d0b_directed_relation_readout.py\n?? cmgm/scripts/d0b_global_fusion_multiseed.py\n?? cmgm/scripts/d0b_global_fusion_test.py\n?? cmgm/scripts/d0b_lag_factor_fusion.py\n?? cmgm/scripts/d0b_node_history_readout.py\n?? cmgm/scripts/d0b_reliability.py\n?? cmgm/scripts/phase1_data_fingerprint_diagnostic.py\n?? cmgm/scripts/phase1_interpretability_extraction.py\n?? cmgm/scripts/phase1_interpretability_report.py\n?? cmgm/scripts/phase2_analysis.py\n?? cmgm/scripts/phase2_figures.py\n?? cmgm/scripts/phase2_finalize.py\n?? cmgm/scripts/phase2_report.py\n?? cmgm/scripts/phase2_summary_table.py\n?? cmgm/scripts/phase3_figures.py\n?? cmgm/scripts/phase3_finalize.py\n?? cmgm/scripts/phase3_interventions.py\n?? cmgm/scripts/phase3_report.py\n?? cmgm/scripts/phase4_ablation.py\n?? cmgm/scripts/phase4_analysis.py\n?? cmgm/scripts/phase4_figures.py\n?? cmgm/scripts/phase4_finalize.py\n?? cmgm/scripts/phase4_report.py\n?? cmgm/scripts/phase5_analysis.py\n?? cmgm/scripts/phase5_figures.py\n?? cmgm/scripts/phase5_report.py\n?? cmgm/scripts/phase5a_diagnostics.py\n?? cmgm/scripts/phase5b_controls.py\n?? cmgm/scripts/phase5b_diagnostics.py\n?? cmgm/scripts/phase6_analysis.py\n?? cmgm/scripts/phase6_figures.py\n?? cmgm/scripts/phase6_fusion.py\n?? cmgm/scripts/phase6_report.py\n?? cmgm/scripts/phase6_representations.py\n?? docs/consensus_discrepancy_fusion.md\n?? docs/d0b_lag_factor_fusion.md\n?? docs/d0b_node_history_readout.md\n?? docs/d0b_reliability.md\n?? docs/d0b_reliability_protocol.json\n?? interpretability/\n?? tests/test_consensus_discrepancy_fusion.py\n?? tests/test_d0b_reliability.py\n?? tests/test_node_history_readout.py\n",
+  "source_hashes": {
+    "cmgm/models/hetero_mixhop_model.py": "af8e2a797e23f311fb35d7e66c582213e05eb3a6979999d304a5b696362f2914",
+    "cmgm/models/switching_latent_transformer.py": "668eb9a5ac053d9d997f0690570facf71a459ed81e2e98298c7cd5b98b35f4a5",
+    "cmgm/models/switching_transformer.py": "02ce1e7aa08435c9fb903a933dd08577629d3462b4dab4ef9bf9dd3b3ad6b0c3",
+    "cmgm/graph/adaptive_graph.py": "89b5276deca8cb32f28b31ad5ab058958884fd76a80539008961279969071875",
+    "cmgm/models/model.py": "96554a2b59982eccd36d4f0f5e894de3e70d3add55509d1cf9e7a3a4c9616360",
+    "cmgm/interpretability/d0b_reliability.py": "0fc9f66f392b08d4b82ae8b6b6152e91d2bde14e7983fc3848677e60eb519c6a",
+    "cmgm/interpretability/d0b_graph.py": "f157477f5b8d0bdfc92ca2b7cdd4f788320964e5d998bb8909609fb77ee5aed9",
+    "cmgm/scripts/d0b_reliability.py": "92d96825e3087e802bd610357816d4b2c2d977ef353caf664e8c53564eada2d6",
+    "cmgm/scripts/main_ablation.py": "c7c432e320b1d3f19b2a6ac5efc70abc16373c0179a16f41feccfd2037ee9ace",
+    "cmgm/scripts/d0b_node_history_readout.py": "a60fe906ba77070c7f7719e8251f020ce4de8380d8f5fb903900ad9bd7e33e5e",
+    "cmgm/config.py": "90f33c19d3067af019f1eb3fa5e45c43bf5ca492dba4fd5caeff91aed92558a0",
+    "cmgm/data/data_loader.py": "4e2661e574c9475cdd3afb6a24c1e81328a55126f437668d4c1ad6c7c9fd38f9",
+    "cmgm/training/metric_standard.py": "5a7c6f2080429af68a65c928aaf056dc7e5a046b7663bcc804458b87a4bae0d9"
+  },
+  "checkpoint": "/home/yangxiaotong/projects/myresearch/Commedities/checkpoints/d0b_node_history_readout/switching_latent_balanced_readout_seed42_20261006_231320_782593/best.pt",
+  "checkpoint_sha256": "6af1ca4264fb4f62ff0dabe05ffd3aa8d43c24c3b3b28464be936cc669065021",
+  "checkpoint_strict_load": "PASS",
+  "checkpoint_parameter_count": 520549,
+  "real_data_fingerprint_audit": "NOT_RUN",
+  "full_extraction": "TRAIN_VAL_MIGRATED_FROM_COMPLETED_ARTIFACTS",
+  "state_analysis": "VAL_COMPLETE_IN_MIGRATED_OUTPUT",
+  "route_analysis": "NOT_RUN",
+  "branch_analysis": "NOT_RUN",
+  "graph_analysis": "NOT_RUN",
+  "risk_monitor_fit": "NOT_RUN",
+  "bootstrap": "NOT_RUN"
+}
