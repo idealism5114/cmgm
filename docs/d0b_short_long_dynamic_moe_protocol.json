@@ -1,0 +1,72 @@
+{
+  "status": "NOT_RUN",
+  "seed": 42,
+  "configurations": {
+    "d0b": "switching_latent_balanced_readout",
+    "three-global": "switching_latent_balanced_task_moe_global",
+    "a-static": "switching_latent_balanced_existing_experts_task_static",
+    "a-dynamic": "switching_latent_balanced_existing_experts_task_dynamic",
+    "b-static": "switching_latent_balanced_residual_experts_task_static",
+    "b-dynamic": "switching_latent_balanced_residual_experts_task_dynamic"
+  },
+  "training": {
+    "seq_len": 20,
+    "feature_dim": 21,
+    "target_type": "return",
+    "horizons": [
+      1,
+      5,
+      10,
+      20
+    ],
+    "batch_size": 64,
+    "optimizer": "Adam",
+    "lr": 0.0001,
+    "weight_decay": 1e-05,
+    "max_epochs": 200,
+    "early_stopping_patience": 10,
+    "scheduler": "ReduceLROnPlateau(min,factor=0.5,patience=5)",
+    "prediction_loss": "sum_h Huber(delta=0.02)",
+    "native_switch_kl": "beta_max=5e-4,warmup=20 epochs",
+    "checkpoint_selection": "prediction-only four-horizon VAL Huber, batch-mean",
+    "train_shuffle": false,
+    "train_drop_last": true,
+    "full_eval_shuffle": false,
+    "full_eval_drop_last": false,
+    "moe_warmup": false,
+    "moe_auxiliary_loss": false
+  },
+  "selection": {
+    "primary": "VAL MAE@5d; decimal returns",
+    "checkpoint_selection": "prediction-only four-horizon VAL Huber, batch-mean",
+    "comparisons": [
+      [
+        "a-dynamic",
+        "a-static"
+      ],
+      [
+        "b-dynamic",
+        "b-static"
+      ],
+      [
+        "b-dynamic",
+        "d0b"
+      ],
+      [
+        "b-dynamic",
+        "three-global"
+      ]
+    ],
+    "decision": "Report strict lower/higher and absolute/relative differences; no TEST trigger.",
+    "caveat": "A vs B changes experts, shared path and normalization; not a single-factor routing contrast."
+  },
+  "permutation_seed": 42,
+  "temperature": 1.0,
+  "router_hidden": 16,
+  "residual_hidden": 16,
+  "router_final_init": "Normal(0,1e-3), bias=0",
+  "residual_final_init": "weight=0, bias=0",
+  "test_enabled": false,
+  "warm_start": false,
+  "freeze_backbone": false
+}

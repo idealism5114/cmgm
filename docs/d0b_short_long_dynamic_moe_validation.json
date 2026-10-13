@@ -1,0 +1,182 @@
+{
+  "status": "PREFLIGHT_PASS",
+  "formal_training": "NOT_RUN",
+  "real_data": "NOT_READ",
+  "test_evaluated": false,
+  "zero_residual_prediction_max_abs_diff": {
+    "switching_latent_balanced_residual_experts_task_static": 3.725290298461914e-08,
+    "switching_latent_balanced_residual_experts_task_dynamic": 3.725290298461914e-08
+  },
+  "parameters": {
+    "switching_latent_balanced_readout": {
+      "total": 520549,
+      "trainable": 520549
+    },
+    "switching_latent_balanced_task_moe_global": {
+      "total": 541352,
+      "trainable": 541352
+    },
+    "switching_latent_balanced_existing_experts_task_static": {
+      "total": 539995,
+      "trainable": 539995,
+      "experts": {
+        "shared": 1664,
+        "short_state": 4304,
+        "short_interaction": 4304,
+        "long_state": 7376,
+        "long_interaction": 9920
+      },
+      "router": 6,
+      "fusion_norm": 128,
+      "shared_expert_note": "A existing shared expert"
+    },
+    "switching_latent_balanced_existing_experts_task_dynamic": {
+      "total": 544475,
+      "trainable": 544475,
+      "experts": {
+        "shared": 1664,
+        "short_state": 4304,
+        "short_interaction": 4304,
+        "long_state": 7376,
+        "long_interaction": 9920
+      },
+      "router": 4486,
+      "fusion_norm": 128,
+      "shared_expert_note": "A existing shared expert"
+    },
+    "switching_latent_balanced_residual_experts_task_static": {
+      "total": 559275,
+      "trainable": 559275,
+      "experts": {
+        "short_state": 3408,
+        "short_interaction": 12752,
+        "long_state": 5712,
+        "long_interaction": 16848
+      },
+      "router": 6,
+      "fusion_norm": 0,
+      "shared_expert_note": "B shared expert reuses D0B gated state; no additional parameters"
+    },
+    "switching_latent_balanced_residual_experts_task_dynamic": {
+      "total": 563755,
+      "trainable": 563755,
+      "experts": {
+        "short_state": 3408,
+        "short_interaction": 12752,
+        "long_state": 5712,
+        "long_interaction": 16848
+      },
+      "router": 4486,
+      "fusion_norm": 0,
+      "shared_expert_note": "B shared expert reuses D0B gated state; no additional parameters"
+    }
+  },
+  "software": {
+    "python": "3.13.13",
+    "torch": "2.7.1+cu118",
+    "numpy": "2.5.3"
+  },
+  "git_commit": "b96b90d4cec13b0579f9ca19999f1d52ad9a98a0",
+  "git_status": " M cmgm/models/hetero_mixhop_model.py\n?? cmgm/models/short_long_dynamic_moe.py\n?? cmgm/scripts/d0b_short_long_dynamic_moe.py\n?? docs/d0b_short_long_dynamic_moe.md\n?? tests/test_short_long_dynamic_moe.py\n",
+  "source_sha256": {
+    "cmgm/config.py": "90f33c19d3067af019f1eb3fa5e45c43bf5ca492dba4fd5caeff91aed92558a0",
+    "cmgm/data/data_loader.py": "4e2661e574c9475cdd3afb6a24c1e81328a55126f437668d4c1ad6c7c9fd38f9",
+    "cmgm/data/feature_builder.py": "e0f77561d30e92a3afc58314708ff77dee56b7710e3555242646149062b4b5a1",
+    "cmgm/models/model.py": "4b58f8e7a7675dae3510ee2ad57b0a02e61f501b6a6efad51b7363991505d020",
+    "cmgm/models/hetero_mixhop_model.py": "ec7ccef50e2855173d36eb44beebc15195652a35d83a086bdfc99f43dfa4b5f7",
+    "cmgm/models/switching_latent_transformer.py": "0784387a1d2d59e8b57d55d5a42592bddac40da082ccbca720276471c28ee6de",
+    "cmgm/models/short_long_mask_moe.py": "8a680bd2199e3f40b0ad468073a3884677ae10423b407100d56fd0c472f50fee",
+    "cmgm/models/short_long_dynamic_moe.py": "d4e1aafa5830509fef0858e2e8b3b331c8eebfda8e788f6b31d794ae3ee8c122",
+    "cmgm/models/task_conditioned_moe.py": "03428b2208aa2645c063bf812f426f252d15290de20e10ef619a9369bf8f1dd1",
+    "cmgm/models/horizon_tensor_fusion.py": "bf0f087c772e8f19d83d1ca7373380a40f4baef34f90e3cc16a6c15300f7a2a0",
+    "cmgm/scripts/main_ablation.py": "c7c432e320b1d3f19b2a6ac5efc70abc16373c0179a16f41feccfd2037ee9ace",
+    "cmgm/scripts/d0b_task_conditioned_moe.py": "895d3358e28ac8fa45ccfcebc975cf00978563a0de7d5c52d12d809335ab5c39",
+    "cmgm/scripts/d0b_short_long_dynamic_moe.py": "461dabb27eb4f704a2705a36e8dee7dc419c4f5e98e0a06a7a43d999c38507e4",
+    "cmgm/training/train.py": "bb92ea57f752e93317dd0b9eb5387da4c50fba6f022c18439b911445861ed6c2",
+    "cmgm/training/metric_standard.py": "5a7c6f2080429af68a65c928aaf056dc7e5a046b7663bcc804458b87a4bae0d9"
+  },
+  "initial_worktree_status": "clean",
+  "applicable_AGENTS": "none found in ancestor/repository paths",
+  "initialization": {
+    "shared": {
+      "switching_latent_balanced_readout": {
+        "tensor_count": 135,
+        "parameter_elements": 520549,
+        "shared_max_abs_diff": 0.0,
+        "mismatch_count": 0,
+        "PASS": true
+      },
+      "switching_latent_balanced_task_moe_global": {
+        "tensor_count": 133,
+        "parameter_elements": 512293,
+        "shared_max_abs_diff": 0.0,
+        "mismatch_count": 0,
+        "PASS": true
+      },
+      "switching_latent_balanced_existing_experts_task_static": {
+        "tensor_count": 133,
+        "parameter_elements": 512293,
+        "shared_max_abs_diff": 0.0,
+        "mismatch_count": 0,
+        "PASS": true
+      },
+      "switching_latent_balanced_existing_experts_task_dynamic": {
+        "tensor_count": 133,
+        "parameter_elements": 512293,
+        "shared_max_abs_diff": 0.0,
+        "mismatch_count": 0,
+        "PASS": true
+      },
+      "switching_latent_balanced_residual_experts_task_static": {
+        "tensor_count": 135,
+        "parameter_elements": 520549,
+        "shared_max_abs_diff": 0.0,
+        "mismatch_count": 0,
+        "PASS": true
+      },
+      "switching_latent_balanced_residual_experts_task_dynamic": {
+        "tensor_count": 135,
+        "parameter_elements": 520549,
+        "shared_max_abs_diff": 0.0,
+        "mismatch_count": 0,
+        "PASS": true
+      }
+    },
+    "pairs": {
+      "switching_latent_balanced_existing_experts_task_dynamic": {
+        "tensor_count": 165,
+        "parameter_elements": 539989,
+        "shared_max_abs_diff": 0.0,
+        "mismatch_count": 0,
+        "PASS": true
+      },
+      "switching_latent_balanced_residual_experts_task_dynamic": {
+        "tensor_count": 171,
+        "parameter_elements": 559269,
+        "shared_max_abs_diff": 0.0,
+        "mismatch_count": 0,
+        "PASS": true
+      }
+    }
+  },
+  "tests": {
+    "new_suite": "15 passed in 10.25s",
+    "regression": "31 passed in 14.97s (13 then-current new tests + 18 existing MoE tests)",
+    "new_suite_path": "tests/test_short_long_dynamic_moe.py",
+    "new_suite_sha256": "fde6b65da4612aff109c20e99b6b83bf3b8dde6ba22cf635058b892e26b3277f",
+    "scope": "Synthetic tensors and synthetic CSVs only, temporary files. Three SGD fusion updates per new variant; one native training step per full-model integration test. No real training.",
+    "legacy_suites": [
+      "tests/test_short_long_mask_moe.py",
+      "tests/test_four_task_moe.py",
+      "tests/test_task_conditioned_moe.py"
+    ]
+  },
+  "not_run": [
+    "formal_training",
+    "real_train_val_data_loading",
+    "real_VAL_interventions",
+    "TEST",
+    "GPU_numerical_validation",
+    "multi_seed"
+  ]
+}

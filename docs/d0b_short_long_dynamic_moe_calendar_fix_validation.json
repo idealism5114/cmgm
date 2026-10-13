@@ -1,0 +1,83 @@
+{
+  "status": "PASS",
+  "splits": {
+    "train": {
+      "origins": 1396,
+      "sha256": "13fb97ef23784a698ec0f263b6a77eae74b368475747d89f620554c3b87c7c6e",
+      "seq_len": 20,
+      "horizons": [
+        1,
+        5,
+        10,
+        20
+      ],
+      "target_type": "return"
+    },
+    "val": {
+      "origins": 268,
+      "sha256": "3a25e30575c88a473b624a1978fc6ac3e1d39735696f44f1bff59f71230d1ce5",
+      "seq_len": 20,
+      "horizons": [
+        1,
+        5,
+        10,
+        20
+      ],
+      "target_type": "return"
+    }
+  },
+  "calendar": {
+    "strategy": "audited row counts + bounded effective-calendar reconstruction",
+    "raw_dates_removed": [
+      "2016-12-30",
+      "2017-01-03",
+      "2017-01-04",
+      "2017-01-05",
+      "2017-01-06",
+      "2017-01-09",
+      "2017-01-10",
+      "2017-01-11",
+      "2017-01-12",
+      "2017-01-13",
+      "2017-01-16"
+    ],
+    "train_rows": 1435,
+    "val_rows": 307,
+    "attempts": [
+      {
+        "price_cutoff": "2024-03-05 00:00:00",
+        "raw_common_rows": 1742,
+        "effective_common_rows": 1731,
+        "deficit": 11
+      },
+      {
+        "price_cutoff": "2024-03-20 00:00:00",
+        "raw_common_rows": 1753,
+        "effective_common_rows": 1742,
+        "deficit": 0
+      }
+    ],
+    "train_end_date": "2022-12-12 00:00:00",
+    "val_end_date": "2024-03-20 00:00:00",
+    "test_prices_parsed": false,
+    "fingerprint_reproduced": true
+  },
+  "formal_training": "NOT_RUN",
+  "test_evaluated": false,
+  "optimizer_created": false,
+  "regression_tests": {
+    "command": "OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 ../.venv/bin/python -m pytest -q tests/test_short_long_dynamic_moe.py -k 'restricted_csv or explicit_run_entry'",
+    "result": "3 passed, 13 deselected in 12.34s"
+  },
+  "reference_config": "experiments/d0b_short_long_mask_moe/switching_latent_balanced_readout_seed42_20261012_173338_417491/config.json",
+  "audit_comparison": "Full data_audit equality: split fingerprints, asset/commodity order, and dataset metadata; not merely matching counts.",
+  "note": "Readonly data audit ran the repaired calendar algorithm before addition of its informational progress print. No model, optimizer, training or TEST evaluator was invoked.",
+  "git_commit": "b96b90d4cec13b0579f9ca19999f1d52ad9a98a0",
+  "reference_config_sha256": "e78e35afef23062f589a96271c5f190dac425d893a321042e796caceab6c952d",
+  "post_fix_source_sha256": {
+    "cmgm/scripts/d0b_short_long_dynamic_moe.py": "75be08910520767f00f7e2fbdcfaa5fd29a73995739106cfd69031fdfbe00c33",
+    "tests/test_short_long_dynamic_moe.py": "77b587fa6ba20b21f550537e48294ee86d24ffc89f250e0689ff73e1d211f92e",
+    "cmgm/data/data_loader.py": "4e2661e574c9475cdd3afb6a24c1e81328a55126f437668d4c1ad6c7c9fd38f9",
+    "cmgm/data/feature_builder.py": "e0f77561d30e92a3afc58314708ff77dee56b7710e3555242646149062b4b5a1"
+  }
+}

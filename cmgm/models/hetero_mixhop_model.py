@@ -71,6 +71,7 @@ from cmgm.models.task_conditioned_moe import (
 )
 from cmgm.models.four_task_moe import FOUR_TASK_VARIANTS
 from cmgm.models.short_long_mask_moe import MASK_MOE_VARIANTS
+from cmgm.models.short_long_dynamic_moe import DYNAMIC_STUDY_VARIANTS, RESIDUAL_VARIANTS
 
 
 class _TypeInputProjection(nn.Module):
@@ -771,6 +772,7 @@ class HeteroMixHopCMGM(nn.Module):
             *TASK_MOE_VARIANTS,
             *FOUR_TASK_VARIANTS,
             *MASK_MOE_VARIANTS,
+            *DYNAMIC_STUDY_VARIANTS,
             "switching_latent_balanced_lag_factor_fusion",
             "switching_latent_balanced_horizon_tensor_fusion",
             "switching_latent_balanced_mean_fusion",
@@ -847,6 +849,7 @@ class HeteroMixHopCMGM(nn.Module):
                                                *TASK_MOE_VARIANTS,
                                                *FOUR_TASK_VARIANTS,
                                                *MASK_MOE_VARIANTS,
+                                               *DYNAMIC_STUDY_VARIANTS,
             "switching_latent_balanced_lag_factor_fusion",
                                                "switching_latent_balanced_horizon_tensor_fusion",
                                                "switching_latent_balanced_mean_fusion",
@@ -903,6 +906,7 @@ class HeteroMixHopCMGM(nn.Module):
                                            *TASK_MOE_VARIANTS,
                                            *FOUR_TASK_VARIANTS,
                                            *MASK_MOE_VARIANTS,
+                                           *DYNAMIC_STUDY_VARIANTS,
             "switching_latent_balanced_lag_factor_fusion",
                                            "switching_latent_balanced_horizon_tensor_fusion",
                                            "switching_latent_balanced_mean_fusion",
@@ -1175,6 +1179,7 @@ class HeteroMixHopCMGM(nn.Module):
                              *TASK_MOE_VARIANTS,
                              *FOUR_TASK_VARIANTS,
                              *MASK_MOE_VARIANTS,
+                             *DYNAMIC_STUDY_VARIANTS,
             "switching_latent_balanced_lag_factor_fusion",
                              "switching_latent_balanced_horizon_tensor_fusion",
                              "switching_latent_balanced_mean_fusion",
@@ -1380,6 +1385,7 @@ class HeteroMixHopCMGM(nn.Module):
             *TASK_MOE_VARIANTS,
             *FOUR_TASK_VARIANTS,
             *MASK_MOE_VARIANTS,
+            *DYNAMIC_STUDY_VARIANTS,
             "switching_latent_balanced_lag_factor_fusion",
             "switching_latent_balanced_horizon_tensor_fusion",
             "switching_latent_balanced_mean_fusion",
@@ -1653,6 +1659,17 @@ class HeteroMixHopCMGM(nn.Module):
             # normal RNG order. Only the replaced gate is removed.
             del self.gate_fc
             self.four_task_moe_fusion = FourTaskMoEFusion(variant)
+
+        if variant in DYNAMIC_STUDY_VARIANTS:
+            from cmgm.models.short_long_dynamic_moe import ShortLongDynamicMoE
+            if tuple(MULTI_HORIZONS) != (1, 5, 10, 20) or self.n_horizons != 4:
+                raise ValueError("Dynamic task MoE requires [1,5,10,20]")
+            if variant not in RESIDUAL_VARIANTS:
+                del self.gate_fc
+            branch = self.switching_latent_transformer
+            self.short_long_dynamic_moe = ShortLongDynamicMoE(
+                variant, dim=LSTM_HIDDEN_DIM, memory_dim=branch.d_model,
+                latent_dim=branch.z_dim, seq_len=SEQ_LEN)
 
         if variant in MASK_MOE_VARIANTS:
             from cmgm.models.short_long_mask_moe import ShortLongMaskedMoE
@@ -2842,7 +2859,7 @@ class HeteroMixHopCMGM(nn.Module):
                 },
             )
             return prediction
-        if self.variant in (*FOUR_TASK_VARIANTS, *MASK_MOE_VARIANTS):
+        if self.variant in (*FOUR_TASK_VARIANTS, *MASK_MOE_VARIANTS, *DYNAMIC_STUDY_VARIANTS):
             h_spatial = self._temp_weighted_spatial(x)
             h_temporal, live_memory, live_latent = self.switching_latent_transformer(
                 x,
@@ -2854,6 +2871,20 @@ class HeteroMixHopCMGM(nn.Module):
                 slope_scale=slope_scale,
                 return_live_sequences=True,
             )
+            if self.variant in DYNAMIC_STUDY_VARIANTS:
+                # Original gate sees RAW branch outputs; projections follow gate.
+                # Keep D0B's operation order and evaluate each branch only once.
+                z_base = None
+                if self.variant in RESIDUAL_VARIANTS:
+                    gate = torch.sigmoid(self.gate_fc(torch.cat((h_spatial, h_temporal), dim=-1)))
+                    t = self.lstm_proj(h_temporal)
+                    s = self.gcn_proj(h_spatial)
+                    z_base = gate * t + (1 - gate) * s
+                else:
+                    s, t = self.gcn_proj(h_spatial), self.lstm_proj(h_temporal)
+                fusion = self.short_long_dynamic_moe
+                states = fusion(s, t, live_memory, live_latent, z_base=z_base)
+                return fusion.predict(self.head, states, self.n_commodities)
             fusion = (self.four_task_moe_fusion if self.variant in FOUR_TASK_VARIANTS
                       else self.short_long_mask_moe)
             fused = fusion(
@@ -3213,6 +3244,7 @@ class HeteroMixHopCMGM(nn.Module):
             *TASK_MOE_VARIANTS,
             *FOUR_TASK_VARIANTS,
             *MASK_MOE_VARIANTS,
+            *DYNAMIC_STUDY_VARIANTS,
             "switching_latent_balanced_lag_factor_fusion",
             "switching_latent_balanced_horizon_tensor_fusion",
             "switching_latent_balanced_mean_fusion",
@@ -3354,6 +3386,29 @@ class HeteroMixHopCMGM(nn.Module):
 
     def get_gate_stats(self, x, edge_index=None, edge_weight=None):
         """Return gating statistics (only meaningful for gate variants)."""
+        if self.variant in DYNAMIC_STUDY_VARIANTS:
+            # These variants use a switching temporal branch, never the legacy
+            # LSTM path below. This is diagnostic inference, with module modes
+            # restored even when a bad input raises. No training RNG is used.
+            modes = [(module, module.training) for module in self.modules()]
+            try:
+                self.eval()
+                with torch.no_grad():
+                    self.forward(x, edge_index, edge_weight)
+                    fusion = self.short_long_dynamic_moe
+                    pi = fusion.last['pi'].double()
+                    return {
+                        "mode": self.variant,
+                        "routing_type": "sample_conditioned" if fusion.dynamic else "task_static",
+                        "group_order": ["short", "long"],
+                        "candidate_order": ["shared", "state", "interaction"],
+                        "routing_mean": pi.mean(0).cpu().tolist(),
+                        "mean_sample_entropy_nats":
+                            (-(pi * pi.clamp_min(1e-12).log()).sum(-1)).mean(0).cpu().tolist(),
+                    }
+            finally:
+                for module, training in modes:
+                    module.training = training
         if self.variant == "switching_latent_balanced_mean_fusion":
             return {"fusion": "parameter_free_mean", "trainable_fusion_parameters": 0}
         if self.variant == "switching_latent_balanced_consensus_discrepancy_fusion":

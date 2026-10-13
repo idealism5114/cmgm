@@ -1,0 +1,59 @@
+{
+  "status": "PASS",
+  "scope": "Read-only existing TRAIN routes and checkpoint metadata/strict load; no market data reconstruction, real prediction evaluation or training",
+  "test_evaluated": false,
+  "formal_postprocessing": "NOT_RUN",
+  "runs": [
+    {
+      "variant": "switching_latent_balanced_existing_experts_task_dynamic",
+      "run": "/home/yangxiaotong/projects/myresearch/Commedities/experiments/d0b_short_long_dynamic_moe/switching_latent_balanced_existing_experts_task_dynamic_seed42_20261012_211532_437924_825071",
+      "checkpoint": "/home/yangxiaotong/projects/myresearch/Commedities/checkpoints/d0b_short_long_dynamic_moe/switching_latent_balanced_existing_experts_task_dynamic_seed42_20261012_211532_437924_825071/best.pt",
+      "checkpoint_sha256": "056bac0417ff047081995ba82f2821aa3a26678640c071179542ec69dac5d86b",
+      "best_epoch": 62,
+      "train_origins": 1396,
+      "float32_mean_sum_error": 2.6226043701171875e-06,
+      "float64_mean_sum_error": 1.985398290216267e-09,
+      "strict_load": "PASS",
+      "repaired_override": "PASS"
+    },
+    {
+      "variant": "switching_latent_balanced_existing_experts_task_static",
+      "run": "/home/yangxiaotong/projects/myresearch/Commedities/experiments/d0b_short_long_dynamic_moe/switching_latent_balanced_existing_experts_task_static_seed42_20261012_210421_723303_808644",
+      "checkpoint": "/home/yangxiaotong/projects/myresearch/Commedities/checkpoints/d0b_short_long_dynamic_moe/switching_latent_balanced_existing_experts_task_static_seed42_20261012_210421_723303_808644/best.pt",
+      "checkpoint_sha256": "58d6d9f5f55f3275b84b7e0be2e46885b906b7b0c5653260377c81f4a5bf1622",
+      "best_epoch": 63,
+      "train_origins": 1396,
+      "float32_mean_sum_error": 3.933906555175781e-06,
+      "float64_mean_sum_error": 2.9802322387695312e-08,
+      "strict_load": "PASS",
+      "repaired_override": "PASS"
+    },
+    {
+      "variant": "switching_latent_balanced_residual_experts_task_dynamic",
+      "run": "/home/yangxiaotong/projects/myresearch/Commedities/experiments/d0b_short_long_dynamic_moe/switching_latent_balanced_residual_experts_task_dynamic_seed42_20261012_214831_175851_872875",
+      "checkpoint": "/home/yangxiaotong/projects/myresearch/Commedities/checkpoints/d0b_short_long_dynamic_moe/switching_latent_balanced_residual_experts_task_dynamic_seed42_20261012_214831_175851_872875/best.pt",
+      "checkpoint_sha256": "bd81cb6c6f28f540447e36dbc7026fd50cd4047e1e750e21c0516ed82761e8ab",
+      "best_epoch": 81,
+      "train_origins": 1396,
+      "float32_mean_sum_error": 2.8014183044433594e-06,
+      "float64_mean_sum_error": 1.110115110947163e-09,
+      "strict_load": "PASS",
+      "repaired_override": "PASS"
+    }
+  ],
+  "git_commit": "b96b90d4cec13b0579f9ca19999f1d52ad9a98a0",
+  "source_sha256": {
+    "cmgm/scripts/d0b_short_long_dynamic_moe.py": "87e3273181ff7c709ae17daddcf53a14ecf48440b27bca7cdfc3a4ed2af49d63",
+    "cmgm/models/short_long_dynamic_moe.py": "d4e1aafa5830509fef0858e2e8b3b331c8eebfda8e788f6b31d794ae3ee8c122",
+    "tests/test_short_long_dynamic_moe.py": "683ec464de1fafaa8f6f3c23a085f60b4341aaf7f15294e68689ac1af143fdf1"
+  },
+  "tests": {
+    "command": "OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 ../.venv/bin/python -m pytest -q tests/test_short_long_dynamic_moe.py",
+    "result": "18 passed in 14.13s",
+    "static_checks": [
+      "compileall PASS",
+      "git diff --check PASS"
+    ],
+    "scope": "Synthetic regression and one-step synthetic fixtures; no formal training. Recovery forbids train()/Adam and verifies original artifact bytes unchanged."
+  }
+}
